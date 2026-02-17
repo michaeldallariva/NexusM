@@ -90,7 +90,7 @@ NexusM is a single-file Windows executable that serves a web-based UI for managi
 1. Extract the portable package to a folder of your choice.
 2. Run `NexusM.exe`.
 3. A browser window will open to `http://localhost:8182`.
-4. Log in with the default username `admin` and set a PIN on first use.
+4. Log in with the default username `admin` and set a PIN on first use (000000 is the default one)
 5. Go to **Settings** to configure your media library folders, TMDB API key, and other preferences.
 6. Click **Scan Library** to index your media.
 
