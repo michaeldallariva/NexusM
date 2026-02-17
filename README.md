@@ -118,6 +118,10 @@ You are free to use and share NexusM for personal, non-commercial purposes. Comm
 
 See [LICENSE](LICENSE) for full terms.
 
+## Third-Party Libraries
+
+NexusM uses open-source libraries under their respective licenses (MIT, Apache-2.0, LGPL-2.1, BSD-2-Clause, Unlicense). See [LICENSE](LICENSE) for the complete list.
+
 ---
 
 ![Image](https://github.com/user-attachments/assets/3c4d404c-8993-480e-8713-b378d5cc13ad)
@@ -127,6 +131,4 @@ See [LICENSE](LICENSE) for full terms.
 ![Image](https://github.com/user-attachments/assets/ae8f5628-2120-4c70-a4c6-9bae49186c31)
 ![Image](https://github.com/user-attachments/assets/99163f59-da13-441c-be1b-fdd504ad3b4f)
 
-## Third-Party Libraries
 
-NexusM uses open-source libraries under their respective licenses (MIT, Apache-2.0, LGPL-2.1, BSD-2-Clause, Unlicense). See [LICENSE](LICENSE) for the complete list.
