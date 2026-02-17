@@ -1,0 +1,68 @@
+Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International
+
+Copyright (c) 2026 NexusM / NexusM.Org (Owned by Janeway & Wildman Limited UK)
+
+This work is licensed under the Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International License.
+
+You are free to:
+
+  Share - copy and redistribute the material in any medium or format.
+
+  The licensor cannot revoke these freedoms as long as you follow the
+  license terms.
+
+Under the following terms:
+
+  Attribution - You must give appropriate credit, provide a link to the
+  license, and indicate if changes were made. You may do so in any
+  reasonable manner, but not in any way that suggests the licensor
+  endorses you or your use.
+
+  NonCommercial - You may not use the material for commercial purposes.
+
+  NoDerivatives - If you remix, transform, or build upon the material,
+  you may not distribute the modified material.
+
+  No additional restrictions - You may not apply legal terms or
+  technological measures that legally restrict others from doing
+  anything the license permits.
+
+Notices:
+
+  You do not have to comply with the license for elements of the
+  material in the public domain or where your use is permitted by an
+  applicable exception or limitation.
+
+  No warranties are given. The license may not give you all of the
+  permissions necessary for your intended use. For example, other
+  rights such as publicity, privacy, or moral rights may limit how
+  you use the material.
+
+For the full legal text, see:
+https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode
+
+---
+
+Third-Party Licenses:
+
+This software uses the following open-source libraries, each under
+their own respective licenses:
+
+  - Microsoft.EntityFrameworkCore.Sqlite (MIT)
+  - Microsoft.Extensions.Configuration.Json (MIT)
+  - SixLabors.ImageSharp (Apache-2.0 / Six Labors Split License)
+  - Serilog.AspNetCore (Apache-2.0)
+  - Serilog.Sinks.Console (Apache-2.0)
+  - Serilog.Sinks.File (Apache-2.0)
+  - TagLibSharp (LGPL-2.1)
+  - MetadataExtractor (Apache-2.0)
+  - ini-parser-netstandard (MIT)
+  - PdfSharpCore (MIT)
+  - PDFtoImage (MIT)
+  - VersOne.Epub (Unlicense)
+  - System.Management (MIT)
+  - System.Security.Cryptography.ProtectedData (MIT)
+  - hls.js (Apache-2.0)
+  - epub.js (BSD-2-Clause)
+  - JSZip (MIT)

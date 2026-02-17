@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>NexusM</RootNamespace>
+    <AssemblyName>NexusM</AssemblyName>
+    <OutputType>WinExe</OutputType>
+    <Version>1.0.0</Version>
+    <Authors>NexusM</Authors>
+    <Description>Media Library Manager with Kestrel Web Server</Description>
+    <ApplicationIcon>favicon.ico</ApplicationIcon>
+    <!-- Docker-ready settings -->
+    <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- SQLite via EF Core -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.11" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.11">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="PdfSharpCore" Version="1.3.67" />
+    <!-- Music metadata reading (ID3 tags, FLAC, etc.) -->
+    <PackageReference Include="TagLibSharp" Version="2.3.0" />
+    <!-- EXIF/metadata reading for images (cross-platform) -->
+    <PackageReference Include="MetadataExtractor" Version="2.8.1" />
+    <!-- Image processing for thumbnail generation (pure managed .NET) -->
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+    <!-- JSON config support -->
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.1" />
+    <!-- Ini/conf file parsing -->
+    <PackageReference Include="ini-parser-netstandard" Version="2.5.2" />
+    <!-- Serilog for structured logging -->
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
+    <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
+    <PackageReference Include="VersOne.Epub" Version="3.3.5" />
+    <!-- PDF page rendering to image (uses PDFium + SkiaSharp) -->
+    <PackageReference Include="PDFtoImage" Version="5.2.0" />
+    <!-- WMI access for GPU detection (Windows only) -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <!-- DPAPI for protecting share encryption keys on Windows -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Copy config file to output directory -->
+    <None Include="NexusM.conf" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Ensure wwwroot files are copied to output (needed when running exe directly outside Development mode) -->
+    <Content Update="wwwroot\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

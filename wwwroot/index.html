@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#121212">
+    <title>NexusM</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico">
+    <script>try{var t=localStorage.getItem('nexusm-theme');if(t==='blue')document.documentElement.classList.add('theme-blue');else if(t==='purple')document.documentElement.classList.add('theme-purple');}catch(e){}</script>
+    <link rel="stylesheet" href="/css/app.css?v=19">
+    <style>
+        /* Minimalist Icon System */
+        .nav-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px;
+            height: 20px;
+            flex-shrink: 0;
+        }
+        .nav-icon svg {
+            width: 18px;
+            height: 18px;
+            stroke: rgba(255, 255, 255, 0.45);
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            transition: stroke 0.2s ease;
+        }
+        .sidebar-nav a:hover .nav-icon svg,
+        .sidebar-nav a.active .nav-icon svg {
+            stroke: rgba(255, 255, 255, 0.9);
+        }
+
+        /* Logo favicon icon */
+        .logo-favicon {
+            width: 28px;
+            height: 28px;
+            flex-shrink: 0;
+            border-radius: 6px;
+        }
+
+        /* Player placeholder icon */
+        .player-placeholder svg {
+            width: 22px;
+            height: 22px;
+            stroke: rgba(255, 255, 255, 0.25);
+            fill: none;
+            stroke-width: 1.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+    </style>
+    <script src="/js/hls.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+
+        <!-- Sidebar Navigation -->
+        <nav class="sidebar" id="sidebar">
+            <div class="sidebar-logo">
+                <img class="logo-favicon" src="/favicon.ico" alt="NexusM">
+                <span class="nav-label logo-text">Nexus<span class="logo-green">M</span></span>
+                <button class="sidebar-toggle" id="sidebar-toggle" title="Collapse sidebar">&laquo;</button>
+            </div>
+
+            <div class="sidebar-scroll">
+
+                <!-- Main -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title"><span class="nav-label">Main</span></div>
+                    <ul class="sidebar-nav">
+                        <li><a href="#" data-page="home" class="active">
+                            <span class="nav-icon"><svg><use href="#icon-home"/></svg></span>
+                            <span class="nav-label">Home</span>
+                            <span class="nav-badge live-badge nav-label">Now</span>
+                        </a></li>
+                    </ul>
+                </div>
+
+                <!-- Media -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title"><span class="nav-label">Media</span></div>
+                    <ul class="sidebar-nav">
+                        <li><a href="#" data-page="movies">
+                            <span class="nav-icon"><svg><use href="#icon-film"/></svg></span>
+                            <span class="nav-label">Movies/TV Shows</span>
+                            <span class="nav-badge nav-label" id="badge-movies">0</span>
+                        </a></li>
+                        <li><a href="#" data-page="music">
+                            <span class="nav-icon"><svg><use href="#icon-music"/></svg></span>
+                            <span class="nav-label">Music</span>
+                            <span class="nav-badge nav-label" id="badge-music">0</span>
+                        </a></li>
+                        <li><a href="#" data-page="musicvideos">
+                            <span class="nav-icon"><svg><use href="#icon-video"/></svg></span>
+                            <span class="nav-label">Music Videos</span>
+                            <span class="nav-badge nav-label" id="badge-musicvideos">0</span>
+                        </a></li>
+                    </ul>
+                </div>
+
+                <!-- Live -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title"><span class="nav-label">Live</span></div>
+                    <ul class="sidebar-nav">
+                        <li><a href="#" data-page="radio">
+                            <span class="nav-icon"><svg><use href="#icon-radio"/></svg></span>
+                            <span class="nav-label">Radio</span>
+                            <span class="nav-badge live-badge nav-label">LIVE</span>
+                        </a></li>
+                        <li><a href="#" data-page="internettv">
+                            <span class="nav-icon"><svg><use href="#icon-tv"/></svg></span>
+                            <span class="nav-label">Internet TV</span>
+                            <span class="nav-badge live-badge nav-label">LIVE</span>
+                        </a></li>
+                    </ul>
+                </div>
+
+                <!-- Library -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title"><span class="nav-label">Library</span></div>
+                    <ul class="sidebar-nav">
+                        <li><a href="#" data-page="pictures">
+                            <span class="nav-icon"><svg><use href="#icon-image"/></svg></span>
+                            <span class="nav-label">Pictures</span>
+                            <span class="nav-badge nav-label" id="badge-pictures">0</span>
+                        </a></li>
+                        <li><a href="#" data-page="ebooks">
+                            <span class="nav-icon"><svg><use href="#icon-book"/></svg></span>
+                            <span class="nav-label">eBooks</span>
+                            <span class="nav-badge nav-label" id="badge-ebooks">0</span>
+                        </a></li>
+                        <li><a href="#" data-page="actors">
+                            <span class="nav-icon"><svg><use href="#icon-users"/></svg></span>
+                            <span class="nav-label">Actors</span>
+                            <span class="nav-badge nav-label" id="badge-actors">0</span>
+                        </a></li>
+                    </ul>
+                </div>
+
+                <!-- Collections -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title"><span class="nav-label">Collections</span></div>
+                    <ul class="sidebar-nav">
+                        <li><a href="#" data-page="favourites">
+                            <span class="nav-icon"><svg><use href="#icon-heart"/></svg></span>
+                            <span class="nav-label">Favourites</span>
+                        </a></li>
+                        <li><a href="#" data-page="playlists">
+                            <span class="nav-icon"><svg><use href="#icon-list"/></svg></span>
+                            <span class="nav-label">Playlists</span>
+                        </a></li>
+                        <li><a href="#" data-page="mostplayed">
+                            <span class="nav-icon"><svg><use href="#icon-trending"/></svg></span>
+                            <span class="nav-label">Most Played</span>
+                        </a></li>
+                    </ul>
+                </div>
+
+                <!-- Admin -->
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title"><span class="nav-label">Admin</span></div>
+                    <ul class="sidebar-nav">
+                        <li><a href="#" data-page="analysis">
+                            <span class="nav-icon"><svg><use href="#icon-bar-chart"/></svg></span>
+                            <span class="nav-label">Analysis</span>
+                            <span class="nav-badge admin-badge nav-label">Smart</span>
+                        </a></li>
+                        <li><a href="#" data-page="insights">
+                            <span class="nav-icon"><svg><use href="#icon-trending"/></svg></span>
+                            <span class="nav-label">Insights</span>
+                            <span class="nav-badge admin-badge nav-label">Smart</span>
+                        </a></li>
+                        <li><a href="#" data-page="settings">
+                            <span class="nav-icon"><svg><use href="#icon-settings"/></svg></span>
+                            <span class="nav-label">Settings</span>
+                            <span class="nav-badge admin-badge nav-label">ADMIN</span>
+                        </a></li>
+                        <li><a href="#" data-page="rescan">
+                            <span class="nav-icon"><svg><use href="#icon-folder"/></svg></span>
+                            <span class="nav-label">Rescan Folders</span>
+                            <span class="nav-badge nav-label">
+                                <svg style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round"><use href="#icon-arrow-right"/></svg>
+                            </span>
+                        </a></li>
+                    </ul>
+                </div>
+
+                <!-- Status -->
+                <div class="sidebar-section sidebar-status">
+                    <div class="sidebar-section-title"><span class="nav-label">Status</span></div>
+                    <div class="status-block nav-label">
+                        <div class="status-row">
+                            <span class="status-label">Status</span>
+                            <span class="status-value status-ok">OK</span>
+                        </div>
+                        <div class="status-row">
+                            <span class="status-label">Storage used</span>
+                            <span class="status-value status-size-green" id="status-storage">--</span>
+                        </div>
+                        <div id="status-sizes" style="margin-top:6px"></div>
+                        <div class="status-separator"></div>
+                        <div class="status-shares-title">Media Shares</div>
+                        <div id="status-shares"></div>
+                    </div>
+                </div>
+
+
+            </div>
+            <div class="sidebar-version">BETA 0.96 (New World Order Edition)</div>
+        </nav>
+
+        <!-- Top Bar -->
+        <header class="topbar">
+            <button class="topbar-btn sidebar-expand-btn" id="sidebar-expand-btn" title="Expand sidebar" style="display:none">
+                <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round"><use href="#icon-menu"/></svg>
+            </button>
+            <div class="breadcrumb">
+                <span id="page-title">Home</span>
+            </div>
+            <div class="search-box">
+                <span class="search-icon">
+                    <svg style="width:16px;height:16px;stroke:rgba(255,255,255,0.4);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-search"/></svg>
+                </span>
+                <input type="text" id="global-search" placeholder="Search..." autocomplete="off">
+            </div>
+            <div class="topbar-actions">
+                <button class="topbar-btn" id="btn-scan" title="Scan Library">
+                    <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round"><use href="#icon-scan"/></svg>
+                </button>
+                <button class="topbar-btn" id="btn-refresh" title="Refresh">
+                    <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round"><use href="#icon-refresh"/></svg>
+                </button>
+                <button class="topbar-btn topbar-btn-logout" id="btn-logout" title="Log Out" style="display:none" onclick="App.logout()">
+                    <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-logout"/></svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="main-content" id="main-content">
+            <div class="spinner"></div>
+        </main>
+
+        <!-- Sidebar Overlay (mobile drawer backdrop) -->
+        <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
+        <!-- Player Bar -->
+        <footer class="player-bar player-hidden" id="player-bar">
+            <div class="mobile-progress-bar" id="mobile-progress-bar"><div class="mobile-progress-fill" id="mobile-progress-fill"></div></div>
+            <div class="player-track-info">
+                <div class="player-cover" id="player-cover">
+                    <div class="player-placeholder" style="display:flex;align-items:center;justify-content:center;width:100%;height:100%">
+                        <svg><use href="#icon-music-note"/></svg>
+                    </div>
+                </div>
+                <div class="player-track-text">
+                    <div class="player-track-title" id="player-title">No track playing</div>
+                    <div class="player-track-artist" id="player-artist">&nbsp;</div>
+                </div>
+                <button class="player-btn player-fav-btn" id="btn-player-fav" title="Add to Favourites">
+                    <svg class="player-fav-icon" style="width:18px;height:18px;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-heart"/></svg>
+                </button>
+                <div class="player-playlist-wrapper" style="position:relative">
+                    <button class="player-btn" id="btn-player-add-playlist" title="Add to Playlist">
+                        <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-plus"/></svg>
+                    </button>
+                    <div class="player-playlist-dropdown" id="player-playlist-dropdown"></div>
+                </div>
+                <button class="player-btn" id="btn-player-lyrics" title="Lyrics">
+                    <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                </button>
+            </div>
+            <div class="player-controls">
+                <div class="player-buttons">
+                    <button class="player-btn" id="btn-shuffle" title="Shuffle">
+                        <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-shuffle"/></svg>
+                    </button>
+                    <button class="player-btn" id="btn-prev" title="Previous">
+                        <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-skip-back"/></svg>
+                    </button>
+                    <button class="player-btn play-pause" id="btn-play" title="Play">
+                        <svg style="width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-play"/></svg>
+                    </button>
+                    <button class="player-btn" id="btn-next" title="Next">
+                        <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-skip-forward"/></svg>
+                    </button>
+                    <button class="player-btn" id="btn-repeat" title="Repeat">
+                        <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-repeat"/></svg>
+                    </button>
+                </div>
+                <div class="player-progress">
+                    <span class="player-time" id="time-current">0:00</span>
+                    <div class="progress-bar" id="progress-bar">
+                        <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+                    </div>
+                    <span class="player-time" id="time-total">0:00</span>
+                </div>
+            </div>
+            <div class="player-right">
+                <div class="volume-control">
+                    <svg style="width:16px;height:16px;stroke:rgba(255,255,255,0.45);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-volume"/></svg>
+                    <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="80">
+                </div>
+            </div>
+        </footer>
+
+        <!-- Mobile Bottom Navigation -->
+        <nav class="mobile-nav" id="mobile-nav">
+            <button class="mobile-nav-item active" data-page="home">
+                <svg class="mobile-nav-icon"><use href="#icon-home"/></svg>
+                <span>Home</span>
+            </button>
+            <button class="mobile-nav-item" data-page="movies">
+                <svg class="mobile-nav-icon"><use href="#icon-film"/></svg>
+                <span>Movies</span>
+            </button>
+            <button class="mobile-nav-item" data-page="music">
+                <svg class="mobile-nav-icon"><use href="#icon-music"/></svg>
+                <span>Music</span>
+            </button>
+            <button class="mobile-nav-item" data-page="library" id="mobile-nav-library">
+                <svg class="mobile-nav-icon"><use href="#icon-layers"/></svg>
+                <span>Library</span>
+            </button>
+            <button class="mobile-nav-item" data-page="settings">
+                <svg class="mobile-nav-icon"><use href="#icon-settings"/></svg>
+                <span>More</span>
+            </button>
+            <!-- Library sub-menu popup -->
+            <div class="mobile-library-menu" id="mobile-library-menu">
+                <button data-page="radio"><svg class="mobile-nav-icon"><use href="#icon-radio"/></svg> Radio</button>
+                <button data-page="internettv"><svg class="mobile-nav-icon"><use href="#icon-tv"/></svg> Internet TV</button>
+                <button data-page="musicvideos"><svg class="mobile-nav-icon"><use href="#icon-video"/></svg> Music Videos</button>
+                <button data-page="pictures"><svg class="mobile-nav-icon"><use href="#icon-image"/></svg> Pictures</button>
+                <button data-page="ebooks"><svg class="mobile-nav-icon"><use href="#icon-book"/></svg> eBooks</button>
+                <button data-page="actors"><svg class="mobile-nav-icon"><use href="#icon-users"/></svg> Actors</button>
+                <button data-page="favourites"><svg class="mobile-nav-icon"><use href="#icon-heart"/></svg> Favourites</button>
+                <button data-page="playlists"><svg class="mobile-nav-icon"><use href="#icon-list"/></svg> Playlists</button>
+                <button data-page="analysis"><svg class="mobile-nav-icon"><use href="#icon-bar-chart"/></svg> Analysis</button>
+            </div>
+        </nav>
+    </div>
+
+    <!-- SVG Icon Sprite (hidden) -->
+    <svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+        <symbol id="icon-home" viewBox="0 0 24 24">
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
+        </symbol>
+        <symbol id="icon-film" viewBox="0 0 24 24">
+            <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
+            <line x1="7" y1="2" x2="7" y2="22"/>
+            <line x1="17" y1="2" x2="17" y2="22"/>
+            <line x1="2" y1="12" x2="22" y2="12"/>
+            <line x1="2" y1="7" x2="7" y2="7"/>
+            <line x1="2" y1="17" x2="7" y2="17"/>
+            <line x1="17" y1="7" x2="22" y2="7"/>
+            <line x1="17" y1="17" x2="22" y2="17"/>
+        </symbol>
+        <symbol id="icon-music" viewBox="0 0 24 24">
+            <path d="M9 18V5l12-2v13"/>
+            <circle cx="6" cy="18" r="3"/>
+            <circle cx="18" cy="16" r="3"/>
+        </symbol>
+        <symbol id="icon-video" viewBox="0 0 24 24">
+            <polygon points="23 7 16 12 23 17 23 7"/>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+        </symbol>
+        <symbol id="icon-radio" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="2"/>
+            <path d="M16.24 7.76a6 6 0 0 1 0 8.49"/>
+            <path d="M7.76 16.24a6 6 0 0 1 0-8.49"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+            <path d="M4.93 19.07a10 10 0 0 1 0-14.14"/>
+        </symbol>
+        <symbol id="icon-tv" viewBox="0 0 24 24">
+            <rect x="2" y="7" width="20" height="15" rx="2" ry="2"/>
+            <polyline points="17 2 12 7 7 2"/>
+        </symbol>
+        <symbol id="icon-disc" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="10"/>
+            <circle cx="12" cy="12" r="3"/>
+        </symbol>
+        <symbol id="icon-mic" viewBox="0 0 24 24">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+        </symbol>
+        <symbol id="icon-music-note" viewBox="0 0 24 24">
+            <path d="M9 18V5l12-2v13"/>
+            <circle cx="6" cy="18" r="3"/>
+            <circle cx="18" cy="16" r="3"/>
+        </symbol>
+        <symbol id="icon-layers" viewBox="0 0 24 24">
+            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+            <polyline points="2 17 12 22 22 17"/>
+            <polyline points="2 12 12 17 22 12"/>
+        </symbol>
+        <symbol id="icon-image" viewBox="0 0 24 24">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
+        </symbol>
+        <symbol id="icon-book" viewBox="0 0 24 24">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </symbol>
+        <symbol id="icon-heart" viewBox="0 0 24 24">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+        </symbol>
+        <symbol id="icon-list" viewBox="0 0 24 24">
+            <line x1="8" y1="6" x2="21" y2="6"/>
+            <line x1="8" y1="12" x2="21" y2="12"/>
+            <line x1="8" y1="18" x2="21" y2="18"/>
+            <line x1="3" y1="6" x2="3.01" y2="6"/>
+            <line x1="3" y1="12" x2="3.01" y2="12"/>
+            <line x1="3" y1="18" x2="3.01" y2="18"/>
+        </symbol>
+        <symbol id="icon-clock" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+        </symbol>
+        <symbol id="icon-trending" viewBox="0 0 24 24">
+            <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/>
+            <polyline points="17 6 23 6 23 12"/>
+        </symbol>
+        <symbol id="icon-bar-chart" viewBox="0 0 24 24">
+            <line x1="12" y1="20" x2="12" y2="10"/>
+            <line x1="18" y1="20" x2="18" y2="4"/>
+            <line x1="6" y1="20" x2="6" y2="16"/>
+        </symbol>
+        <symbol id="icon-settings" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </symbol>
+        <symbol id="icon-tool" viewBox="0 0 24 24">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+        </symbol>
+        <symbol id="icon-folder" viewBox="0 0 24 24">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </symbol>
+        <symbol id="icon-arrow-right" viewBox="0 0 24 24">
+            <line x1="5" y1="12" x2="19" y2="12"/>
+            <polyline points="12 5 19 12 12 19"/>
+        </symbol>
+        <symbol id="icon-search" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </symbol>
+        <symbol id="icon-scan" viewBox="0 0 24 24">
+            <path d="M21 12a9 9 0 0 1-9 9"/>
+            <path d="M3 12a9 9 0 0 1 9-9"/>
+            <path d="M21 3v4h-4"/>
+            <path d="M3 21v-4h4"/>
+            <path d="M21 3l-5.5 5.5"/>
+            <path d="M3 21l5.5-5.5"/>
+        </symbol>
+        <symbol id="icon-refresh" viewBox="0 0 24 24">
+            <polyline points="23 4 23 10 17 10"/>
+            <polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+            <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+        </symbol>
+        <symbol id="icon-menu" viewBox="0 0 24 24">
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="18" x2="21" y2="18"/>
+        </symbol>
+        <symbol id="icon-chevron-left" viewBox="0 0 24 24">
+            <polyline points="15 18 9 12 15 6"/>
+        </symbol>
+        <symbol id="icon-chevron-down" viewBox="0 0 24 24">
+            <polyline points="6 9 12 15 18 9"/>
+        </symbol>
+        <symbol id="icon-plus" viewBox="0 0 24 24">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+        </symbol>
+        <symbol id="icon-download" viewBox="0 0 24 24">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+        </symbol>
+        <symbol id="icon-maximize" viewBox="0 0 24 24">
+            <polyline points="15 3 21 3 21 9"/>
+            <polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/>
+            <line x1="3" y1="21" x2="10" y2="14"/>
+        </symbol>
+        <symbol id="icon-shuffle" viewBox="0 0 24 24">
+            <polyline points="16 3 21 3 21 8"/>
+            <line x1="4" y1="20" x2="21" y2="3"/>
+            <polyline points="21 16 21 21 16 21"/>
+            <line x1="15" y1="15" x2="21" y2="21"/>
+            <line x1="4" y1="4" x2="9" y2="9"/>
+        </symbol>
+        <symbol id="icon-skip-back" viewBox="0 0 24 24">
+            <polygon points="19 20 9 12 19 4 19 20"/>
+            <line x1="5" y1="19" x2="5" y2="5"/>
+        </symbol>
+        <symbol id="icon-play" viewBox="0 0 24 24">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+        </symbol>
+        <symbol id="icon-pause" viewBox="0 0 24 24">
+            <line x1="6" y1="4" x2="6" y2="20"/>
+            <line x1="18" y1="4" x2="18" y2="20"/>
+        </symbol>
+        <symbol id="icon-skip-forward" viewBox="0 0 24 24">
+            <polygon points="5 4 15 12 5 20 5 4"/>
+            <line x1="19" y1="5" x2="19" y2="19"/>
+        </symbol>
+        <symbol id="icon-repeat" viewBox="0 0 24 24">
+            <polyline points="17 1 21 5 17 9"/>
+            <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
+            <polyline points="7 23 3 19 7 15"/>
+            <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+        </symbol>
+        <symbol id="icon-volume" viewBox="0 0 24 24">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+        </symbol>
+        <symbol id="icon-logout" viewBox="0 0 24 24">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+        </symbol>
+        <symbol id="icon-users" viewBox="0 0 24 24">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </symbol>
+        <symbol id="icon-lock" viewBox="0 0 24 24">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </symbol>
+        <symbol id="icon-file" viewBox="0 0 24 24">
+            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
+            <polyline points="13 2 13 9 20 9"/>
+        </symbol>
+        <symbol id="icon-file-text" viewBox="0 0 24 24">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10 9 9 9 8 9"/>
+        </symbol>
+        <!-- Mood icons -->
+        <symbol id="icon-mood-heart" viewBox="0 0 24 24">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+        </symbol>
+        <symbol id="icon-mood-cloud" viewBox="0 0 24 24">
+            <line x1="16" y1="13" x2="16" y2="21"/><line x1="8" y1="13" x2="8" y2="21"/><line x1="12" y1="15" x2="12" y2="23"/>
+            <path d="M20 16.58A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25"/>
+        </symbol>
+        <symbol id="icon-mood-book" viewBox="0 0 24 24">
+            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>
+        </symbol>
+        <symbol id="icon-mood-sun" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/>
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+            <line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </symbol>
+        <symbol id="icon-mood-eye" viewBox="0 0 24 24">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+        </symbol>
+        <symbol id="icon-mood-coffee" viewBox="0 0 24 24">
+            <path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/>
+            <line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/>
+        </symbol>
+        <symbol id="icon-mood-zap" viewBox="0 0 24 24">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </symbol>
+        <symbol id="icon-mood-rewind" viewBox="0 0 24 24">
+            <polygon points="11 19 2 12 11 5 11 19"/><polygon points="22 19 13 12 22 5 22 19"/>
+        </symbol>
+        <!-- System Power -->
+        <symbol id="icon-power" viewBox="0 0 24 24">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+        </symbol>
+        <symbol id="icon-reboot" viewBox="0 0 24 24">
+            <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </symbol>
+        <!-- Medals -->
+        <symbol id="icon-medal-gold" viewBox="0 0 24 24">
+            <circle cx="12" cy="14" r="7" fill="#FFD700" stroke="#B8860B" stroke-width="1"/>
+            <path d="M12 2L9 7h6L12 2z" fill="#FFD700" stroke="#B8860B" stroke-width=".5"/>
+            <path d="M8 3L6 7h3L8 3z" fill="#C0392B" stroke="none"/>
+            <path d="M16 3L18 7h-3L16 3z" fill="#2E86C1" stroke="none"/>
+            <text x="12" y="17.5" text-anchor="middle" font-size="9" font-weight="700" fill="#7B6800" font-family="Arial">1</text>
+        </symbol>
+        <symbol id="icon-medal-silver" viewBox="0 0 24 24">
+            <circle cx="12" cy="14" r="7" fill="#C0C0C0" stroke="#808080" stroke-width="1"/>
+            <path d="M12 2L9 7h6L12 2z" fill="#C0C0C0" stroke="#808080" stroke-width=".5"/>
+            <path d="M8 3L6 7h3L8 3z" fill="#C0392B" stroke="none"/>
+            <path d="M16 3L18 7h-3L16 3z" fill="#2E86C1" stroke="none"/>
+            <text x="12" y="17.5" text-anchor="middle" font-size="9" font-weight="700" fill="#505050" font-family="Arial">2</text>
+        </symbol>
+        <symbol id="icon-medal-bronze" viewBox="0 0 24 24">
+            <circle cx="12" cy="14" r="7" fill="#CD7F32" stroke="#8B5A2B" stroke-width="1"/>
+            <path d="M12 2L9 7h6L12 2z" fill="#CD7F32" stroke="#8B5A2B" stroke-width=".5"/>
+            <path d="M8 3L6 7h3L8 3z" fill="#C0392B" stroke="none"/>
+            <path d="M16 3L18 7h-3L16 3z" fill="#2E86C1" stroke="none"/>
+            <text x="12" y="17.5" text-anchor="middle" font-size="9" font-weight="700" fill="#5A3A1A" font-family="Arial">3</text>
+        </symbol>
+    </svg>
+
+    <audio id="audio-player" preload="auto"></audio>
+    <script src="/js/jszip.min.js"></script>
+    <script src="/js/epub.min.js"></script>
+    <script src="/js/app.js?v=29"></script>
+</body>
+</html>
