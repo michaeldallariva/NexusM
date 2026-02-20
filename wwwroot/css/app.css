@@ -803,6 +803,26 @@ body.mobile-player-active .main-content{padding-bottom:196px}
 .fetch-progress-fill{height:100%;background:var(--accent);border-radius:3px;transition:width .3s ease}
 .fetch-progress-text{font-size:12px;color:var(--text-muted)}
 
+/* Podcasts */
+.podcast-unplayed-badge{display:inline-block;background:var(--accent);color:#fff;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle}
+.podcast-delete-btn{position:absolute;top:6px;right:6px;background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:13px;opacity:0;transition:opacity .2s;padding:2px 5px;border-radius:var(--radius-sm)}
+.radio-card:hover .podcast-delete-btn{opacity:1}
+.podcast-delete-btn:hover{color:var(--danger)}
+.podcast-episode-list{display:flex;flex-direction:column;gap:2px}
+.podcast-episode-row{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-surface);border-radius:var(--radius);border:1px solid var(--border-color);cursor:default;transition:background .15s}
+.podcast-episode-row:hover{background:var(--bg-active)}
+.podcast-episode-played{opacity:0.5}
+.podcast-episode-info{flex:1;min-width:0;cursor:pointer}
+.podcast-episode-title{font-size:13px;font-weight:600;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.podcast-episode-meta{font-size:11px;color:var(--text-muted);margin-top:2px}
+.podcast-type-badge{display:inline-block;background:rgba(77,139,245,.15);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;flex-shrink:0}
+.podcast-type-video{background:rgba(230,126,34,.15);color:#e67e22}
+.podcast-played-btn{background:none;border:1px solid var(--border-color);border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-muted);font-size:12px;flex-shrink:0;transition:all .15s}
+.podcast-played-btn:hover{border-color:var(--accent);color:var(--accent)}
+.podcast-back-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--bg-surface);border:1px solid var(--border-color);border-radius:var(--radius);cursor:pointer;color:var(--text-secondary);font-size:13px;margin-bottom:16px;transition:all .15s}
+.podcast-back-btn:hover{background:var(--bg-active);color:var(--text-primary)}
+.podcast-discover-section{margin-top:32px;padding-top:24px;border-top:1px solid var(--border-color)}
+
 /* Internet TV */
 .btn-import-m3u{padding:8px 16px;background:var(--accent);border:1px solid var(--accent);border-radius:var(--radius);color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;white-space:nowrap;display:flex;align-items:center}
 .btn-import-m3u:hover{background:var(--accent-hover);border-color:var(--accent-hover)}

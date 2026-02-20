@@ -35,6 +35,8 @@ public class MusicApiController : ControllerBase
     private readonly RadioService _radio;
     private readonly TvChannelService _tvService;
     private readonly TvChannelsDbContext _tvDb;
+    private readonly PodcastService _podcastSvc;
+    private readonly PodcastsDbContext _podcastDb;
     private readonly UserFavouritesService _userFavs;
     private readonly MetadataService _metadata;
     private readonly ShareCredentialService _shareService;
@@ -50,6 +52,8 @@ public class MusicApiController : ControllerBase
         VideosDbContext videoDb,
         ActorsDbContext actorsDb,
         TvChannelsDbContext tvDb,
+        PodcastsDbContext podcastDb,
+        PodcastService podcastSvc,
         LibraryScannerService scanner,
         PictureScannerService picScanner,
         EBookScannerService ebookScanner,
@@ -74,6 +78,8 @@ public class MusicApiController : ControllerBase
         _videoDb = videoDb;
         _actorsDb = actorsDb;
         _tvDb = tvDb;
+        _podcastDb = podcastDb;
+        _podcastSvc = podcastSvc;
         _scanner = scanner;
         _picScanner = picScanner;
         _ebookScanner = ebookScanner;
@@ -1137,6 +1143,7 @@ tr:hover td{{background:#1a1a2e}}
             showInternetTV = cfg.UI.ShowInternetTV,
             showEBooks = cfg.UI.ShowEBooks,
             showActors = cfg.UI.ShowActors,
+            showPodcasts = cfg.UI.ShowPodcasts,
             // Metadata
             metadataProvider = cfg.Metadata.Provider,
             tmdbApiKey = cfg.Metadata.TmdbApiKey,
@@ -1241,6 +1248,7 @@ tr:hover td{{background:#1a1a2e}}
             if (body.TryGetProperty("showInternetTV", out var sit)) cfg.UI.ShowInternetTV = sit.GetBoolean();
             if (body.TryGetProperty("showEBooks", out var seb)) cfg.UI.ShowEBooks = seb.GetBoolean();
             if (body.TryGetProperty("showActors", out var sac)) cfg.UI.ShowActors = sac.GetBoolean();
+            if (body.TryGetProperty("showPodcasts", out var spod)) cfg.UI.ShowPodcasts = spod.GetBoolean();
 
             // Metadata
             if (body.TryGetProperty("metadataProvider", out var mp)) cfg.Metadata.Provider = mp.GetString() ?? "tvmaze";
@@ -3520,6 +3528,158 @@ tr:hover td{{background:#1a1a2e}}
             _logger.LogWarning(ex, "Failed to fetch known-for credits for actor {Id}", actor.TmdbId);
             return Ok(new List<object>());
         }
+    }
+
+    // ─── Podcasts ────────────────────────────────────────────────────
+
+    [HttpGet("podcasts")]
+    public async Task<IActionResult> GetPodcasts()
+    {
+        var favIds = _userFavs.GetFavouriteIds(CurrentUsername, "podcast").ToHashSet();
+        var feeds = await _podcastDb.Feeds.OrderByDescending(f => f.DateAdded).ToListAsync();
+        var unplayedCounts = await _podcastDb.Episodes
+            .Where(e => !e.IsPlayed)
+            .GroupBy(e => e.FeedId)
+            .Select(g => new { FeedId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.FeedId, x => x.Count);
+
+        var result = feeds.Select(f => new
+        {
+            f.Id, f.Title, f.Description, f.Author, f.RssUrl,
+            f.ArtworkUrl, f.ArtworkFile, f.Category, f.Language,
+            f.EpisodeCount, f.LastRefreshed, f.DateAdded,
+            isFavourite = favIds.Contains(f.Id),
+            unplayedCount = unplayedCounts.GetValueOrDefault(f.Id, 0)
+        });
+        return Ok(result);
+    }
+
+    [HttpPost("podcasts")]
+    public async Task<IActionResult> AddPodcast([FromBody] System.Text.Json.JsonElement body)
+    {
+        var url = body.TryGetProperty("url", out var u) ? u.GetString()?.Trim() ?? "" : "";
+        if (string.IsNullOrEmpty(url) || !Uri.IsWellFormedUriString(url, UriKind.Absolute))
+            return BadRequest(new { message = "A valid RSS URL is required." });
+
+        var existing = await _podcastDb.Feeds.FirstOrDefaultAsync(f => f.RssUrl == url);
+        if (existing != null)
+            return Ok(new { message = "Already subscribed.", feedId = existing.Id });
+
+        try
+        {
+            var feed = await _podcastSvc.AddOrRefreshFeedAsync(_podcastDb, url);
+            return Ok(new { message = $"Subscribed to \"{feed.Title}\".", feedId = feed.Id });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to subscribe to RSS feed: {Url}", url);
+            return BadRequest(new { message = $"Could not load feed: {ex.Message}" });
+        }
+    }
+
+    [HttpDelete("podcasts/{id}")]
+    public async Task<IActionResult> DeletePodcast(int id)
+    {
+        var feed = await _podcastDb.Feeds.FindAsync(id);
+        if (feed == null) return NotFound();
+        _podcastDb.Feeds.Remove(feed);
+        await _podcastDb.SaveChangesAsync();
+        return Ok(new { message = "Unsubscribed." });
+    }
+
+    [HttpPost("podcasts/import-opml")]
+    public async Task<IActionResult> ImportOpml(IFormFile? file)
+    {
+        if (file == null || file.Length == 0)
+            return BadRequest(new { message = "No file uploaded." });
+
+        List<string> urls;
+        using (var stream = file.OpenReadStream())
+            urls = _podcastSvc.ParseOpml(stream);
+
+        if (urls.Count == 0)
+            return BadRequest(new { message = "No RSS feeds found in the OPML file." });
+
+        int imported = 0, skipped = 0, failed = 0;
+        foreach (var url in urls)
+        {
+            try
+            {
+                var existing = await _podcastDb.Feeds.FirstOrDefaultAsync(f => f.RssUrl == url);
+                if (existing != null) { skipped++; continue; }
+                await _podcastSvc.AddOrRefreshFeedAsync(_podcastDb, url);
+                imported++;
+                await Task.Delay(300);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "OPML import: failed to load feed {Url}", url);
+                failed++;
+            }
+        }
+
+        return Ok(new { message = "Import complete.", imported, skipped, failed, total = urls.Count });
+    }
+
+    [HttpPost("podcasts/refresh")]
+    public IActionResult RefreshPodcasts()
+    {
+        _ = Task.Run(() => _podcastSvc.RefreshAllFeedsAsync(_scopeFactory));
+        return Ok(new { message = "Podcast refresh started in background." });
+    }
+
+    [HttpGet("podcasts/{id}/episodes")]
+    public async Task<IActionResult> GetPodcastEpisodes(int id, [FromQuery] bool? played, [FromQuery] string? search)
+    {
+        var feed = await _podcastDb.Feeds.FindAsync(id);
+        if (feed == null) return NotFound();
+
+        var query = _podcastDb.Episodes.Where(e => e.FeedId == id);
+        if (played.HasValue) query = query.Where(e => e.IsPlayed == played.Value);
+        if (!string.IsNullOrEmpty(search))
+            query = query.Where(e => e.Title.Contains(search) || e.Description.Contains(search));
+
+        var episodes = await query.OrderByDescending(e => e.PublishDate).ToListAsync();
+        return Ok(episodes.Select(e => new
+        {
+            e.Id, e.FeedId, e.Title, e.Description, e.MediaUrl, e.MediaType,
+            e.DurationSeconds, e.PublishDate, e.Guid, e.IsPlayed, e.PlayPositionSeconds, e.DateFetched
+        }));
+    }
+
+    [HttpPost("podcasts/{feedId}/ep/{epId}/played")]
+    public async Task<IActionResult> ToggleEpisodePlayed(int feedId, int epId)
+    {
+        var ep = await _podcastDb.Episodes.FirstOrDefaultAsync(e => e.Id == epId && e.FeedId == feedId);
+        if (ep == null) return NotFound();
+        ep.IsPlayed = !ep.IsPlayed;
+        await _podcastDb.SaveChangesAsync();
+        return Ok(new { isPlayed = ep.IsPlayed });
+    }
+
+    [HttpPost("podcasts/{feedId}/ep/{epId}/progress")]
+    public async Task<IActionResult> SaveEpisodeProgress(int feedId, int epId, [FromBody] System.Text.Json.JsonElement body)
+    {
+        var ep = await _podcastDb.Episodes.FirstOrDefaultAsync(e => e.Id == epId && e.FeedId == feedId);
+        if (ep == null) return NotFound();
+        if (body.TryGetProperty("position", out var pos))
+            ep.PlayPositionSeconds = pos.GetInt32();
+        await _podcastDb.SaveChangesAsync();
+        return Ok(new { success = true });
+    }
+
+    [HttpPost("podcasts/{id}/favourite")]
+    public IActionResult TogglePodcastFavourite(int id)
+    {
+        var isFav = _userFavs.ToggleFavourite(CurrentUsername, "podcast", id);
+        return Ok(new { isFavourite = isFav });
+    }
+
+    [HttpGet("podcasts/favourites")]
+    public IActionResult GetPodcastFavourites()
+    {
+        var ids = _userFavs.GetFavouriteIds(CurrentUsername, "podcast");
+        return Ok(ids);
     }
 }
 

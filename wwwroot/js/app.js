@@ -49,6 +49,12 @@ const App = {
     radioGenreFilter: null,
     radioSearchFilter: '',
 
+    // Podcast state
+    podcastFeeds: [],
+    podcastCurrentFeed: null,
+    podcastEpisodes: [],
+    podcastSearchFilter: '',
+
     userRole: 'guest',
     userName: '',
     userDisplayName: '',
@@ -143,7 +149,7 @@ const App = {
     applyLanguageToSidebar() {
         const map = {
             'home': 'nav.home', 'movies': 'nav.movies', 'music': 'nav.music',
-            'musicvideos': 'nav.musicVideos', 'radio': 'nav.radio', 'internettv': 'nav.internetTv',
+            'musicvideos': 'nav.musicVideos', 'radio': 'nav.radio', 'internettv': 'nav.internetTv', 'podcasts': 'nav.podcasts',
             'pictures': 'nav.pictures', 'ebooks': 'nav.ebooks', 'favourites': 'nav.favourites',
             'playlists': 'nav.playlists', 'mostplayed': 'nav.mostPlayed', 'analysis': 'nav.analysis',
             'settings': 'nav.settings', 'rescan': 'nav.rescanFolders'
@@ -198,6 +204,7 @@ const App = {
             musicvideos: config.showMusicVideos,
             radio: config.showRadio,
             internettv: config.showInternetTV,
+            podcasts: config.showPodcasts,
             ebooks: config.showEBooks,
             actors: config.showActors
         };
@@ -467,7 +474,7 @@ const App = {
         // Map pages to their bottom nav tab
         const tabMap = { home: 'home', movies: 'movies', music: 'music', settings: 'settings' };
         // Sub-pages that belong to Library
-        const libraryPages = ['pictures', 'ebooks', 'musicvideos', 'radio', 'internettv', 'favourites', 'playlists', 'analysis'];
+        const libraryPages = ['pictures', 'ebooks', 'musicvideos', 'radio', 'internettv', 'podcasts', 'favourites', 'playlists', 'analysis'];
         let activeTab = tabMap[page] || (libraryPages.includes(page) ? 'library' : null);
         // Admin pages map to More
         if (['rescan'].includes(page)) activeTab = 'settings';
@@ -620,7 +627,7 @@ const App = {
         const titles = {
             home: 'Home',
             movies: 'Movies/TV Shows', music: 'Music', musicvideos: 'Music Videos',
-            radio: 'Radio', internettv: 'Internet TV',
+            radio: 'Radio', internettv: 'Internet TV', podcasts: 'Podcasts',
             albums: 'Albums', artists: 'Artists', songs: 'Songs', genres: 'Genres',
             pictures: 'Pictures', ebooks: 'eBooks',
             favourites: 'Favourites', playlists: 'Playlists',
@@ -658,6 +665,7 @@ const App = {
             case 'musicvideos': await this.renderMusicVideos(content); break;
             case 'radio':       await this.renderRadio(content); break;
             case 'internettv':  await this.renderInternetTv(content); break;
+            case 'podcasts':    await this.renderPodcasts(content); break;
             case 'pictures':    await this.renderPictures(content); break;
             case 'ebooks':      await this.renderEBooks(content); break;
             case 'analysis':    await this.renderAnalysis(content); break;
@@ -1199,6 +1207,331 @@ const App = {
                 }
             } catch(e) { /* continue polling */ }
         }, 1000);
+    },
+
+    // ─── Podcasts ──────────────────────────────────────────────
+
+    async renderPodcasts(el) {
+        this.podcastCurrentFeed = null;
+        this.podcastSearchFilter = '';
+        const feeds = await this.api('podcasts');
+        if (feeds === null) { el.innerHTML = this.emptyState('Error', 'Could not load podcasts.'); return; }
+        this.podcastFeeds = feeds;
+
+        let html = `<div class="radio-header">
+            <div class="radio-toolbar">
+                <input type="text" class="radio-search-input" id="podcast-search" placeholder="Search subscriptions..." oninput="App.filterPodcasts()" value="">
+                <button class="btn-action" onclick="App.addPodcastFeed()" title="Add RSS Feed">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-plus"/></svg>Add Feed
+                </button>
+                <label class="btn-action" style="cursor:pointer" title="Import OPML">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-upload"/></svg>Import OPML
+                    <input type="file" accept=".opml,.xml" style="display:none" onchange="App.importOpml(this)">
+                </label>
+                <button class="btn-action" id="btn-podcast-refresh" onclick="App.refreshPodcasts(this)" title="Refresh all feeds">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-refresh"/></svg>Refresh
+                </button>
+            </div>
+        </div>`;
+
+        if (feeds.length === 0) {
+            html += `<div class="radio-count" style="margin-bottom:8px">No subscriptions yet</div>`;
+        } else {
+            html += `<div class="radio-count" id="podcast-count">${feeds.length} podcast${feeds.length !== 1 ? 's' : ''}</div>
+            <div class="radio-grid" id="podcast-grid">${this.buildPodcastCards(feeds)}</div>`;
+        }
+
+        html += this.buildPodcastDiscoverSection(feeds);
+        el.innerHTML = html;
+    },
+
+    buildPodcastCards(feeds) {
+        if (!feeds.length) return '';
+        return feeds.map(f => {
+            const art = f.artworkFile ? `/podcastart/${f.artworkFile}` : '';
+            const logo = art
+                ? `<img src="${art}" alt="" class="radio-card-logo" style="border-radius:8px" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+                : '';
+            const placeholder = `<div class="radio-card-placeholder" style="${art ? 'display:none' : ''}">
+                <svg style="width:28px;height:28px;stroke:var(--text-muted);fill:none;stroke-width:1.5"><use href="#icon-podcast"/></svg></div>`;
+            const unplayed = f.unplayedCount > 0
+                ? `<span class="podcast-unplayed-badge">${f.unplayedCount}</span>` : '';
+            const fav = `<button class="radio-card-fav${f.isFavourite ? ' active' : ''}" onclick="App.togglePodcastFav(${f.id},this)" title="Favourite">♥</button>`;
+            return `<div class="radio-card" id="podcast-card-${f.id}" ondblclick="App.openPodcast(${f.id})">
+                <div class="radio-card-logo" style="position:relative;cursor:pointer" onclick="App.openPodcast(${f.id})">${logo}${placeholder}</div>
+                <div class="radio-card-info" style="cursor:pointer" onclick="App.openPodcast(${f.id})">
+                    <div class="radio-card-name">${this.esc(f.title)} ${unplayed}</div>
+                    <div class="radio-card-desc">${this.esc(f.author || f.category || '')}</div>
+                    <div class="radio-card-meta">
+                        <span class="radio-card-country">${this.esc(f.category || '')}</span>
+                        ${f.episodeCount ? `<span class="radio-card-genre">${f.episodeCount} episodes</span>` : ''}
+                    </div>
+                </div>
+                ${fav}
+                <button class="radio-card-play" onclick="App.openPodcast(${f.id})" title="Open">
+                    <svg style="width:16px;height:16px;fill:currentColor"><use href="#icon-play"/></svg>
+                </button>
+                <button class="podcast-delete-btn" onclick="App.deletePodcast(${f.id})" title="Unsubscribe">✕</button>
+            </div>`;
+        }).join('');
+    },
+
+    filterPodcasts() {
+        this.podcastSearchFilter = (document.getElementById('podcast-search')?.value || '').toLowerCase();
+        const filtered = this.podcastFeeds.filter(f =>
+            !this.podcastSearchFilter ||
+            f.title.toLowerCase().includes(this.podcastSearchFilter) ||
+            (f.author || '').toLowerCase().includes(this.podcastSearchFilter) ||
+            (f.category || '').toLowerCase().includes(this.podcastSearchFilter)
+        );
+        const grid = document.getElementById('podcast-grid');
+        if (grid) grid.innerHTML = this.buildPodcastCards(filtered);
+        const count = document.getElementById('podcast-count');
+        if (count) count.textContent = `${filtered.length} podcast${filtered.length !== 1 ? 's' : ''}`;
+    },
+
+    async openPodcast(feedId) {
+        const feed = this.podcastFeeds.find(f => f.id === feedId);
+        if (!feed) return;
+        this.podcastCurrentFeed = feed;
+        const episodes = await this.api(`podcasts/${feedId}/episodes`);
+        if (!episodes) return;
+        this.podcastEpisodes = episodes;
+        const el = document.getElementById('main-content');
+        const art = feed.artworkFile ? `/podcastart/${feed.artworkFile}` : '';
+        let html = `<div class="podcast-back-btn" onclick="App.renderPodcasts(document.getElementById('main-content'))">
+            ← Back to Podcasts
+        </div>
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px">
+            ${art ? `<img src="${art}" alt="" style="width:80px;height:80px;border-radius:10px;object-fit:cover">` : ''}
+            <div>
+                <div style="font-size:1.2rem;font-weight:700;color:var(--text-primary)">${this.esc(feed.title)}</div>
+                <div style="color:var(--text-secondary);font-size:0.85rem">${this.esc(feed.author || '')}</div>
+                <div style="color:var(--text-muted);font-size:0.8rem">${episodes.length} episode${episodes.length !== 1 ? 's' : ''}</div>
+            </div>
+        </div>
+        <div class="radio-toolbar" style="margin-bottom:12px">
+            <input type="text" class="radio-search-input" id="episode-search" placeholder="Search episodes..." oninput="App.filterEpisodes()">
+        </div>
+        <div class="podcast-episode-list" id="episode-list">${this.buildEpisodeList(episodes)}</div>`;
+        el.innerHTML = html;
+    },
+
+    buildEpisodeList(episodes) {
+        if (!episodes.length) return `<div style="color:var(--text-muted);padding:24px 0">No episodes found.</div>`;
+        return episodes.map(ep => {
+            const dur = ep.durationSeconds > 0 ? this.formatDuration(ep.durationSeconds) : '';
+            const date = ep.publishDate ? new Date(ep.publishDate).toLocaleDateString() : '';
+            const typeBadge = `<span class="podcast-type-badge ${ep.mediaType === 'video' ? 'podcast-type-video' : ''}">${ep.mediaType.toUpperCase()}</span>`;
+            const playedClass = ep.isPlayed ? ' podcast-episode-played' : '';
+            const resume = ep.playPositionSeconds > 0 && !ep.isPlayed
+                ? `<span style="font-size:0.75rem;color:var(--accent);margin-left:6px">▶ ${this.formatDuration(ep.playPositionSeconds)}</span>` : '';
+            return `<div class="podcast-episode-row${playedClass}" id="ep-row-${ep.id}">
+                <button class="podcast-played-btn" onclick="App.toggleEpisodePlayed(${ep.feedId},${ep.id},this)" title="${ep.isPlayed ? 'Mark unplayed' : 'Mark played'}">
+                    ${ep.isPlayed ? '✓' : '○'}
+                </button>
+                <div class="podcast-episode-info" onclick="App.playPodcastEpisode(${JSON.stringify(ep).replace(/"/g, '&quot;')})">
+                    <div class="podcast-episode-title">${this.esc(ep.title)}</div>
+                    <div class="podcast-episode-meta">${date}${dur ? ` · ${dur}` : ''}${resume}</div>
+                </div>
+                ${typeBadge}
+                <button class="radio-card-play" style="flex-shrink:0" onclick="App.playPodcastEpisode(${JSON.stringify(ep).replace(/"/g, '&quot;')})" title="Play">
+                    <svg style="width:16px;height:16px;fill:currentColor"><use href="#icon-play"/></svg>
+                </button>
+            </div>`;
+        }).join('');
+    },
+
+    filterEpisodes() {
+        const q = (document.getElementById('episode-search')?.value || '').toLowerCase();
+        const filtered = this.podcastEpisodes.filter(e =>
+            !q || e.title.toLowerCase().includes(q) || (e.description || '').toLowerCase().includes(q)
+        );
+        const list = document.getElementById('episode-list');
+        if (list) list.innerHTML = this.buildEpisodeList(filtered);
+    },
+
+    async addPodcastFeed() {
+        const url = prompt('Enter RSS feed URL:');
+        if (!url) return;
+        const res = await this.apiPost('podcasts', { url });
+        if (res) {
+            this.showToast(res.message || 'Subscribed!');
+            await this.renderPodcasts(document.getElementById('main-content'));
+        }
+    },
+
+    async importOpml(input) {
+        const file = input.files[0];
+        if (!file) return;
+        const formData = new FormData();
+        formData.append('file', file);
+        input.value = '';
+        const btn = document.getElementById('btn-podcast-refresh');
+        this.showToast('Importing OPML…');
+        try {
+            const res = await fetch('/api/podcasts/import-opml', {
+                method: 'POST', body: formData, credentials: 'include'
+            });
+            const data = await res.json();
+            this.showToast(`Imported ${data.imported} feeds (${data.skipped} already subscribed, ${data.failed} failed)`);
+            await this.renderPodcasts(document.getElementById('main-content'));
+        } catch(e) {
+            this.showToast('OPML import failed.');
+        }
+    },
+
+    async refreshPodcasts(btn) {
+        if (btn) { btn.disabled = true; btn.innerHTML = '<svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-refresh"/></svg>Refreshing…'; }
+        await this.apiPost('podcasts/refresh');
+        this.showToast('Refreshing feeds in background…');
+        setTimeout(async () => {
+            await this.renderPodcasts(document.getElementById('main-content'));
+        }, 3000);
+    },
+
+    playPodcastEpisode(ep) {
+        if (typeof ep === 'string') { try { ep = JSON.parse(ep); } catch(e) { return; } }
+        if (ep.mediaType === 'video') {
+            // Use TV-style fullscreen overlay
+            this.playVideoOverlay(ep.mediaUrl, ep.title);
+        } else {
+            // Use the audio player bar (same as Radio)
+            if (this.isRadioPlaying) this.stopRadio();
+            this.stopPlayer();
+            this.audioPlayer.src = ep.mediaUrl;
+            if (ep.playPositionSeconds > 0) this.audioPlayer.currentTime = ep.playPositionSeconds;
+            this.audioPlayer.play().catch(() => {});
+            const bar = document.querySelector('.player-bar');
+            if (bar) { bar.classList.remove('player-hidden'); bar.classList.add('radio-mode'); }
+            const titleEl = document.getElementById('player-track-title');
+            const artistEl = document.getElementById('player-track-artist');
+            if (titleEl) titleEl.textContent = ep.title;
+            if (artistEl) artistEl.textContent = this.podcastCurrentFeed ? this.podcastCurrentFeed.title : 'Podcast';
+            // Save position every 10s
+            this._podcastPositionInterval = setInterval(async () => {
+                if (!this.audioPlayer.paused && ep.id) {
+                    await this.apiPost(`podcasts/${ep.feedId}/ep/${ep.id}/progress`, { position: Math.floor(this.audioPlayer.currentTime) });
+                }
+            }, 10000);
+        }
+    },
+
+    playVideoOverlay(url, title) {
+        let overlay = document.getElementById('tv-player-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'tv-player-overlay';
+            overlay.className = 'tv-player-overlay';
+            document.body.appendChild(overlay);
+        }
+        overlay.innerHTML = `
+            <div class="tv-player-header">
+                <span class="tv-player-title">${this.esc(title || '')}</span>
+                <button class="tv-close-btn" onclick="App.closeTvPlayer()">✕</button>
+            </div>
+            <video id="podcast-video-el" controls autoplay style="width:100%;height:calc(100% - 44px);background:#000"></video>`;
+        overlay.style.display = 'flex';
+        const video = document.getElementById('podcast-video-el');
+        if (video) this.playVideoStream(video, url);
+    },
+
+    async toggleEpisodePlayed(feedId, epId, btn) {
+        const res = await this.apiPost(`podcasts/${feedId}/ep/${epId}/played`);
+        if (!res) return;
+        const row = document.getElementById(`ep-row-${epId}`);
+        if (row) {
+            if (res.isPlayed) { row.classList.add('podcast-episode-played'); }
+            else { row.classList.remove('podcast-episode-played'); }
+        }
+        if (btn) btn.textContent = res.isPlayed ? '✓' : '○';
+        const ep = this.podcastEpisodes.find(e => e.id === epId);
+        if (ep) ep.isPlayed = res.isPlayed;
+    },
+
+    async togglePodcastFav(feedId, btn) {
+        const res = await this.apiPost(`podcasts/${feedId}/favourite`);
+        if (!res) return;
+        if (btn) btn.classList.toggle('active', res.isFavourite);
+        const feed = this.podcastFeeds.find(f => f.id === feedId);
+        if (feed) feed.isFavourite = res.isFavourite;
+    },
+
+    async deletePodcast(feedId) {
+        if (!confirm('Unsubscribe from this podcast? All episode data will be removed.')) return;
+        await this.apiDelete(`podcasts/${feedId}`);
+        this.podcastFeeds = this.podcastFeeds.filter(f => f.id !== feedId);
+        const card = document.getElementById(`podcast-card-${feedId}`);
+        if (card) card.remove();
+    },
+
+    buildPodcastDiscoverSection(subscribedFeeds) {
+        const subscribedUrls = new Set((subscribedFeeds || []).map(f => f.rssUrl));
+        const suggestions = [
+            { title: 'BBC Global News Podcast', author: 'BBC', category: 'News', url: 'https://podcasts.files.bbci.co.uk/p02nq0gn.rss' },
+            { title: 'NPR News Now', author: 'NPR', category: 'News', url: 'https://feeds.npr.org/500005/podcast.xml' },
+            { title: 'TED Talks Daily', author: 'TED', category: 'Education', url: 'https://feeds.feedburner.com/TEDTalks_audio' },
+            { title: 'The Daily', author: 'The New York Times', category: 'News', url: 'https://feeds.simplecast.com/54nAGcIl' },
+            { title: 'Serial', author: 'Serial Productions', category: 'True Crime', url: 'https://feeds.serialpodcast.org/serialpodcast' },
+            { title: 'Stuff You Should Know', author: 'iHeart Podcasts', category: 'Education', url: 'https://feeds.megaphone.fm/stuffyoushouldknow' },
+            { title: 'How I Built This', author: 'NPR / Guy Raz', category: 'Business', url: 'https://feeds.npr.org/510313/podcast.xml' },
+            { title: 'Radiolab', author: 'WNYC Studios', category: 'Science', url: 'https://feeds.feedburner.com/radiolab' },
+            { title: 'Science Vs', author: 'Spotify Studios', category: 'Science', url: 'https://feeds.megaphone.fm/sciencevs' },
+            { title: 'Darknet Diaries', author: 'Jack Rhysider', category: 'Technology', url: 'https://feeds.megaphone.fm/darknetdiaries' },
+            { title: 'Crime Junkie', author: 'audiochuck', category: 'True Crime', url: 'https://feeds.simplecast.com/qm_9xx0g' },
+            { title: 'SmartLess', author: 'Jason Bateman, Sean Hayes, Will Arnett', category: 'Comedy', url: 'https://feeds.simplecast.com/y1B7lsNM' },
+            { title: 'Conan O\'Brien Needs a Friend', author: 'Team Coco', category: 'Comedy', url: 'https://feeds.simplecast.com/dHoohVNH' },
+            { title: 'Huberman Lab', author: 'Andrew Huberman', category: 'Health', url: 'https://feeds.megaphone.fm/hubermanlab' },
+            { title: 'No Such Thing as a Fish', author: 'QI', category: 'Education', url: 'https://feeds.feedburner.com/NoSuchThingAsAFish' }
+        ].filter(s => !subscribedUrls.has(s.url));
+
+        if (!suggestions.length) return '';
+
+        const cards = suggestions.map(s => `
+            <div class="radio-card" style="opacity:0.85">
+                <div class="radio-card-logo">
+                    <div class="radio-card-placeholder">
+                        <svg style="width:28px;height:28px;stroke:var(--text-muted);fill:none;stroke-width:1.5"><use href="#icon-podcast"/></svg>
+                    </div>
+                </div>
+                <div class="radio-card-info">
+                    <div class="radio-card-name">${this.esc(s.title)}</div>
+                    <div class="radio-card-desc">${this.esc(s.author)}</div>
+                    <div class="radio-card-meta"><span class="radio-card-country">${this.esc(s.category)}</span></div>
+                </div>
+                <button class="radio-card-play" onclick="App.subscribeDiscover('${s.url.replace(/'/g,"\\'")}',this)" title="Subscribe"
+                    style="width:auto;border-radius:6px;padding:0 10px;font-size:11px">+</button>
+            </div>`).join('');
+
+        return `<div class="podcast-discover-section">
+            <div class="home-section-header" style="margin-bottom:12px">
+                <h2 class="home-section-title">
+                    <span class="home-section-icon"><svg style="width:18px;height:18px;stroke:var(--accent);fill:none;stroke-width:2"><use href="#icon-podcast"/></svg></span>
+                    Discover Podcasts
+                </h2>
+            </div>
+            <div class="radio-grid">${cards}</div>
+        </div>`;
+    },
+
+    async subscribeDiscover(url, btn) {
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
+        const res = await this.apiPost('podcasts', { url });
+        if (res) {
+            this.showToast(res.message || 'Subscribed!');
+            await this.renderPodcasts(document.getElementById('main-content'));
+        } else {
+            if (btn) { btn.disabled = false; btn.textContent = '+'; }
+        }
+    },
+
+    formatDuration(secs) {
+        if (!secs) return '';
+        const h = Math.floor(secs / 3600);
+        const m = Math.floor((secs % 3600) / 60);
+        const s = secs % 60;
+        if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+        return `${m}:${String(s).padStart(2,'0')}`;
     },
 
     // ─── Home Page ───────────────────────────────────────────
@@ -3599,7 +3932,8 @@ const App = {
             { label: this.t('settings.radio'), key: 'showRadio', icon: 'radio' },
             { label: this.t('settings.internetTv'), key: 'showInternetTV', icon: 'tv' },
             { label: this.t('settings.ebooks'), key: 'showEBooks', icon: 'book' },
-            { label: this.t('settings.actors'), key: 'showActors', icon: 'users' }
+            { label: this.t('settings.actors'), key: 'showActors', icon: 'users' },
+            { label: this.t('settings.podcasts'), key: 'showPodcasts', icon: 'podcast' }
         ];
         menuItems.forEach(m => {
             html += `<div class="setting-row">
@@ -3968,6 +4302,7 @@ const App = {
             showInternetTV: b('showInternetTV'),
             showEBooks: b('showEBooks'),
             showActors: b('showActors'),
+            showPodcasts: b('showPodcasts'),
             // Library
             musicFolders: v('musicFolders'),
             moviesTVFolders: v('moviesTVFolders'),

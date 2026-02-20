@@ -227,6 +227,13 @@ public class Program
             builder.Services.AddDbContext<RatingsDbContext>(options =>
                 options.UseSqlite($"Data Source={config.Database.RatingsDatabasePath}"));
 
+            // ─── Podcasts Database ─────────────────────────────────────
+            var podDbDir = Path.GetDirectoryName(config.Database.PodcastsDatabasePath);
+            if (!string.IsNullOrEmpty(podDbDir) && !Directory.Exists(podDbDir))
+                Directory.CreateDirectory(podDbDir);
+            builder.Services.AddDbContext<PodcastsDbContext>(options =>
+                options.UseSqlite($"Data Source={config.Database.PodcastsDatabasePath}"));
+
             // ─── Services ────────────────────────────────────────────
             builder.Services.AddSingleton<ShareCredentialService>();
             builder.Services.AddSingleton<LibraryScannerService>();
@@ -241,6 +248,8 @@ public class Program
             builder.Services.AddSingleton<PinSecurityService>();
             builder.Services.AddSingleton<RadioService>();
             builder.Services.AddSingleton<TvChannelService>();
+            builder.Services.AddSingleton<PodcastService>();
+            builder.Services.AddHostedService<PodcastRefreshService>();
             builder.Services.AddSingleton<UserFavouritesService>();
             builder.Services.AddControllers();
 
@@ -397,6 +406,10 @@ public class Program
                 var ratingsDb = scope.ServiceProvider.GetRequiredService<RatingsDbContext>();
                 await ratingsDb.Database.EnsureCreatedAsync();
                 Log.Information("Ratings database initialized at: {Path}", config.Database.RatingsDatabasePath);
+
+                var podcastDb = scope.ServiceProvider.GetRequiredService<PodcastsDbContext>();
+                await podcastDb.Database.EnsureCreatedAsync();
+                Log.Information("Podcasts database initialized at: {Path}", config.Database.PodcastsDatabasePath);
             }
 
             // ─── Create default admin user if none exist ──────────────
@@ -499,6 +512,14 @@ public class Program
                 Log.Information("Created radio logos directory: {Path}", radioLogosPath);
             }
 
+            // ─── Create assets/podcastart/ directory ──────────────────
+            var podcastArtPath = Path.Combine(exeDir, "assets", "podcastart");
+            if (!Directory.Exists(podcastArtPath))
+            {
+                Directory.CreateDirectory(podcastArtPath);
+                Log.Information("Created podcast artwork directory: {Path}", podcastArtPath);
+            }
+
             // ─── Ensure tools/ffmpeg/bin/ directory exists ──────────
             var toolsDir = Path.Combine(exeDir, "tools", "ffmpeg", "bin");
             if (!Directory.Exists(toolsDir))
@@ -594,6 +615,15 @@ public class Program
             {
                 FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(actorsDir),
                 RequestPath = "/actorphoto"
+            });
+
+            // Serve podcast artwork from assets/podcastart/ as /podcastart/{filename}
+            var podcastArtDir = Path.Combine(exeDir, "assets", "podcastart");
+            Directory.CreateDirectory(podcastArtDir);
+            app.UseStaticFiles(new StaticFileOptions
+            {
+                FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(podcastArtDir),
+                RequestPath = "/podcastart"
             });
 
             app.UseAuthentication();

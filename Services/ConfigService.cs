@@ -159,6 +159,7 @@ public class ConfigService
                 _config.Database.TvChannelsDatabasePath = database["TvChannelsDatabasePath"] ?? "data/tvchannels.db";
                 _config.Database.SharesDatabasePath = database["SharesDatabasePath"] ?? "data/shares.db";
                 _config.Database.ActorsDatabasePath = database["ActorsDatabasePath"] ?? "data/actors.db";
+                _config.Database.PodcastsDatabasePath = database["PodcastsDatabasePath"] ?? "data/podcasts.db";
             }
 
             // Resolve database paths relative to AppContext.BaseDirectory (same as assets/ and cache/)
@@ -181,6 +182,8 @@ public class ConfigService
                 _config.Database.SharesDatabasePath = Path.Combine(appDir, _config.Database.SharesDatabasePath);
             if (!Path.IsPathRooted(_config.Database.ActorsDatabasePath))
                 _config.Database.ActorsDatabasePath = Path.Combine(appDir, _config.Database.ActorsDatabasePath);
+            if (!Path.IsPathRooted(_config.Database.PodcastsDatabasePath))
+                _config.Database.PodcastsDatabasePath = Path.Combine(appDir, _config.Database.PodcastsDatabasePath);
 
             // Logging section
             var logging = data["Logging"];
@@ -204,6 +207,7 @@ public class ConfigService
                 _config.UI.ShowInternetTV = ParseBool(ui["ShowInternetTV"], true);
                 _config.UI.ShowEBooks = ParseBool(ui["ShowEBooks"], true);
                 _config.UI.ShowActors = ParseBool(ui["ShowActors"], true);
+                _config.UI.ShowPodcasts = ParseBool(ui["ShowPodcasts"], true);
             }
 
             // Metadata section
@@ -352,6 +356,7 @@ public class ConfigService
         TvChannelsDatabasePath=data/tvchannels.db
         SharesDatabasePath=data/shares.db
         ActorsDatabasePath=data/actors.db
+        PodcastsDatabasePath=data/podcasts.db
 
         [Logging]
         LogLevel=Information
@@ -368,6 +373,7 @@ public class ConfigService
         ShowInternetTV=True
         ShowEBooks=True
         ShowActors=True
+        ShowPodcasts=True
         """;
 
     /// <summary>
@@ -467,6 +473,7 @@ public class ConfigService
         Ensure("Database", "TvChannelsDatabasePath", "data/tvchannels.db");
         Ensure("Database", "SharesDatabasePath", "data/shares.db");
         Ensure("Database", "ActorsDatabasePath", "data/actors.db");
+        Ensure("Database", "PodcastsDatabasePath", "data/podcasts.db");
 
         // Logging
         Ensure("Logging", "LogLevel", "Information");
@@ -483,6 +490,7 @@ public class ConfigService
         Ensure("UI", "ShowInternetTV", "True");
         Ensure("UI", "ShowEBooks", "True");
         Ensure("UI", "ShowActors", "True");
+        Ensure("UI", "ShowPodcasts", "True");
 
         if (!changed) return;
 
@@ -585,6 +593,7 @@ public class ConfigService
         data["Database"]["TvChannelsDatabasePath"] = RelativeDbPath(_config.Database.TvChannelsDatabasePath);
         data["Database"]["SharesDatabasePath"] = RelativeDbPath(_config.Database.SharesDatabasePath);
         data["Database"]["ActorsDatabasePath"] = RelativeDbPath(_config.Database.ActorsDatabasePath);
+        data["Database"]["PodcastsDatabasePath"] = RelativeDbPath(_config.Database.PodcastsDatabasePath);
 
         // Logging
         data["Logging"]["LogLevel"] = _config.Logging.LogLevel;
@@ -607,6 +616,7 @@ public class ConfigService
         data["UI"]["ShowInternetTV"] = _config.UI.ShowInternetTV ? "True" : "False";
         data["UI"]["ShowEBooks"] = _config.UI.ShowEBooks ? "True" : "False";
         data["UI"]["ShowActors"] = _config.UI.ShowActors ? "True" : "False";
+        data["UI"]["ShowPodcasts"] = _config.UI.ShowPodcasts ? "True" : "False";
 
         var parser = new FileIniDataParser();
         parser.WriteFile(_configPath, data);

@@ -166,6 +166,7 @@ public class DatabaseConfig
     public string SharesDatabasePath { get; set; } = "data/shares.db";
     public string ActorsDatabasePath { get; set; } = "data/actors.db";
     public string RatingsDatabasePath { get; set; } = "data/ratings.db";
+    public string PodcastsDatabasePath { get; set; } = "data/podcasts.db";
 }
 
 public class LoggingConfig
@@ -186,6 +187,7 @@ public class UIConfig
     public bool ShowInternetTV { get; set; } = true;
     public bool ShowEBooks { get; set; } = true;
     public bool ShowActors { get; set; } = true;
+    public bool ShowPodcasts { get; set; } = true;
 }
 
 public class MetadataConfig
