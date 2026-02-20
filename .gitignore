@@ -1,0 +1,21 @@
+## .NET / ASP.NET Core
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.log
+
+## Logs directory
+logs/
+
+## Build artifacts
+publish/
+*.nupkg
+
+## Sensitive / local config overrides
+appsettings.Development.json
+
+## OS files
+.DS_Store
+Thumbs.db

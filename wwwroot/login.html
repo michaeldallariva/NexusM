@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - NexusM</title>
+    <style>
+        :root {
+            --bg-primary: #121212;
+            --bg-secondary: #1e1e1e;
+            --bg-surface: #252525;
+            --bg-hover: #2a2a2a;
+            --accent: #4d8bf5;
+            --accent-hover: #6ba0ff;
+            --accent-dim: rgba(77,139,245,0.15);
+            --text-primary: #ffffff;
+            --text-secondary: #ffffff;
+            --text-muted: #cccccc;
+            --border: #333;
+            --danger: #e74c3c;
+            --success: #27ae60;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+            position: relative;
+        }
+        .bg-image {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            z-index: 0;
+        }
+        .bg-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.55);
+            z-index: 1;
+        }
+        .login-wrapper {
+            width: 100%;
+            max-width: 860px;
+            position: relative;
+            z-index: 2;
+        }
+
+        /* Logo */
+        .logo-section {
+            text-align: center;
+            margin-bottom: 48px;
+        }
+        .logo-icon {
+            width: 80px;
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+        }
+        .logo-icon img {
+            width: 80px;
+            height: 80px;
+            filter: drop-shadow(0 8px 24px rgba(34,197,94,0.35));
+        }
+        .logo-section h1 {
+            font-size: 36px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .logo-green {
+            color: #22c55e;
+        }
+        .logo-section p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-top: 4px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        /* User Selection */
+        #user-selection {
+            display: none;
+        }
+        #user-selection h2 {
+            text-align: center;
+            font-size: 22px;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-bottom: 36px;
+        }
+        .user-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 24px;
+            max-width: 700px;
+            margin: 0 auto;
+            justify-items: center;
+        }
+        .user-card {
+            cursor: pointer;
+            text-align: center;
+            transition: transform 0.15s;
+            padding: 16px;
+            border-radius: 12px;
+            border: 1px solid transparent;
+            width: 100%;
+            max-width: 160px;
+        }
+        .user-card:hover {
+            transform: translateY(-4px);
+            background: var(--bg-surface);
+            border-color: var(--border);
+        }
+        .user-avatar {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            font-weight: 700;
+            color: #fff;
+            margin: 0 auto 12px;
+            border: 3px solid transparent;
+            transition: border-color 0.2s;
+        }
+        .user-card:hover .user-avatar {
+            border-color: var(--accent);
+        }
+        .user-avatar.admin {
+            background: linear-gradient(135deg, #f39c12, #e67e22);
+        }
+        .user-name {
+            font-size: 15px;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+        .user-role {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 2px;
+        }
+
+        /* PIN Entry */
+        #pin-entry {
+            display: none;
+            max-width: 400px;
+            margin: 0 auto;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+        }
+        #pin-entry h2 {
+            font-size: 20px;
+            text-align: center;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        #pin-user-display {
+            text-align: center;
+            color: var(--accent);
+            font-size: 15px;
+            margin-bottom: 28px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        .pin-input {
+            width: 100%;
+            padding: 14px 16px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 28px;
+            font-weight: 600;
+            text-align: center;
+            letter-spacing: 12px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .pin-input:focus {
+            border-color: var(--accent);
+        }
+        .btn {
+            width: 100%;
+            padding: 13px;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.1s, box-shadow 0.2s, background 0.2s;
+        }
+        .btn:active { transform: translateY(0); }
+        .btn-primary {
+            background: var(--accent);
+            color: #fff;
+        }
+        .btn-primary:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 16px rgba(77,139,245,0.3);
+        }
+        .btn-back {
+            background: var(--bg-surface);
+            color: var(--text-secondary);
+            margin-top: 10px;
+        }
+        .btn-back:hover {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+        }
+        .error-msg {
+            background: rgba(231,76,60,0.12);
+            border: 1px solid rgba(231,76,60,0.3);
+            color: #e74c3c;
+            padding: 10px 14px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            text-align: center;
+            display: none;
+        }
+        .loading {
+            text-align: center;
+            padding: 60px;
+            color: var(--text-muted);
+        }
+        .spinner {
+            display: inline-block;
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 12px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="bg-image" id="bg-image"></div>
+    <div class="bg-overlay"></div>
+    <div class="login-wrapper">
+        <div class="logo-section">
+            <div class="logo-icon">
+                <img src="/favicon.svg" alt="NexusM">
+            </div>
+            <h1>Nexus<span class="logo-green">M</span></h1>
+            <p>Media Library Manager</p>
+        </div>
+
+        <!-- Loading -->
+        <div id="loading" class="loading">
+            <div class="spinner"></div>
+            <div>Loading...</div>
+        </div>
+
+        <!-- User Selection -->
+        <div id="user-selection">
+            <h2>Who's jumping in?</h2>
+            <div id="user-grid" class="user-grid"></div>
+        </div>
+
+        <!-- PIN Entry -->
+        <div id="pin-entry">
+            <h2>Enter PIN</h2>
+            <div id="pin-user-display"></div>
+            <div id="error-msg" class="error-msg"></div>
+            <form id="pin-form">
+                <input type="hidden" id="username" value="">
+                <div class="form-group">
+                    <label for="pin">PIN Code (6 digits)</label>
+                    <input type="password" id="pin" class="pin-input" maxlength="6" pattern="[0-9]{6}" inputmode="numeric" required autofocus autocomplete="current-password">
+                </div>
+                <button type="submit" class="btn btn-primary">Login</button>
+                <button type="button" class="btn btn-back" id="btn-back">&#8592; Back to Users</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            const bgs = ['/images/bg-1.jpg', '/images/bg-2.jpg', '/images/bg-3.jpg', '/images/bg-4.jpg'];
+            const bg = bgs[Math.floor(Math.random() * bgs.length)];
+            document.getElementById('bg-image').style.backgroundImage = "url('" + bg + "')";
+        })();
+    </script>
+
+    <script>
+        const LoginApp = {
+            users: [],
+            selectedUser: null,
+
+            async init() {
+                // Check if already authenticated
+                try {
+                    const res = await fetch('/api/auth/session');
+                    const session = await res.json();
+                    if (session.authenticated) {
+                        window.location.href = '/';
+                        return;
+                    }
+                    // If SecurityByPin is disabled, should not be on login page
+                    if (!session.securityByPin) {
+                        window.location.href = '/';
+                        return;
+                    }
+                } catch (e) { /* continue to login */ }
+
+                // Load users
+                await this.loadUsers();
+                document.getElementById('loading').style.display = 'none';
+
+                // Bind events
+                document.getElementById('pin-form').addEventListener('submit', (e) => {
+                    e.preventDefault();
+                    this.submitLogin();
+                });
+                document.getElementById('btn-back').addEventListener('click', () => this.showUserSelection());
+
+                // Only allow digits in PIN field
+                document.getElementById('pin').addEventListener('input', (e) => {
+                    e.target.value = e.target.value.replace(/\D/g, '');
+                });
+            },
+
+            async loadUsers() {
+                try {
+                    const res = await fetch('/api/auth/users/public');
+                    if (!res.ok) throw new Error('Failed to load users');
+                    this.users = await res.json();
+                } catch (e) {
+                    this.users = [];
+                }
+
+                if (this.users.length === 0) {
+                    // No users found, show PIN entry directly for admin
+                    this.selectUser('admin', 'Admin');
+                } else if (this.users.length === 1) {
+                    // Only one user, go straight to PIN
+                    this.selectUser(this.users[0].username, this.users[0].displayName || this.users[0].username);
+                } else {
+                    this.showUserSelection();
+                }
+            },
+
+            showUserSelection() {
+                const grid = document.getElementById('user-grid');
+                grid.innerHTML = this.users.map(u => {
+                    const initial = (u.displayName || u.username).charAt(0).toUpperCase();
+                    const isAdmin = u.role === 'admin';
+                    return `<div class="user-card" onclick="LoginApp.selectUser('${this.esc(u.username)}', '${this.esc(u.displayName || u.username)}')">
+                        <div class="user-avatar ${isAdmin ? 'admin' : ''}">${this.esc(initial)}</div>
+                        <div class="user-name">${this.esc(u.displayName || u.username)}</div>
+                        <div class="user-role">${this.esc(u.role)}</div>
+                    </div>`;
+                }).join('');
+
+                document.getElementById('user-selection').style.display = 'block';
+                document.getElementById('pin-entry').style.display = 'none';
+                this.clearError();
+            },
+
+            selectUser(username, displayName) {
+                this.selectedUser = username;
+                document.getElementById('username').value = username;
+                document.getElementById('pin-user-display').textContent = displayName;
+                document.getElementById('user-selection').style.display = 'none';
+                document.getElementById('pin-entry').style.display = 'block';
+                document.getElementById('pin').value = '';
+                document.getElementById('pin').focus();
+                this.clearError();
+
+                // Hide back button if only 1 user
+                document.getElementById('btn-back').style.display = this.users.length > 1 ? 'block' : 'none';
+            },
+
+            async submitLogin() {
+                const username = document.getElementById('username').value;
+                const pin = document.getElementById('pin').value;
+
+                if (!pin || pin.length !== 6) {
+                    this.showError('PIN must be exactly 6 digits');
+                    return;
+                }
+
+                try {
+                    const res = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, pin })
+                    });
+
+                    const data = await res.json();
+
+                    if (res.ok) {
+                        window.location.href = '/';
+                    } else {
+                        this.showError(data.error || 'Login failed');
+                        document.getElementById('pin').value = '';
+                        document.getElementById('pin').focus();
+                    }
+                } catch (e) {
+                    this.showError('Connection error. Please try again.');
+                }
+            },
+
+            showError(msg) {
+                const el = document.getElementById('error-msg');
+                el.textContent = msg;
+                el.style.display = '';
+            },
+
+            clearError() {
+                document.getElementById('error-msg').style.display = 'none';
+            },
+
+            esc(str) {
+                if (!str) return '';
+                const d = document.createElement('div');
+                d.textContent = str;
+                return d.innerHTML;
+            }
+        };
+
+        document.addEventListener('DOMContentLoaded', () => LoginApp.init());
+    </script>
+</body>
+</html>
