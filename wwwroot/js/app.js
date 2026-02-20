@@ -1221,14 +1221,14 @@ const App = {
         let html = `<div class="radio-header">
             <div class="radio-toolbar">
                 <input type="text" class="radio-search-input" id="podcast-search" placeholder="Search subscriptions..." oninput="App.filterPodcasts()" value="">
-                <button class="btn-action" onclick="App.addPodcastFeed()" title="Add RSS Feed">
+                <button class="btn-import-m3u" onclick="App.addPodcastFeed()" title="Add RSS Feed">
                     <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-plus"/></svg>Add Feed
                 </button>
-                <label class="btn-action" style="cursor:pointer" title="Import OPML">
+                <label class="btn-import-m3u" style="cursor:pointer" title="Import OPML">
                     <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-upload"/></svg>Import OPML
                     <input type="file" accept=".opml,.xml" style="display:none" onchange="App.importOpml(this)">
                 </label>
-                <button class="btn-action" id="btn-podcast-refresh" onclick="App.refreshPodcasts(this)" title="Refresh all feeds">
+                <button class="btn-fetch-logos" id="btn-podcast-refresh" onclick="App.refreshPodcasts(this)" title="Refresh all feeds">
                     <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-refresh"/></svg>Refresh
                 </button>
             </div>
@@ -1355,9 +1355,10 @@ const App = {
         const url = prompt('Enter RSS feed URL:');
         if (!url) return;
         const res = await this.apiPost('podcasts', { url });
-        if (res) {
-            this.showToast(res.message || 'Subscribed!');
+        if (res && res.feedId != null) {
             await this.renderPodcasts(document.getElementById('main-content'));
+        } else if (res && res.message) {
+            alert(res.message);
         }
     },
 
@@ -1367,24 +1368,21 @@ const App = {
         const formData = new FormData();
         formData.append('file', file);
         input.value = '';
-        const btn = document.getElementById('btn-podcast-refresh');
-        this.showToast('Importing OPML…');
         try {
             const res = await fetch('/api/podcasts/import-opml', {
                 method: 'POST', body: formData, credentials: 'include'
             });
             const data = await res.json();
-            this.showToast(`Imported ${data.imported} feeds (${data.skipped} already subscribed, ${data.failed} failed)`);
+            alert(`Imported ${data.imported} feeds (${data.skipped} already subscribed, ${data.failed} failed)`);
             await this.renderPodcasts(document.getElementById('main-content'));
         } catch(e) {
-            this.showToast('OPML import failed.');
+            alert('OPML import failed.');
         }
     },
 
     async refreshPodcasts(btn) {
         if (btn) { btn.disabled = true; btn.innerHTML = '<svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-refresh"/></svg>Refreshing…'; }
         await this.apiPost('podcasts/refresh');
-        this.showToast('Refreshing feeds in background…');
         setTimeout(async () => {
             await this.renderPodcasts(document.getElementById('main-content'));
         }, 3000);
@@ -1517,10 +1515,10 @@ const App = {
     async subscribeDiscover(url, btn) {
         if (btn) { btn.disabled = true; btn.textContent = '…'; }
         const res = await this.apiPost('podcasts', { url });
-        if (res) {
-            this.showToast(res.message || 'Subscribed!');
+        if (res && res.feedId != null) {
             await this.renderPodcasts(document.getElementById('main-content'));
         } else {
+            if (res && res.message) alert(res.message);
             if (btn) { btn.disabled = false; btn.textContent = '+'; }
         }
     },
