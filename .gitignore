@@ -13,6 +13,9 @@ logs/
 publish/
 *.nupkg
 
+## Backup files
+*.1
+
 ## Sensitive / local config overrides
 appsettings.Development.json
 
