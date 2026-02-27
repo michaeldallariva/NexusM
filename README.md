@@ -20,16 +20,22 @@ NexusM is a single-file Windows executable that serves a web-based UI for managi
 - **Actors** — Browse actors from your video library. Biography, filmography, "Known For" credits from TMDB, clickable cast in movie/TV detail views.
 - **Music Videos** — Artist-based browsing with auto-generated thumbnails.
 - **Pictures** — Photo gallery with category filtering, EXIF metadata, and thumbnail generation.
-- **eBooks** — PDF and EPUB library with cover extraction and in-browser PDF reader.
-- **Radio** — Internet radio stations with country/genre filtering and live streaming.
+- **eBooks** — PDF and EPUB library with cover extraction and in-browser reader.
+- **Comic Books** — CBZ and CBR archives with a dedicated page-by-page reader.
+- **AudioBooks** — MP3 and M4B audiobook library with per-book progress tracking.
+- **Podcasts** — RSS feed subscriptions with episode playback, OPML import, and a built-in Discover panel.
+- **Radio** — Internet radio stations with country/genre filtering, live streaming, and real-time ICY/Icecast stream title updates.
 - **Internet TV** — IPTV channel management via M3U/M3U8 playlist import.
 
 ### Playback
 - Built-in web audio player with shuffle, repeat, queue management, and lyrics overlay.
+- **10-band graphic equalizer** with presets, applied via Web Audio API — works for music, radio, and audiobooks.
 - Built-in web video player with HLS streaming.
 - Server-side video transcoding with hardware acceleration (NVIDIA NVENC, Intel QSV, AMD AMF).
 - Automatic remuxing for format compatibility without re-encoding.
 - HLS caching to avoid re-transcoding previously watched content.
+- **Subtitle support** — automatic subtitle search and download via OpenSubtitles.com and SubDL.com.
+- Video resume — saves and restores playback position across sessions.
 
 ### Metadata
 - Automatic metadata fetching from TMDB (movies, TV, actors) and TVMaze (TV shows).
@@ -37,9 +43,10 @@ NexusM is a single-file Windows executable that serves a web-based UI for managi
 - Cast and crew information with downloadable actor photos.
 - Album artwork extraction from audio file tags.
 
-### Analytics
+### Analytics & Discovery
 - Library analysis with format, codec, resolution, genre, and bitrate distribution charts.
 - Viewing insights: watch patterns, top genres, completion stats, comfort titles.
+- **Mood Explorer** — 8 mood-based recommendation cards (Chill, Energy, Focus, Party, Love, Study, Discovery, Nostalgia).
 - CSV and HTML export of library data.
 
 ### Security & Multi-User
@@ -51,8 +58,8 @@ NexusM is a single-file Windows executable that serves a web-based UI for managi
 ### Other
 - Global search across all media types.
 - Network share (SMB/CIFS) support with credential management and auto-mount.
-- 3 visual themes: Dark, Blue, Purple.
-- 9 languages: English, French, German, Spanish, Portuguese, Italian, Polish, Russian, Swedish.
+- 6 visual themes: Dark, Blue, Purple, Emerald, Sky Grey, Sky Blue.
+- 17+ languages: English, French, German, Spanish, Portuguese, Italian, Dutch, Polish, Romanian, Russian, Swedish, Ukrainian, Norwegian, Finnish, Estonian, Lithuanian, Slovenian, Albanian, Serbian.
 - Configurable sidebar with show/hide toggles for each section.
 - System tray integration and optional Windows startup registration.
 - Portable — no installation required, runs from a single folder.
@@ -67,7 +74,7 @@ NexusM is a single-file Windows executable that serves a web-based UI for managi
 | Database | SQLite via Entity Framework Core |
 | Frontend | Vanilla JavaScript, HTML5, CSS3 (no framework) |
 | Video Streaming | HLS via hls.js, FFmpeg for transcoding/remuxing |
-| eBook Rendering | epub.js, PDF.js |
+| eBook / Comic Rendering | epub.js, PDF.js, SharpCompress (CBZ/CBR) |
 | Metadata | TMDB API, TVMaze API, LRCLIB API |
 | Audio Tags | TagLibSharp |
 | Image Processing | SixLabors.ImageSharp |
@@ -80,9 +87,9 @@ NexusM is a single-file Windows executable that serves a web-based UI for managi
 ## Getting Started
 
 ### Requirements
-- Windows 10/11 (64-bit)
+- Windows 10/11 (64-bit) or Linux (x64)
 - A modern web browser (Chrome, Firefox, Edge, Safari)
-- FFmpeg (optional, for audio/video transcoding — can be downloaded from within the app)
+- FFmpeg (optional, for audio/video transcoding — can be auto-downloaded from within the app)
 - TMDB API key (optional, free — for movie/TV metadata and actor data)
 
 ### Running NexusM
