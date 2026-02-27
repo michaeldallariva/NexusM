@@ -1,0 +1,71 @@
+NexusM — Media Library Manager
+Copyright (c) 2025–2026 NexusM.org
+
+================================================================================
+NEXUSM LICENSE
+================================================================================
+
+This software is released under the Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0).
+
+  You may share it freely. You may NOT use it commercially, and you may NOT
+  distribute modified versions.
+
+  Full license: https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode
+
+================================================================================
+THIRD-PARTY COMPONENTS
+================================================================================
+
+NexusM bundles or depends on the following open-source libraries:
+
+  Package / Library                              License       Copyright
+  ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
+  Microsoft.EntityFrameworkCore 8.x              MIT           .NET Foundation and Contributors
+  Microsoft.EntityFrameworkCore.Sqlite 8.x       MIT           .NET Foundation and Contributors
+  Microsoft.EntityFrameworkCore.Design 8.x       MIT           .NET Foundation and Contributors
+  Microsoft.Extensions.Configuration.Json 8.x    MIT           .NET Foundation and Contributors
+  System.Management 8.x                          MIT           .NET Foundation and Contributors
+  System.Security.Cryptography.ProtectedData 8.x MIT           .NET Foundation and Contributors
+  PdfSharpCore 1.3.x                             MIT           empira Software GmbH; PdfSharpCore Contributors
+  SharpCompress 0.46.x                           MIT           Adam Chester and contributors
+  VersOne.Epub 3.3.x                             MIT           vers one
+  PDFtoImage 5.2.x                               MIT           David Sungaila
+  SkiaSharp (transitive, via PDFtoImage)         MIT           Microsoft / Xamarin
+  JSZip 3.10.x  [frontend]                       MIT           Stuart Knightley, David Duponchel et al.
+  ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
+  MetadataExtractor 2.8.x                        Apache-2.0    Drew Noakes and contributors
+  XmpCore (transitive, via MetadataExtractor)    Apache-2.0    Adobe Systems / XmpCore contributors
+  SixLabors.ImageSharp 3.1.x                     Apache-2.0*   Six Labors
+  SixLabors.Fonts (transitive)                   Apache-2.0*   Six Labors
+  Serilog.AspNetCore 8.x                         Apache-2.0    Serilog Contributors
+  Serilog.Sinks.File 6.x                         Apache-2.0    Serilog Contributors
+  Serilog.Sinks.Console 6.x                      Apache-2.0    Serilog Contributors
+  Serilog.Sinks.Debug (transitive)               Apache-2.0    Serilog Contributors
+  HLS.js  [frontend]                             Apache-2.0    Dailymotion / video-dev contributors
+  ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
+  TagLib# (TagLibSharp) 2.3.x                    LGPL-2.1      Novell, Inc.; Scott Peterson; Brian Nickel
+                                                               Gabriel Burt; Lluis Sanchez Gual et al.
+  ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
+  epub.js  [frontend]                            BSD-2-Clause  Frederick Giasson and contributors
+  ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
+  ini-parser-netstandard 2.5.x                   Unlicense     Ricardo Amores Hernández and contributors
+  ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
+  FFmpeg (external binary, optional)             LGPL-2.1 or   FFmpeg Contributors
+                                                 GPL-2.0+      https://ffmpeg.org/legal.html
+  PDFium (native, via PDFtoImage)                BSD-3-Clause  The Chromium Authors / PDFium Authors
+
+* SixLabors.ImageSharp and SixLabors.Fonts use the Six Labors Split License.
+  For non-commercial / open-source use the Apache 2.0 terms apply.
+  Commercial use requires a separate license: https://sixlabors.com/pricing
+
+--------------------------------------------------------------------------------
+License texts:
+  MIT           https://opensource.org/licenses/MIT
+  Apache-2.0    https://www.apache.org/licenses/LICENSE-2.0
+  LGPL-2.1      https://www.gnu.org/licenses/lgpl-2.1.html
+  BSD-2-Clause  https://opensource.org/licenses/BSD-2-Clause
+  BSD-3-Clause  https://opensource.org/licenses/BSD-3-Clause
+  Unlicense     https://unlicense.org
+  GPL-2.0+      https://www.gnu.org/licenses/gpl-2.0.html
+================================================================================
