@@ -8,8 +8,12 @@
     <meta name="theme-color" content="#121212">
     <title>NexusM</title>
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <script>try{var t=localStorage.getItem('nexusm-theme');if(t==='blue')document.documentElement.classList.add('theme-blue');else if(t==='purple')document.documentElement.classList.add('theme-purple');else if(t==='emerald')document.documentElement.classList.add('theme-emerald');}catch(e){}</script>
-    <link rel="stylesheet" href="/css/app.css?v=27">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/favicon.svg">
+    <script>try{var t=localStorage.getItem('nexusm-theme');if(t==='blue')document.documentElement.classList.add('theme-blue');else if(t==='purple')document.documentElement.classList.add('theme-purple');else if(t==='emerald')document.documentElement.classList.add('theme-emerald');else if(t==='sky-grey')document.documentElement.classList.add('theme-sky-grey');else if(t==='sky-blue')document.documentElement.classList.add('theme-sky-blue');}catch(e){}</script>
+    <link rel="stylesheet" href="/css/app.css?v=146">
+    <link rel="stylesheet" id="tpl-css" href="">
+    <script>try{var _tpl=localStorage.getItem('nexusm-template');if(_tpl){var _l=document.getElementById('tpl-css');if(_l)_l.href='/templates/'+_tpl+'/style.css';}}catch(e){}</script>
     <style>
         /* Minimalist Icon System */
         .nav-icon {
@@ -41,6 +45,22 @@
             height: 28px;
             flex-shrink: 0;
             border-radius: 6px;
+        }
+
+        /* Demo mode badge */
+        .demo-mode-badge {
+            display: none;
+            margin: 0 12px 6px;
+            padding: 4px 10px;
+            background: rgba(34, 197, 94, 0.15);
+            color: rgba(34, 197, 94, 0.9);
+            border: 1px solid rgba(34, 197, 94, 0.35);
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            text-align: center;
         }
 
         /* Player placeholder icon */
@@ -87,8 +107,13 @@
                     <ul class="sidebar-nav">
                         <li><a href="#" data-page="movies">
                             <span class="nav-icon"><svg><use href="#icon-film"/></svg></span>
-                            <span class="nav-label">Movies/TV Shows</span>
+                            <span class="nav-label">Movies</span>
                             <span class="nav-badge nav-label" id="badge-movies">0</span>
+                        </a></li>
+                        <li><a href="#" data-page="tvshows">
+                            <span class="nav-icon"><svg><use href="#icon-tv"/></svg></span>
+                            <span class="nav-label">TV Shows/Docs</span>
+                            <span class="nav-badge nav-label" id="badge-tvshows">0</span>
                         </a></li>
                         <li><a href="#" data-page="music">
                             <span class="nav-icon"><svg><use href="#icon-music"/></svg></span>
@@ -99,6 +124,16 @@
                             <span class="nav-icon"><svg><use href="#icon-video"/></svg></span>
                             <span class="nav-label">Music Videos</span>
                             <span class="nav-badge nav-label" id="badge-musicvideos">0</span>
+                        </a></li>
+                        <li><a href="#" data-page="podcasts">
+                            <span class="nav-icon"><svg><use href="#icon-podcast"/></svg></span>
+                            <span class="nav-label">Podcasts</span>
+                            <span class="nav-badge nav-label" id="badge-podcasts">0</span>
+                        </a></li>
+                        <li><a href="#" data-page="anime">
+                            <span class="nav-icon"><svg><use href="#icon-film"/></svg></span>
+                            <span class="nav-label">Anime</span>
+                            <span class="nav-badge nav-label" id="badge-anime">0</span>
                         </a></li>
                     </ul>
                 </div>
@@ -117,10 +152,6 @@
                             <span class="nav-label">Internet TV</span>
                             <span class="nav-badge live-badge nav-label">LIVE</span>
                         </a></li>
-                        <li><a href="#" data-page="podcasts">
-                            <span class="nav-icon"><svg><use href="#icon-podcast"/></svg></span>
-                            <span class="nav-label">Podcasts</span>
-                        </a></li>
                     </ul>
                 </div>
 
@@ -138,6 +169,11 @@
                             <span class="nav-label">eBooks</span>
                             <span class="nav-badge nav-label" id="badge-ebooks">0</span>
                         </a></li>
+                        <li><a href="#" data-page="audiobooks">
+                            <span class="nav-icon"><svg><use href="#icon-headphones"/></svg></span>
+                            <span class="nav-label">Audio Books</span>
+                            <span class="nav-badge nav-label" id="badge-audiobooks">0</span>
+                        </a></li>
                         <li><a href="#" data-page="actors">
                             <span class="nav-icon"><svg><use href="#icon-users"/></svg></span>
                             <span class="nav-label">Actors</span>
@@ -152,11 +188,15 @@
                     <ul class="sidebar-nav">
                         <li><a href="#" data-page="favourites">
                             <span class="nav-icon"><svg><use href="#icon-heart"/></svg></span>
-                            <span class="nav-label">Favourites</span>
+                            <span class="nav-label">Favorites</span>
                         </a></li>
                         <li><a href="#" data-page="playlists">
                             <span class="nav-icon"><svg><use href="#icon-list"/></svg></span>
                             <span class="nav-label">Playlists</span>
+                        </a></li>
+                        <li><a href="#" data-page="watchlist">
+                            <span class="nav-icon"><svg><use href="#icon-bookmark"/></svg></span>
+                            <span class="nav-label">Watchlist</span>
                         </a></li>
                         <li><a href="#" data-page="mostplayed">
                             <span class="nav-icon"><svg><use href="#icon-trending"/></svg></span>
@@ -212,6 +252,9 @@
                         </div>
                         <div id="status-sizes" style="margin-top:6px"></div>
                         <div class="status-separator"></div>
+                        <div class="status-shares-title">Cached Medias</div>
+                        <div id="status-cache"></div>
+                        <div class="status-separator"></div>
                         <div class="status-shares-title">Media Shares</div>
                         <div id="status-shares"></div>
                     </div>
@@ -219,7 +262,8 @@
 
 
             </div>
-            <div class="sidebar-version">BETA 0.98 (New World Order Edition)</div>
+            <div class="demo-mode-badge" id="demo-mode-badge">DEMO MODE</div>
+            <div class="sidebar-version">2026.08 (New World Order Edition)</div>
         </nav>
 
         <!-- Top Bar -->
@@ -242,6 +286,12 @@
                 </button>
                 <button class="topbar-btn" id="btn-refresh" title="Refresh">
                     <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round"><use href="#icon-refresh"/></svg>
+                </button>
+                <button class="topbar-btn topbar-btn-gobig" id="btn-gobig" title="Go Big — TV Mode" onclick="App.startGoBigMode()">
+                    <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24">
+                        <rect x="2" y="3" width="20" height="14" rx="2"/>
+                        <polyline points="8 21 12 17 16 21"/>
+                    </svg>
                 </button>
                 <button class="topbar-btn topbar-btn-logout" id="btn-logout" title="Log Out" style="display:none" onclick="App.logout()">
                     <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-logout"/></svg>
@@ -270,7 +320,7 @@
                     <div class="player-track-title" id="player-title">No track playing</div>
                     <div class="player-track-artist" id="player-artist">&nbsp;</div>
                 </div>
-                <button class="player-btn player-fav-btn" id="btn-player-fav" title="Add to Favourites">
+                <button class="player-btn player-fav-btn" id="btn-player-fav" title="Add to Favorites">
                     <svg class="player-fav-icon" style="width:18px;height:18px;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-heart"/></svg>
                 </button>
                 <div class="player-playlist-wrapper" style="position:relative">
@@ -310,6 +360,9 @@
                 </div>
             </div>
             <div class="player-right">
+                <button class="player-btn" id="btn-eq" title="Equalizer">
+                    <svg style="width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-equalizer"/></svg>
+                </button>
                 <div class="volume-control">
                     <svg style="width:16px;height:16px;stroke:rgba(255,255,255,0.45);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-volume"/></svg>
                     <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="80">
@@ -341,15 +394,18 @@
             </button>
             <!-- Library sub-menu popup -->
             <div class="mobile-library-menu" id="mobile-library-menu">
+                <button data-page="musicvideos"><svg class="mobile-nav-icon"><use href="#icon-video"/></svg> Music Videos</button>
+                <button data-page="podcasts"><svg class="mobile-nav-icon"><use href="#icon-podcast"/></svg> Podcasts</button>
                 <button data-page="radio"><svg class="mobile-nav-icon"><use href="#icon-radio"/></svg> Radio</button>
                 <button data-page="internettv"><svg class="mobile-nav-icon"><use href="#icon-tv"/></svg> Internet TV</button>
-                <button data-page="podcasts"><svg class="mobile-nav-icon"><use href="#icon-podcast"/></svg> Podcasts</button>
-                <button data-page="musicvideos"><svg class="mobile-nav-icon"><use href="#icon-video"/></svg> Music Videos</button>
                 <button data-page="pictures"><svg class="mobile-nav-icon"><use href="#icon-image"/></svg> Pictures</button>
                 <button data-page="ebooks"><svg class="mobile-nav-icon"><use href="#icon-book"/></svg> eBooks</button>
+                <button data-page="audiobooks"><svg class="mobile-nav-icon"><use href="#icon-headphones"/></svg> Audio Books</button>
+                <button data-page="anime"><svg class="mobile-nav-icon"><use href="#icon-film"/></svg> Anime</button>
                 <button data-page="actors"><svg class="mobile-nav-icon"><use href="#icon-users"/></svg> Actors</button>
-                <button data-page="favourites"><svg class="mobile-nav-icon"><use href="#icon-heart"/></svg> Favourites</button>
+                <button data-page="favourites"><svg class="mobile-nav-icon"><use href="#icon-heart"/></svg> Favorites</button>
                 <button data-page="playlists"><svg class="mobile-nav-icon"><use href="#icon-list"/></svg> Playlists</button>
+                <button data-page="watchlist"><svg class="mobile-nav-icon"><use href="#icon-bookmark"/></svg> Watchlist</button>
                 <button data-page="analysis"><svg class="mobile-nav-icon"><use href="#icon-bar-chart"/></svg> Analysis</button>
             </div>
         </nav>
@@ -414,6 +470,14 @@
             <circle cx="6" cy="18" r="3"/>
             <circle cx="18" cy="16" r="3"/>
         </symbol>
+        <symbol id="icon-edit" viewBox="0 0 24 24">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </symbol>
+        <symbol id="icon-x" viewBox="0 0 24 24">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+        </symbol>
         <symbol id="icon-layers" viewBox="0 0 24 24">
             <polygon points="12 2 2 7 12 12 22 7 12 2"/>
             <polyline points="2 17 12 22 22 17"/>
@@ -427,6 +491,10 @@
         <symbol id="icon-book" viewBox="0 0 24 24">
             <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
             <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </symbol>
+        <symbol id="icon-headphones" viewBox="0 0 24 24">
+            <path d="M3 18v-6a9 9 0 0 1 18 0v6"/>
+            <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/>
         </symbol>
         <symbol id="icon-heart" viewBox="0 0 24 24">
             <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
@@ -507,6 +575,11 @@
             <polyline points="7 10 12 15 17 10"/>
             <line x1="12" y1="15" x2="12" y2="3"/>
         </symbol>
+        <symbol id="icon-upload" viewBox="0 0 24 24">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+        </symbol>
         <symbol id="icon-maximize" viewBox="0 0 24 24">
             <polyline points="15 3 21 3 21 9"/>
             <polyline points="9 21 3 21 3 15"/>
@@ -546,6 +619,17 @@
             <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
             <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
         </symbol>
+        <symbol id="icon-equalizer" viewBox="0 0 24 24">
+            <line x1="4" y1="21" x2="4" y2="14"/>
+            <line x1="4" y1="10" x2="4" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12" y2="3"/>
+            <line x1="20" y1="21" x2="20" y2="16"/>
+            <line x1="20" y1="12" x2="20" y2="3"/>
+            <line x1="1" y1="14" x2="7" y2="14"/>
+            <line x1="9" y1="8" x2="15" y2="8"/>
+            <line x1="17" y1="16" x2="23" y2="16"/>
+        </symbol>
         <symbol id="icon-logout" viewBox="0 0 24 24">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
             <polyline points="16 17 21 12 16 7"/>
@@ -564,6 +648,9 @@
         <symbol id="icon-file" viewBox="0 0 24 24">
             <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>
             <polyline points="13 2 13 9 20 9"/>
+        </symbol>
+        <symbol id="icon-activity" viewBox="0 0 24 24">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
         </symbol>
         <symbol id="icon-file-text" viewBox="0 0 24 24">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -609,6 +696,9 @@
         <symbol id="icon-reboot" viewBox="0 0 24 24">
             <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
         </symbol>
+        <symbol id="icon-bookmark" viewBox="0 0 24 24">
+            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/>
+        </symbol>
         <!-- Medals -->
         <symbol id="icon-medal-gold" viewBox="0 0 24 24">
             <circle cx="12" cy="14" r="7" fill="#FFD700" stroke="#B8860B" stroke-width="1"/>
@@ -633,9 +723,11 @@
         </symbol>
     </svg>
 
-    <audio id="audio-player" preload="auto"></audio>
+    <audio id="audio-player" preload="auto" crossorigin="anonymous"></audio>
     <script src="/js/jszip.min.js"></script>
     <script src="/js/epub.min.js"></script>
-    <script src="/js/app.js?v=33"></script>
+    <script src="/js/app.js?v=269"></script>
+    <script id="tpl-js"></script>
+    <script>try{var _ts=localStorage.getItem('nexusm-template');if(_ts){var _sj=document.getElementById('tpl-js');if(_sj){var _sr=document.createElement('script');_sr.src='/templates/'+_ts+'/script.js';document.body.appendChild(_sr);}}}catch(e){}</script>
 </body>
 </html>

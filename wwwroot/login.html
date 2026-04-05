@@ -148,6 +148,9 @@
         .user-avatar.admin {
             background: linear-gradient(135deg, #f39c12, #e67e22);
         }
+        .user-avatar.child {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+        }
         .user-name {
             font-size: 15px;
             font-weight: 500;
@@ -266,6 +269,40 @@
             margin-bottom: 12px;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Viewing Hours Blocked */
+        #viewing-hours-block {
+            display: none;
+            max-width: 400px;
+            margin: 0 auto;
+            background: var(--bg-secondary);
+            border: 1px solid rgba(231,76,60,0.4);
+            border-radius: 16px;
+            padding: 40px 32px;
+            text-align: center;
+        }
+        .vh-icon { font-size: 52px; margin-bottom: 12px; }
+        .vh-user {
+            color: var(--accent);
+            font-size: 15px;
+            margin-bottom: 20px;
+        }
+        .vh-message {
+            font-size: 14px;
+            font-weight: 700;
+            color: #e74c3c;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            line-height: 1.6;
+            margin-bottom: 6px;
+        }
+        .vh-times {
+            font-size: 26px;
+            font-weight: 700;
+            color: var(--text-primary);
+            letter-spacing: 2px;
+            margin-bottom: 28px;
+        }
     </style>
 </head>
 <body>
@@ -307,6 +344,15 @@
                 <button type="button" class="btn btn-back" id="btn-back">&#8592; Back to Users</button>
             </form>
         </div>
+
+        <!-- Viewing Hours Blocked -->
+        <div id="viewing-hours-block">
+            <div class="vh-icon">🕐</div>
+            <div id="vh-user-display" class="vh-user"></div>
+            <div id="vh-message" class="vh-message"></div>
+            <div id="vh-times" class="vh-times"></div>
+            <button type="button" class="btn btn-back" id="vh-btn-back">&#8592; Back to Users</button>
+        </div>
     </div>
 
     <script>
@@ -321,6 +367,15 @@
         const LoginApp = {
             users: [],
             selectedUser: null,
+            demoMode: false,
+            lang: {},
+
+            // Return translated string, replacing {key} placeholders
+            t(key, vars = {}) {
+                let s = this.lang[key] || key;
+                for (const [k, v] of Object.entries(vars)) s = s.replace(`{${k}}`, v);
+                return s;
+            },
 
             async init() {
                 // Check if already authenticated
@@ -336,20 +391,47 @@
                         window.location.href = '/';
                         return;
                     }
+                    this.demoMode = session.demoModeEnabled || false;
+
+                    // Load language file for login-page strings
+                    try {
+                        const code = session.language || 'en';
+                        const lr = await fetch(`/lang/${code}.json`);
+                        if (lr.ok) this.lang = await lr.json();
+                    } catch (e) { /* fall back to key names */ }
                 } catch (e) { /* continue to login */ }
 
                 // Load users
                 await this.loadUsers();
-                document.getElementById('loading').style.display = 'none';
 
-                // Bind events
+                // Demo mode: auto-login as guest immediately — no selection or PIN screen
+                if (this.demoMode) {
+                    const guest = this.users.find(u => u.role === 'guest');
+                    if (guest) {
+                        await this.autoLoginGuest(guest.username);
+                        return;
+                    }
+                }
+
+                document.getElementById('loading').style.display = 'none';
+                this.bindEvents();
+
+                if (this.users.length === 0) {
+                    this.selectUser('admin', 'Admin');
+                } else if (this.users.length === 1) {
+                    this.selectUser(this.users[0].username, this.users[0].displayName || this.users[0].username);
+                } else {
+                    this.showUserSelection();
+                }
+            },
+
+            bindEvents() {
                 document.getElementById('pin-form').addEventListener('submit', (e) => {
                     e.preventDefault();
                     this.submitLogin();
                 });
                 document.getElementById('btn-back').addEventListener('click', () => this.showUserSelection());
-
-                // Only allow digits in PIN field
+                document.getElementById('vh-btn-back').addEventListener('click', () => this.showUserSelection());
                 document.getElementById('pin').addEventListener('input', (e) => {
                     e.target.value = e.target.value.replace(/\D/g, '');
                 });
@@ -363,25 +445,34 @@
                 } catch (e) {
                     this.users = [];
                 }
+            },
 
-                if (this.users.length === 0) {
-                    // No users found, show PIN entry directly for admin
-                    this.selectUser('admin', 'Admin');
-                } else if (this.users.length === 1) {
-                    // Only one user, go straight to PIN
-                    this.selectUser(this.users[0].username, this.users[0].displayName || this.users[0].username);
-                } else {
-                    this.showUserSelection();
-                }
+            // Demo mode: silently log in as the guest user with no PIN
+            async autoLoginGuest(username) {
+                try {
+                    const res = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username, pin: '' })
+                    });
+                    if (res.ok) {
+                        window.location.href = '/';
+                        return;
+                    }
+                } catch (e) { /* fall through to normal login */ }
+                // Guest auto-login failed — show normal login screen as fallback
+                document.getElementById('loading').style.display = 'none';
+                this.bindEvents();
+                this.showUserSelection();
             },
 
             showUserSelection() {
                 const grid = document.getElementById('user-grid');
                 grid.innerHTML = this.users.map(u => {
                     const initial = (u.displayName || u.username).charAt(0).toUpperCase();
-                    const isAdmin = u.role === 'admin';
+                    const avatarClass = u.role === 'admin' ? 'admin' : u.role === 'child' ? 'child' : '';
                     return `<div class="user-card" onclick="LoginApp.selectUser('${this.esc(u.username)}', '${this.esc(u.displayName || u.username)}')">
-                        <div class="user-avatar ${isAdmin ? 'admin' : ''}">${this.esc(initial)}</div>
+                        <div class="user-avatar ${avatarClass}">${this.esc(initial)}</div>
                         <div class="user-name">${this.esc(u.displayName || u.username)}</div>
                         <div class="user-role">${this.esc(u.role)}</div>
                     </div>`;
@@ -389,21 +480,56 @@
 
                 document.getElementById('user-selection').style.display = 'block';
                 document.getElementById('pin-entry').style.display = 'none';
+                document.getElementById('viewing-hours-block').style.display = 'none';
                 this.clearError();
             },
 
             selectUser(username, displayName) {
+                // Find the user object for viewing-hours check
+                const user = this.users.find(u => u.username === username);
+
+                // Client-side viewing hours check (enforcement is also on the server)
+                if (user && user.role === 'child' && user.viewingHoursEnabled) {
+                    const now = new Date();
+                    const cur = now.getHours() * 60 + now.getMinutes();
+                    const [sh, sm] = (user.viewingHoursStart || '08:00').split(':').map(Number);
+                    const [eh, em] = (user.viewingHoursEnd   || '22:00').split(':').map(Number);
+                    const start = sh * 60 + sm;
+                    const end   = eh * 60 + em;
+                    const inWindow = start <= end
+                        ? cur >= start && cur <= end
+                        : cur >= start || cur <= end;  // overnight window
+
+                    if (!inWindow) {
+                        this.showViewingHoursBlock(displayName, user.viewingHoursStart, user.viewingHoursEnd);
+                        return;
+                    }
+                }
+
                 this.selectedUser = username;
                 document.getElementById('username').value = username;
                 document.getElementById('pin-user-display').textContent = displayName;
                 document.getElementById('user-selection').style.display = 'none';
                 document.getElementById('pin-entry').style.display = 'block';
+                document.getElementById('viewing-hours-block').style.display = 'none';
                 document.getElementById('pin').value = '';
                 document.getElementById('pin').focus();
                 this.clearError();
 
                 // Hide back button if only 1 user
                 document.getElementById('btn-back').style.display = this.users.length > 1 ? 'block' : 'none';
+            },
+
+            showViewingHoursBlock(displayName, start, end) {
+                document.getElementById('user-selection').style.display = 'none';
+                document.getElementById('pin-entry').style.display = 'none';
+                document.getElementById('vh-user-display').textContent = displayName;
+                document.getElementById('vh-message').textContent =
+                    this.t('login.viewingHoursMessage');
+                document.getElementById('vh-times').textContent = `${start} – ${end}`;
+                document.getElementById('viewing-hours-block').style.display = 'block';
+                // Hide vh back button if only 1 user
+                document.getElementById('vh-btn-back').style.display = this.users.length > 1 ? 'block' : 'none';
             },
 
             async submitLogin() {

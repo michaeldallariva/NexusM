@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html><head><title>HLS Test</title></head>
+<body style="background:#000;margin:0;display:flex;flex-direction:column;align-items:center;padding:20px">
+<h2 style="color:#fff">HLS Direct Test - Furiosa</h2>
+<video id="v" controls style="width:1280px;max-width:100%;background:#111"></video>
+<div id="log" style="color:#0f0;font-family:monospace;margin-top:10px;white-space:pre;max-height:400px;overflow:auto"></div>
+<script src="/js/hls.min.js"></script>
+<script>
+var v = document.getElementById('v');
+var log = document.getElementById('log');
+function L(s) { log.textContent += s + '\n'; }
+var hls = new Hls({debug: false});
+hls.loadSource('/api/hls/video-24-a1/playlist.m3u8');
+hls.attachMedia(v);
+hls.on(Hls.Events.MANIFEST_PARSED, function() { L('MANIFEST_PARSED'); v.play(); });
+hls.on(Hls.Events.LEVEL_LOADED, function(e,d) { L('LEVEL_LOADED segs:' + d.details.fragments.length); });
+hls.on(Hls.Events.FRAG_LOADED, function(e,d) { L('FRAG_LOADED ' + d.frag.relurl + ' ' + d.payload.byteLength + 'b'); });
+hls.on(Hls.Events.ERROR, function(e,d) { L('ERROR type=' + d.type + ' det=' + d.details + ' fatal=' + d.fatal); });
+v.addEventListener('loadedmetadata', function() { L('loadedmetadata w=' + v.videoWidth + ' h=' + v.videoHeight); });
+v.addEventListener('error', function() { L('video.error code=' + (v.error ? v.error.code : '?')); });
+v.addEventListener('playing', function() { L('playing!'); });
+v.addEventListener('stalled', function() { L('stalled'); });
+</script>
+</body></html>

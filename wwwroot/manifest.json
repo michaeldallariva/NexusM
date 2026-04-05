@@ -1,0 +1,22 @@
+{
+    "name": "NexusM",
+    "short_name": "NexusM",
+    "description": "Self-hosted media server",
+    "display": "standalone",
+    "start_url": "/",
+    "background_color": "#121212",
+    "theme_color": "#121212",
+    "icons": [
+        {
+            "src": "/favicon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any"
+        },
+        {
+            "src": "/favicon.ico",
+            "sizes": "48x48",
+            "type": "image/x-icon"
+        }
+    ]
+}

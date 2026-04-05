@@ -1,0 +1,227 @@
+/* -------------------------------------------------------------------
+   NexusM Custom Template 1 - "Horizon"
+   Two-row top nav - Amber accent - Cinema player
+   ------------------------------------------------------------------- */
+
+/* -- 1. CSS variable overrides ------------------------------------
+   Use html:root (specificity 0,1,1) so we beat any theme class
+   (.theme-blue etc. has 0,1,0) regardless of load order.         */
+html:root,
+body.theme-blue,
+body.theme-purple,
+body.theme-emerald,
+body.theme-sky-grey,
+body.theme-sky-blue {
+  --accent:            #f59e0b;
+  --accent-hover:      #fbbf24;
+  --accent-dim:        rgba(245,158,11,0.18);
+  --bg-primary:        #0c0c0e;
+  --bg-secondary:      #141416;
+  --bg-surface:        #1c1c20;
+  --bg-hover:          rgba(245,158,11,0.09);
+  --bg-active:         rgba(245,158,11,0.16);
+  --border:            rgba(255,255,255,0.08);
+  --text-primary:      #f4f4f5;
+  --text-secondary:    #a1a1aa;
+  --text-muted:        #52525b;
+  --radius:            10px;
+  --radius-sm:         6px;
+  --radius-lg:         16px;
+  /* Kill sidebar column */
+  --sidebar-width:     0px;
+  --sidebar-collapsed: 0px;
+  /* Two-row topbar: row1(40) + border(1) + row2(40) + 3 breathing = 84 */
+  --topbar-height:     84px;
+}
+
+/* -- 2. Grid: no sidebar, topbar spans full width ----------------- */
+.app-container {
+  grid-template-columns: 0 1fr !important;
+  grid-template-areas:
+    "topbar topbar"
+    "content content"
+    "player player" !important;
+}
+
+/* -- 3. Hide sidebar ---------------------------------------------- */
+#sidebar { display: none !important; }
+
+/* -- 4. Two-row topbar shell -------------------------------------- */
+header.topbar {
+  background:              rgba(14,14,16,0.97) !important;
+  backdrop-filter:         blur(18px) !important;
+  -webkit-backdrop-filter: blur(18px) !important;
+  border-bottom:           1px solid rgba(245,158,11,0.22) !important;
+  display:                 flex !important;
+  flex-direction:          column !important;
+  align-items:             stretch !important;
+  padding:                 0 !important;
+  height:                  var(--topbar-height) !important;
+  min-height:              var(--topbar-height) !important;
+  box-shadow:              0 2px 24px rgba(0,0,0,0.5) !important;
+}
+
+/* -- 5. Row 1 - logo + primary nav + search/actions --------------- */
+#horizon-row1 {
+  display:      flex;
+  align-items:  center;
+  padding:      0 14px;
+  height:       40px;
+  min-height:   40px;
+  flex-shrink:  0;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  overflow:     visible;
+}
+
+/* -- 6. Row 2 - collections + admin nav --------------------------- */
+#horizon-row2 {
+  display:     flex;
+  align-items: center;
+  padding:     0 14px;
+  height:      40px;
+  min-height:  40px;
+  flex-shrink: 0;
+  background:  rgba(245,158,11,0.03);
+  overflow:    visible;
+}
+
+/* -- 7. Logo ------------------------------------------------------ */
+#horizon-logo {
+  font-size:     15px;
+  font-weight:   800;
+  color:         var(--text-primary);
+  letter-spacing:-0.02em;
+  margin-right:  14px;
+  flex-shrink:   0;
+  text-decoration: none;
+  white-space:   nowrap;
+}
+#horizon-logo .hl-dot { color: var(--accent); }
+
+/* -- 8. Nav strips (shared) --------------------------------------- */
+#horizon-nav1,
+#horizon-nav2 {
+  display:        flex;
+  align-items:    center;
+  gap:            1px;
+  overflow-x:     auto;
+  scrollbar-width:none;
+  min-width:      0;
+}
+#horizon-nav1 { flex: 1; }
+#horizon-nav2 { flex: 1; }
+#horizon-nav1::-webkit-scrollbar,
+#horizon-nav2::-webkit-scrollbar { display: none; }
+
+/* -- 9. Nav link style -------------------------------------------- */
+a[data-horizon-link] {
+  display:     flex;
+  align-items: center;
+  gap:         5px;
+  padding:     4px 9px;
+  border-radius: var(--radius-sm);
+  font-size:   12.5px;
+  font-weight: 500;
+  color:       var(--text-secondary);
+  text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:  color 0.15s, background 0.15s;
+}
+a[data-horizon-link]:hover {
+  color:       var(--text-primary);
+  background:  var(--bg-hover);
+}
+a[data-horizon-link].active {
+  color:       var(--accent);
+  background:  var(--bg-active);
+}
+a[data-horizon-link] svg { width: 14px; height: 14px; flex-shrink: 0; }
+
+/* Divider before Admin section in row 2 */
+#horizon-nav2 a[data-page="analysis"] {
+  margin-left:  10px;
+  padding-left: 10px;
+  border-left:  1px solid rgba(255,255,255,0.1);
+}
+
+/* -- 10. Search + actions stay right in row 1 --------------------- */
+#horizon-row1 .search-box    { margin-left: auto; flex-shrink: 0; }
+#horizon-row1 .topbar-actions { flex-shrink: 0; }
+#horizon-row1 .breadcrumb,
+#horizon-row1 #sidebar-expand-btn { display: none !important; }
+
+/* -- 11. Topbar button hover in amber ----------------------------- */
+header.topbar .topbar-btn {
+  color:         var(--text-secondary) !important;
+  border-radius: var(--radius-sm) !important;
+  transition:    color 0.15s, background 0.15s !important;
+}
+header.topbar .topbar-btn:hover {
+  color:       var(--accent) !important;
+  background:  var(--bg-hover) !important;
+}
+
+/* -- 12. Player bar ----------------------------------------------- */
+#player-bar {
+  background:              rgba(10,10,12,0.97) !important;
+  backdrop-filter:         blur(20px) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  border-top:  2px solid var(--accent) !important;
+  box-shadow:  0 -4px 32px rgba(245,158,11,0.12) !important;
+}
+.seek-track, .progress-track { background: rgba(245,158,11,0.15) !important; }
+.seek-fill, .progress-fill   { background: linear-gradient(90deg, var(--accent), var(--accent-hover)) !important; }
+
+/* -- 13. Cards ---------------------------------------------------- */
+.video-card, .track-card, .album-card, .movie-card, .media-card {
+  background:    var(--bg-surface) !important;
+  border:        1px solid rgba(255,255,255,0.06) !important;
+  border-radius: var(--radius-lg) !important;
+  transition:    transform 0.2s, box-shadow 0.2s, border-color 0.2s !important;
+  box-shadow:    0 2px 12px rgba(0,0,0,0.4) !important;
+}
+.video-card:hover, .track-card:hover, .album-card:hover, .movie-card:hover, .media-card:hover {
+  transform:     translateY(-3px) scale(1.01) !important;
+  border-color:  rgba(245,158,11,0.35) !important;
+  box-shadow:    0 8px 28px rgba(0,0,0,0.5), 0 0 0 1px rgba(245,158,11,0.2) !important;
+}
+
+/* -- 14. Buttons -------------------------------------------------- */
+.btn-primary, button.btn-primary {
+  background:    var(--accent) !important;
+  color:         #000 !important;
+  font-weight:   700 !important;
+  border-radius: 20px !important;
+  border:        none !important;
+}
+.btn-primary:hover { background: var(--accent-hover) !important; }
+.btn-secondary, button.btn-secondary {
+  border:        1px solid rgba(245,158,11,0.4) !important;
+  color:         var(--accent) !important;
+  border-radius: 20px !important;
+  background:    transparent !important;
+}
+.btn-secondary:hover { background: var(--bg-active) !important; }
+
+/* -- 15. Settings sections ---------------------------------------- */
+.settings-section {
+  background:    var(--bg-surface) !important;
+  border:        1px solid rgba(255,255,255,0.06) !important;
+  border-radius: var(--radius-lg) !important;
+}
+.settings-section h3 {
+  color:        var(--accent) !important;
+  border-bottom: 1px solid rgba(245,158,11,0.15) !important;
+}
+
+/* -- 16. Scrollbars ----------------------------------------------- */
+::-webkit-scrollbar-thumb { background: rgba(245,158,11,0.3); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(245,158,11,0.5); }
+
+/* -- 17. Responsive ----------------------------------------------- */
+@media (max-width: 768px) {
+  a[data-horizon-link] span { display: none; }
+  a[data-horizon-link] { padding: 4px 7px; }
+  #horizon-logo { margin-right: 6px; }
+}
