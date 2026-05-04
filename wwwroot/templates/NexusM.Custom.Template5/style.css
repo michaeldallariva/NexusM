@@ -1,0 +1,287 @@
+/* -------------------------------------------------------------------
+   NexusM Custom Template 5 - "Plux!"
+   Plex-inspired dark theme — warm charcoal, orange accent, sidebar.
+   Colours extracted from Plex 4.159.0 production CSS.
+   ------------------------------------------------------------------- */
+
+/* ── 1. CSS variable overrides ─────────────────────────────────── */
+html:root,
+body.theme-blue, body.theme-purple, body.theme-emerald,
+body.theme-sky-grey, body.theme-sky-blue {
+  --accent:            #e5a00d;
+  --accent-hover:      #f3b52f;
+  --accent-dim:        rgba(229,160,13,0.18);
+  --bg-primary:        #1f2326;
+  --bg-secondary:      #191a1c;
+  --bg-surface:        #232426;
+  --bg-hover:          rgba(229,160,13,0.10);
+  --bg-active:         rgba(229,160,13,0.20);
+  --border:            #323232;
+  --text-primary:      #eeeeee;
+  --text-secondary:    #999999;
+  --text-muted:        #555555;
+  --radius:            3px;
+  --radius-sm:         2px;
+  --radius-lg:         4px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+}
+
+/* ── 2. Root background ─────────────────────────────────────────── */
+body, #app, .app-container, #main-content {
+  background-color: #1f2326 !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif !important;
+}
+
+/* ── 3. Topbar — Plex dark header ───────────────────────────────── */
+header.topbar {
+  background: #191a1c !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-bottom: 1px solid #323232 !important;
+  box-shadow: 0 1px 0 rgba(0,0,0,0.5) !important;
+}
+header.topbar .topbar-btn {
+  color: #999 !important;
+  border-radius: 3px !important;
+  transition: color 0.15s, background 0.15s !important;
+}
+header.topbar .topbar-btn:hover {
+  color: #e5a00d !important;
+  background: rgba(229,160,13,0.12) !important;
+}
+header.topbar #page-title {
+  color: #eee !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+}
+
+/* ── 4. Sidebar — Plex left nav ─────────────────────────────────── */
+#sidebar {
+  background: #191a1c !important;
+  border-right: 1px solid #323232 !important;
+}
+#sidebar .sidebar-nav li a {
+  color: #999 !important;
+  border-radius: 3px !important;
+  transition: color 0.15s, background 0.15s !important;
+}
+#sidebar .sidebar-nav li a:hover {
+  background: rgba(229,160,13,0.10) !important;
+  color: #eee !important;
+}
+#sidebar .sidebar-nav li a.active {
+  background: rgba(229,160,13,0.18) !important;
+  color: #e5a00d !important;
+}
+#sidebar .sidebar-nav li a.active svg {
+  color: #e5a00d !important;
+}
+#sidebar .nav-label {
+  font-size: 13px !important;
+  font-weight: 400 !important;
+}
+
+/* ── 5. Player bar — Plex footer bar ───────────────────────────── */
+#player-bar {
+  background: #191a1c !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-top: 1px solid #323232 !important;
+  box-shadow: 0 -1px 0 rgba(0,0,0,0.5) !important;
+}
+.seek-track, .progress-track {
+  background: rgba(229,160,13,0.18) !important;
+}
+.seek-fill, .progress-fill {
+  background: #e5a00d !important;
+}
+#player-bar .topbar-btn {
+  color: #999 !important;
+}
+#player-bar .topbar-btn:hover {
+  color: #e5a00d !important;
+  background: rgba(229,160,13,0.12) !important;
+}
+
+/* ── 6. Cards ───────────────────────────────────────────────────── */
+.video-card, .track-card, .album-card, .movie-card, .media-card {
+  background: #232426 !important;
+  border: 1px solid #323232 !important;
+  border-radius: 3px !important;
+  box-shadow: none !important;
+  transition: background 0.15s, border-color 0.15s !important;
+}
+.video-card:hover, .track-card:hover, .album-card:hover,
+.movie-card:hover, .media-card:hover {
+  background: #2d2d2d !important;
+  border-color: rgba(229,160,13,0.50) !important;
+  box-shadow: 0 0 0 1px rgba(229,160,13,0.22) !important;
+  transform: none !important;
+}
+
+/* ── 7. Buttons ─────────────────────────────────────────────────── */
+.btn-primary, button.btn-primary {
+  background: #cc7b19 !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  border-radius: 3px !important;
+  border: none !important;
+}
+.btn-primary:hover {
+  background: #e5a00d !important;
+}
+.btn-secondary, button.btn-secondary {
+  border: 1px solid rgba(229,160,13,0.45) !important;
+  color: #e5a00d !important;
+  border-radius: 3px !important;
+  background: transparent !important;
+}
+.btn-secondary:hover {
+  background: rgba(229,160,13,0.12) !important;
+}
+
+/* ── 8. Links ───────────────────────────────────────────────────── */
+a { color: #cc7b19 !important; text-decoration: none !important; }
+a:hover { color: #e9a049 !important; }
+
+/* ── 9. Inputs / selects ────────────────────────────────────────── */
+input[type="text"], input[type="password"], input[type="search"],
+input[type="email"], select, textarea {
+  background: #282828 !important;
+  border: 1px solid #323232 !important;
+  color: #eee !important;
+  border-radius: 3px !important;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: #e5a00d !important;
+  outline: none !important;
+}
+
+/* ── 10. Settings sections ──────────────────────────────────────── */
+.settings-section {
+  background: #232426 !important;
+  border: 1px solid #323232 !important;
+  border-radius: 3px !important;
+}
+.settings-section h3 {
+  color: #e5a00d !important;
+  border-bottom: 1px solid rgba(229,160,13,0.18) !important;
+}
+
+/* ── 11. Dialogs / modals ───────────────────────────────────────── */
+.modal-box, .dialog-box {
+  background: #232426 !important;
+  border: 1px solid #323232 !important;
+  border-radius: 3px !important;
+}
+/* Settings Saved modal */
+.nexus-modal-overlay {
+  background: rgba(0,0,0,0.72) !important;
+}
+.nexus-modal {
+  background: #232426 !important;
+  border: 1px solid #323232 !important;
+  border-radius: 4px !important;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.75) !important;
+}
+.nexus-modal-icon svg { stroke: #e5a00d !important; }
+.nexus-modal-title {
+  color: #eeeeee !important;
+  font-weight: 700 !important;
+}
+.nexus-modal-body {
+  color: #999999 !important;
+}
+.nexus-modal-btn {
+  background: #cc7b19 !important;
+  color: #ffffff !important;
+  border-radius: 3px !important;
+  padding: 9px 36px !important;
+  font-weight: 600 !important;
+  border: none !important;
+}
+.nexus-modal-btn:hover {
+  background: #e5a00d !important;
+  opacity: 1 !important;
+}
+
+/* ── 12. Progress / watched indicator ───────────────────────────── */
+.progress-bar-fill, .watch-progress-fill {
+  background: #e5a00d !important;
+}
+
+/* ── 13. Home page action buttons ───────────────────────────────── */
+/* "What's New Online?" */
+.nr-home-btn {
+  background: rgba(229,160,13,0.12) !important;
+  border-color: rgba(229,160,13,0.40) !important;
+  color: #e5a00d !important;
+}
+.nr-home-btn:hover {
+  background: rgba(229,160,13,0.22) !important;
+  border-color: rgba(229,160,13,0.65) !important;
+}
+.nr-home-btn .insights-btn-icon { stroke: #e5a00d !important; }
+
+/* "How to Watch?" */
+.wtw-home-btn {
+  background: rgba(229,160,13,0.08) !important;
+  border-color: rgba(229,160,13,0.30) !important;
+  color: #f3b52f !important;
+}
+.wtw-home-btn:hover {
+  background: rgba(229,160,13,0.18) !important;
+  border-color: rgba(229,160,13,0.55) !important;
+}
+.wtw-home-btn .insights-btn-icon { stroke: #f3b52f !important; }
+
+/* "Smart Insights" */
+.insights-btn:not(.nr-home-btn):not(.wtw-home-btn) {
+  background: rgba(229,160,13,0.10) !important;
+  border-color: rgba(229,160,13,0.35) !important;
+  color: #cc7b19 !important;
+}
+.insights-btn:not(.nr-home-btn):not(.wtw-home-btn):hover {
+  background: rgba(229,160,13,0.20) !important;
+  border-color: rgba(229,160,13,0.55) !important;
+}
+.insights-btn:not(.nr-home-btn):not(.wtw-home-btn) .insights-btn-icon {
+  stroke: #cc7b19 !important;
+}
+
+/* ── 14. Badges / tags ──────────────────────────────────────────── */
+.badge, .tag {
+  background: rgba(229,160,13,0.18) !important;
+  color: #e5a00d !important;
+  border-radius: 2px !important;
+}
+
+/* ── 15. Selection ──────────────────────────────────────────────── */
+::selection {
+  background: rgba(229,160,13,0.30);
+  color: #fff;
+}
+
+/* ── 16. Scrollbars ─────────────────────────────────────────────── */
+* { scrollbar-color: #3a3a3a #191a1c; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #191a1c; }
+::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* ── 17. Dividers ───────────────────────────────────────────────── */
+hr, .divider {
+  border-color: #323232 !important;
+}
+
+/* ── 18. Section / row title text ───────────────────────────────── */
+.section-title, .row-title {
+  color: #eee !important;
+}
+
+/* ── 19. Responsive ─────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  #sidebar { background: #1f2326 !important; }
+}

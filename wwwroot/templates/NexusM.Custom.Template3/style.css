@@ -1,0 +1,224 @@
+/* -------------------------------------------------------------------
+   NexusM Custom Template 3 - "Jellyfish"
+   Jellyfin-inspired dark theme — sidebar layout, teal-blue accent
+   ------------------------------------------------------------------- */
+
+/* ── 1. CSS variable overrides ─────────────────────────────────── */
+html:root,
+body.theme-blue, body.theme-purple, body.theme-emerald,
+body.theme-sky-grey, body.theme-sky-blue {
+  --accent:            #00a4dc;
+  --accent-hover:      #0cb0e8;
+  --accent-dim:        rgba(0,164,220,0.18);
+  --bg-primary:        #101010;
+  --bg-secondary:      #181818;
+  --bg-surface:        #202020;
+  --bg-hover:          rgba(0,164,220,0.10);
+  --bg-active:         rgba(0,164,220,0.20);
+  --border:            rgba(255,255,255,0.10);
+  --text-primary:      #dddddd;
+  --text-secondary:    #999999;
+  --text-muted:        #555555;
+  --radius:            4px;
+  --radius-sm:         2px;
+  --radius-lg:         6px;
+}
+
+/* ── 2. Root background ─────────────────────────────────────────── */
+body, #app, .app-container, #main-content {
+  background-color: #101010 !important;
+}
+
+/* ── 3. Topbar — Jellyfin dark header ───────────────────────────── */
+header.topbar {
+  background: #202020 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-bottom: 1px solid rgba(255,255,255,0.10) !important;
+  box-shadow: 0 1px 8px rgba(0,0,0,0.6) !important;
+}
+header.topbar .topbar-btn {
+  color: #dddddd !important;
+  border-radius: 2px !important;
+}
+header.topbar .topbar-btn:hover {
+  color: #00a4dc !important;
+  background: rgba(0,164,220,0.14) !important;
+}
+header.topbar #page-title {
+  color: #dddddd !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+}
+
+/* ── 4. Sidebar — Jellyfin left nav ─────────────────────────────── */
+#sidebar {
+  background: #202020 !important;
+  border-right: 1px solid rgba(255,255,255,0.08) !important;
+}
+#sidebar .sidebar-nav li a {
+  color: #999 !important;
+  border-radius: 2px !important;
+}
+#sidebar .sidebar-nav li a:hover {
+  background: rgba(0,164,220,0.10) !important;
+  color: #fff !important;
+}
+#sidebar .sidebar-nav li a.active {
+  background: #00a4dc !important;
+  color: #fff !important;
+}
+#sidebar .sidebar-nav li a.active svg {
+  color: #fff !important;
+}
+#sidebar .nav-label {
+  font-size: 13px !important;
+  font-weight: 500 !important;
+}
+
+/* ── 5. Player bar ───────────────────────────────────────────────── */
+#player-bar {
+  background: #202020 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-top: 1px solid rgba(255,255,255,0.10) !important;
+  box-shadow: 0 -2px 12px rgba(0,0,0,0.6) !important;
+}
+.seek-track, .progress-track {
+  background: rgba(0,164,220,0.18) !important;
+}
+.seek-fill, .progress-fill {
+  background: #00a4dc !important;
+}
+
+/* ── 6. Cards ───────────────────────────────────────────────────── */
+.video-card, .track-card, .album-card, .movie-card, .media-card {
+  background: #202020 !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
+  border-radius: 4px !important;
+  box-shadow: none !important;
+  transition: background 0.15s, border-color 0.15s !important;
+}
+.video-card:hover, .track-card:hover, .album-card:hover,
+.movie-card:hover, .media-card:hover {
+  background: #282828 !important;
+  border-color: #00a4dc !important;
+  box-shadow: 0 0 0 1px rgba(0,164,220,0.35) !important;
+  transform: none !important;
+}
+
+/* ── 7. Buttons ─────────────────────────────────────────────────── */
+.btn-primary, button.btn-primary {
+  background: #00a4dc !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  border-radius: 4px !important;
+  border: none !important;
+}
+.btn-primary:hover { background: #0cb0e8 !important; }
+
+.btn-secondary, button.btn-secondary {
+  border: 1px solid rgba(0,164,220,0.50) !important;
+  color: #00a4dc !important;
+  border-radius: 4px !important;
+  background: transparent !important;
+}
+.btn-secondary:hover {
+  background: rgba(0,164,220,0.14) !important;
+}
+
+/* ── 8. Inputs / selects ────────────────────────────────────────── */
+input[type="text"], input[type="password"], input[type="search"],
+input[type="email"], select, textarea {
+  background: #292929 !important;
+  border: 1px solid rgba(255,255,255,0.12) !important;
+  color: #ddd !important;
+  border-radius: 2px !important;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: #00a4dc !important;
+  outline: none !important;
+}
+
+/* ── 9. Settings sections ───────────────────────────────────────── */
+.settings-section {
+  background: #202020 !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
+  border-radius: 4px !important;
+}
+.settings-section h3 {
+  color: #00a4dc !important;
+  border-bottom: 1px solid rgba(0,164,220,0.18) !important;
+}
+
+/* ── 10. Dialog / modal ─────────────────────────────────────────── */
+.modal-box, .dialog-box {
+  background: #202020 !important;
+  border: 1px solid rgba(255,255,255,0.10) !important;
+  border-radius: 4px !important;
+}
+/* Settings Saved modal */
+.nexus-modal-overlay {
+  background: rgba(0,0,0,0.70) !important;
+}
+.nexus-modal {
+  background: #202020 !important;
+  border: 1px solid rgba(255,255,255,0.10) !important;
+  border-radius: 6px !important;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.70) !important;
+}
+.nexus-modal-icon svg { stroke: #00a4dc !important; }
+.nexus-modal-title {
+  color: #dddddd !important;
+  font-weight: 700 !important;
+}
+.nexus-modal-body {
+  color: #999999 !important;
+}
+.nexus-modal-btn {
+  background: #00a4dc !important;
+  color: #ffffff !important;
+  border-radius: 4px !important;
+  padding: 9px 36px !important;
+  font-weight: 600 !important;
+  border: none !important;
+}
+.nexus-modal-btn:hover {
+  background: #0cb0e8 !important;
+  opacity: 1 !important;
+}
+
+/* ── 11. Progress / watched indicator ───────────────────────────── */
+.progress-bar-fill, .watch-progress-fill {
+  background: #00a4dc !important;
+}
+
+/* ── 12. Selection / active states ─────────────────────────────── */
+::selection {
+  background: rgba(0,164,220,0.35);
+  color: #fff;
+}
+
+/* ── 13. Scrollbars ─────────────────────────────────────────────── */
+* { scrollbar-color: #3b3b3b #202020; scrollbar-width: thin; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #202020; }
+::-webkit-scrollbar-thumb { background: #3b3b3b; border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* ── 14. Dividers / borders ─────────────────────────────────────── */
+hr, .divider {
+  border-color: rgba(255,255,255,0.10) !important;
+}
+
+/* ── 15. Tooltips / badges ──────────────────────────────────────── */
+.badge, .tag {
+  background: rgba(0,164,220,0.20) !important;
+  color: #00a4dc !important;
+  border-radius: 2px !important;
+}
+
+/* ── 16. Responsive ─────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  #sidebar { background: #101010 !important; }
+}

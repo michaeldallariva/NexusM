@@ -7,10 +7,41 @@
 (function () {
   'use strict';
 
+  /* Map data-page → i18n key so nav labels respect the active language */
+  var PAGE_I18N = {
+    home:        'nav.home',
+    movies:      'nav.movies',
+    tv:          'nav.tvShows',
+    music:       'nav.music',
+    musicvideos: 'nav.musicVideos',
+    radio:       'nav.radio',
+    internettv:  'nav.internetTv',
+    podcasts:    'nav.podcasts',
+    pictures:    'nav.pictures',
+    ebooks:      'nav.ebooks',
+    audiobooks:  'nav.audioBooks',
+    anime:       'nav.anime',
+    actors:      'nav.actors',
+    favourites:  'nav.favourites',
+    playlists:   'nav.playlists',
+    mostplayed:  'nav.mostPlayed',
+    watchlist:   'nav.watchlist',
+    analysis:    'nav.analysis',
+    settings:    'nav.settings',
+    rescan:      'nav.rescanFolders',
+    insights:    'nav.analysis'
+  };
+
   var SECONDARY = {
     favourites:1, playlists:1, watchlist:1, mostplayed:1, bestrated:1,
     analysis:1, insights:1, settings:1, rescan:1
   };
+
+  function t(page) {
+    var key = PAGE_I18N[page];
+    if (key && typeof App !== 'undefined' && App.t) return App.t(key);
+    return null;
+  }
 
   function svgUse(id) {
     return '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><use href="#' + id + '"/></svg>';
@@ -40,7 +71,8 @@
       if (!page) return;
       var labelEl = link.querySelector('.nav-label');
       if (!labelEl || !labelEl.textContent.trim()) return;
-      var label = labelEl.textContent.trim();
+      /* Prefer translated label via App.t; fall back to sidebar DOM text */
+      var label = t(page) || labelEl.textContent.trim();
       var iconUse = link.querySelector('.nav-icon svg use');
       var iconId  = iconUse ? (iconUse.getAttribute('href') || '').replace('#','') : '';
       var a = document.createElement('a');
@@ -89,6 +121,18 @@
     });
   }
 
+  /* Mirror sidebar li visibility onto topbar nav links */
+  function syncVisibility() {
+    document.querySelectorAll('a[data-horizon-link]').forEach(function (a) {
+      var page = a.getAttribute('data-page');
+      var sidebarLink = document.querySelector('.sidebar-nav li a[data-page="' + page + '"]');
+      if (sidebarLink) {
+        var li = sidebarLink.closest('li');
+        a.style.display = (li && li.style.display === 'none') ? 'none' : '';
+      }
+    });
+  }
+
   /* -- Patch App.navigate once it exists ------------------------ */
   function patchNav() {
     if (typeof App === 'undefined' || !App.navigate || App._horizonPatched) return;
@@ -99,15 +143,33 @@
       return _orig(page);
     };
     if (App._currentSection) syncActive(App._currentSection);
+
+    if (!App._horizonMenuPatched) {
+      App._horizonMenuPatched = true;
+      var _origAMV = App.applyMenuVisibility.bind(App);
+      App.applyMenuVisibility = async function () {
+        var result = await _origAMV();
+        syncVisibility();
+        return result;
+      };
+    }
   }
 
-  /* -- Init ----------------------------------------------------- */
-  buildHorizonNav();
-
+  /* -- Init: wait for App.t before building so labels are translated */
   var tick = 0;
   var iv = setInterval(function () {
-    if (typeof App !== 'undefined' && App.navigate) { patchNav(); clearInterval(iv); }
-    if (++tick > 80) clearInterval(iv);
+    if (typeof App !== 'undefined' && App.t && App.navigate) {
+      buildHorizonNav();
+      syncVisibility();
+      patchNav();
+      clearInterval(iv);
+    }
+    if (++tick > 80) {
+      /* Fallback: build anyway with whatever text is in the DOM */
+      buildHorizonNav();
+      syncVisibility();
+      clearInterval(iv);
+    }
   }, 150);
 
 })();

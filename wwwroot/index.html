@@ -11,9 +11,9 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="apple-touch-icon" href="/favicon.svg">
     <script>try{var t=localStorage.getItem('nexusm-theme');if(t==='blue')document.documentElement.classList.add('theme-blue');else if(t==='purple')document.documentElement.classList.add('theme-purple');else if(t==='emerald')document.documentElement.classList.add('theme-emerald');else if(t==='sky-grey')document.documentElement.classList.add('theme-sky-grey');else if(t==='sky-blue')document.documentElement.classList.add('theme-sky-blue');}catch(e){}</script>
-    <link rel="stylesheet" href="/css/app.css?v=146">
+    <link rel="stylesheet" href="/css/app.css?v=207">
     <link rel="stylesheet" id="tpl-css" href="">
-    <script>try{var _tpl=localStorage.getItem('nexusm-template');if(_tpl){var _l=document.getElementById('tpl-css');if(_l)_l.href='/templates/'+_tpl+'/style.css';}}catch(e){}</script>
+    <script>try{var _tpl=localStorage.getItem('nexusm-template');if(_tpl){var _l=document.getElementById('tpl-css');document.documentElement.style.visibility='hidden';var _tplDone=function(){document.documentElement.style.visibility='';};_l.onload=_tplDone;_l.onerror=_tplDone;_l.href='/templates/'+_tpl+'/style.css';setTimeout(_tplDone,2000);}}catch(e){document.documentElement.style.visibility='';}</script>
     <style>
         /* Minimalist Icon System */
         .nav-icon {
@@ -263,7 +263,7 @@
 
             </div>
             <div class="demo-mode-badge" id="demo-mode-badge">DEMO MODE</div>
-            <div class="sidebar-version">2026.08 (New World Order Edition)</div>
+            <div class="sidebar-version">2026.13 (New World Order Edition)</div>
         </nav>
 
         <!-- Top Bar -->
@@ -332,6 +332,9 @@
                 <button class="player-btn" id="btn-player-lyrics" title="Lyrics">
                     <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
                 </button>
+                <button class="player-btn" id="btn-android-player" title="Open in Android Player" onclick="App.launchAndroidMusicPlayer(App.playlist, App.playIndex)" style="color:#22c55e">
+                    <svg style="width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-android"/></svg>
+                </button>
             </div>
             <div class="player-controls">
                 <div class="player-buttons">
@@ -355,6 +358,7 @@
                     <span class="player-time" id="time-current">0:00</span>
                     <div class="progress-bar" id="progress-bar">
                         <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+                        <div class="progress-cursor" id="progress-cursor"></div>
                     </div>
                     <span class="player-time" id="time-total">0:00</span>
                 </div>
@@ -394,11 +398,12 @@
             </button>
             <!-- Library sub-menu popup -->
             <div class="mobile-library-menu" id="mobile-library-menu">
+                <button data-page="tvshows"><svg class="mobile-nav-icon"><use href="#icon-tv"/></svg> TV Shows/Docs</button>
                 <button data-page="musicvideos"><svg class="mobile-nav-icon"><use href="#icon-video"/></svg> Music Videos</button>
                 <button data-page="podcasts"><svg class="mobile-nav-icon"><use href="#icon-podcast"/></svg> Podcasts</button>
                 <button data-page="radio"><svg class="mobile-nav-icon"><use href="#icon-radio"/></svg> Radio</button>
                 <button data-page="internettv"><svg class="mobile-nav-icon"><use href="#icon-tv"/></svg> Internet TV</button>
-                <button data-page="pictures"><svg class="mobile-nav-icon"><use href="#icon-image"/></svg> Pictures</button>
+                <button data-page="pictures"><svg class="mobile-nav-icon"><use href="#icon-image"/></svg> Pictures/Videos</button>
                 <button data-page="ebooks"><svg class="mobile-nav-icon"><use href="#icon-book"/></svg> eBooks</button>
                 <button data-page="audiobooks"><svg class="mobile-nav-icon"><use href="#icon-headphones"/></svg> Audio Books</button>
                 <button data-page="anime"><svg class="mobile-nav-icon"><use href="#icon-film"/></svg> Anime</button>
@@ -714,6 +719,21 @@
             <path d="M16 3L18 7h-3L16 3z" fill="#2E86C1" stroke="none"/>
             <text x="12" y="17.5" text-anchor="middle" font-size="9" font-weight="700" fill="#505050" font-family="Arial">2</text>
         </symbol>
+        <symbol id="icon-map-pin" viewBox="0 0 24 24">
+            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+            <circle cx="12" cy="10" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+        </symbol>
+        <symbol id="icon-calendar" viewBox="0 0 24 24">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="2"/>
+            <line x1="16" y1="2" x2="16" y2="6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <line x1="8" y1="2" x2="8" y2="6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <line x1="3" y1="10" x2="21" y2="10" stroke="currentColor" stroke-width="2"/>
+        </symbol>
+        <symbol id="icon-az" viewBox="0 0 24 24">
+            <text x="2" y="17" font-size="13" font-weight="700" fill="currentColor" font-family="system-ui,sans-serif">AZ</text>
+            <polyline points="16 8 20 4 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <line x1="16" y1="20" x2="20" y2="20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </symbol>
         <symbol id="icon-medal-bronze" viewBox="0 0 24 24">
             <circle cx="12" cy="14" r="7" fill="#CD7F32" stroke="#8B5A2B" stroke-width="1"/>
             <path d="M12 2L9 7h6L12 2z" fill="#CD7F32" stroke="#8B5A2B" stroke-width=".5"/>
@@ -721,13 +741,19 @@
             <path d="M16 3L18 7h-3L16 3z" fill="#2E86C1" stroke="none"/>
             <text x="12" y="17.5" text-anchor="middle" font-size="9" font-weight="700" fill="#5A3A1A" font-family="Arial">3</text>
         </symbol>
+        <symbol id="icon-android" viewBox="0 0 24 24">
+            <line x1="8.5" y1="4.5" x2="6" y2="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <line x1="15.5" y1="4.5" x2="18" y2="2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M5 11a7 7 0 0 1 14 0v4a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-4z" fill="currentColor"/>
+            <circle cx="9.5" cy="11.5" r="1" fill="white" stroke="none"/>
+            <circle cx="14.5" cy="11.5" r="1" fill="white" stroke="none"/>
+        </symbol>
     </svg>
 
     <audio id="audio-player" preload="auto" crossorigin="anonymous"></audio>
     <script src="/js/jszip.min.js"></script>
     <script src="/js/epub.min.js"></script>
-    <script src="/js/app.js?v=269"></script>
+    <script src="/js/app.js?v=373"></script>
     <script id="tpl-js"></script>
-    <script>try{var _ts=localStorage.getItem('nexusm-template');if(_ts){var _sj=document.getElementById('tpl-js');if(_sj){var _sr=document.createElement('script');_sr.src='/templates/'+_ts+'/script.js';document.body.appendChild(_sr);}}}catch(e){}</script>
 </body>
 </html>

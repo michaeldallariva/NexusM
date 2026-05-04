@@ -14,7 +14,7 @@ const App = {
     repeat: 'off',
     sidebarCollapsed: false,
     musicPage: 1,
-    musicSort: 'title',
+    musicSort: 'recent',
     musicTotal: 0,
     musicPerPage: 100,
     musicSubView: 'all',
@@ -25,7 +25,15 @@ const App = {
     picturesCategory: null,
     picturesTotal: 0,
     picturesPerPage: 100,
+    picturesView: 'grid',
+    picturesMediaType: 'all',   // 'all' | 'pictures' | 'videos'
+    _pictureAlbums: [],
+    _currentAlbumId: null,
+    _expandedAlbumId: null,
     _pictureModalKeyHandler: null,
+    _picMapInstance: null,
+    _picScrollHandler: null,
+    _videoScrollHandler: null,
     ebooksPage: 1,
     ebooksSort: 'recent',
     ebooksCategory: null,
@@ -51,6 +59,10 @@ const App = {
     videosCustomGenreId: null,
     _cgVideoPage: 0,
     _cgMusicPage: 0,
+    _videosGenrePage: 0,
+    _videosCatPage: 0,
+    _videosGenres: [],
+    _videosCats: [],
     _cgEditId: null,
     _cgEditDomain: 'music',
     _cgEditData: null,
@@ -272,7 +284,8 @@ const App = {
             'anime': 'nav.anime',
             'pictures': 'nav.pictures', 'ebooks': 'nav.ebooks', 'favourites': 'nav.favourites',
             'playlists': 'nav.playlists', 'watchlist': 'nav.watchlist', 'mostplayed': 'nav.mostPlayed', 'analysis': 'nav.analysis',
-            'settings': 'nav.settings', 'rescan': 'nav.rescanFolders'
+            'settings': 'nav.settings', 'rescan': 'nav.rescanFolders',
+            'actors': 'nav.actors', 'bestrated': 'nav.bestRated', 'insights': 'nav.insights'
         };
         document.querySelectorAll('.sidebar-nav a[data-page]').forEach(a => {
             const page = a.getAttribute('data-page');
@@ -306,6 +319,14 @@ const App = {
         if (collapseBtn) collapseBtn.title = this.t('nav.collapseSidebar');
         const expandBtn = document.getElementById('sidebar-expand-btn');
         if (expandBtn) expandBtn.title = this.t('nav.expandSidebar');
+        // Template nav links (Horizon = data-horizon-link, PearTV = data-peartv-link)
+        const tplMap = Object.assign({}, map, { 'tv': 'nav.tvShows', 'audiobooks': 'nav.audioBooks' });
+        ['data-horizon-link', 'data-peartv-link'].forEach(attr => {
+            document.querySelectorAll(`a[${attr}][data-page]`).forEach(a => {
+                const key = tplMap[a.getAttribute('data-page')];
+                if (key) { const sp = a.querySelector('span'); if (sp) sp.textContent = this.t(key); }
+            });
+        });
     },
 
     applyTheme(theme) {
@@ -320,12 +341,12 @@ const App = {
 
     applyTemplate(templateId) {
         const cssLink = document.getElementById('tpl-css');
-        if (cssLink) cssLink.href = templateId ? `/templates/${templateId}/style.css` : '';
+        if (cssLink) cssLink.href = templateId ? `/templates/${templateId}/style.css?v=10` : '';
         // Remove any previously injected template script
         document.querySelectorAll('script[data-tpl-script]').forEach(s => s.remove());
         if (templateId) {
             const s = document.createElement('script');
-            s.src = `/templates/${templateId}/script.js`;
+            s.src = `/templates/${templateId}/script.js?v=9`;
             s.setAttribute('data-tpl-script', templateId);
             document.body.appendChild(s);
         }
@@ -705,7 +726,7 @@ const App = {
         const mobileNav = document.getElementById('mobile-nav');
         if (!mobileNav) return;
         // Map pages to their bottom nav tab
-        const tabMap = { home: 'home', movies: 'movies', music: 'music', settings: 'settings' };
+        const tabMap = { home: 'home', movies: 'movies', tvshows: 'movies', music: 'music', settings: 'settings' };
         // Sub-pages that belong to Library
         const libraryPages = ['pictures', 'ebooks', 'musicvideos', 'radio', 'internettv', 'podcasts', 'favourites', 'playlists', 'watchlist', 'analysis'];
         let activeTab = tabMap[page] || (libraryPages.includes(page) ? 'library' : null);
@@ -778,6 +799,21 @@ const App = {
             return await res.json();
         } catch (err) {
             console.error(`API DELETE error [${endpoint}]:`, err);
+            return null;
+        }
+    },
+
+    async apiPatch(endpoint, body) {
+        try {
+            const res = await fetch(`/api/${endpoint}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (res.status === 401) { window.location.href = '/login.html'; return null; }
+            return await res.json();
+        } catch (err) {
+            console.error(`API PATCH error [${endpoint}]:`, err);
             return null;
         }
     },
@@ -862,10 +898,23 @@ const App = {
         }
         // Stop metrics polling when leaving settings page
         if (this.currentPage === 'settings') this._stopMetricsPolling();
+        // Restore main-content layout when leaving pictures page (two-panel flex was applied)
+        if (this.currentPage === 'pictures') {
+            const mc = document.getElementById('main-content');
+            if (mc) mc.removeAttribute('style');
+        }
         // Exit batch select mode when navigating away from videos
         if (this.currentPage === 'videos' && page !== 'videos') { this._batchSelectMode = false; this._batchSelectedIds = null; }
+        // Cleanup letter/year scrubber scroll handler when navigating away from any page that uses it
+        if (this._videoScrollHandler) {
+            const mc = document.getElementById('main-content');
+            if (mc) mc.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
         this.currentPage = page;
         this._mvShuffleMode = false;
+        // Re-show Go Big button briefly on each page navigation (mobile only)
+        if (this._gbIsMobile()) this._gbResetMobileStartBtnTimer();
         if (this.isRadioPlaying) {
             this.stopRadio();
         }
@@ -878,6 +927,7 @@ const App = {
         }
         // Stop any video elements, music player, TV player, lyrics overlay
         this.closeTvPlayer();
+        this._teardownVideoThumbnailPreview();
         const lyricsOv = document.getElementById('lyrics-overlay');
         if (lyricsOv) { lyricsOv.style.display = 'none'; document.getElementById('btn-player-lyrics').style.color = ''; }
         document.querySelectorAll('video').forEach(v => this.stopVideoStream(v));
@@ -943,16 +993,6 @@ const App = {
 
             default: content.innerHTML = '<div class="empty-state"><h2>Page not found</h2></div>';
         }
-    },
-
-    // ─── Placeholder Page (for menus not yet built) ──────────
-    renderPlaceholder(el, icon, title, description, tag) {
-        el.innerHTML = `<div class="placeholder-page">
-            <div class="ph-icon">${icon}</div>
-            <h2>${title}</h2>
-            <p>${description}</p>
-            <div class="ph-tag">${tag}</div>
-        </div>`;
     },
 
     // ─── Radio Page ────────────────────────────────────────────
@@ -1419,12 +1459,13 @@ const App = {
         this.tvChannels = channels;
         this.tvCountryFilter = '';
         this.tvGenreFilter = '';
+        this.tvLanguageFilter = '';
 
         let html = `<div class="page-header"><h1>${this.t('page.internetTv')}</h1></div>`;
         html += `<div class="radio-header">
             <div class="radio-toolbar">
                 <input type="text" class="radio-search-input" placeholder="${this.t('search.tvPlaceholder')}" oninput="App.filterTvChannels(this.value)">
-                <label class="btn-import-m3u" title="Import M3U playlist">
+                <label class="btn-import-m3u" title="Import local or online playlist">
                     <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-folder"/></svg>${this.t('btn.importM3u')}
                     <input type="file" accept=".m3u,.m3u8" style="display:none" onchange="App.importM3u(this)">
                 </label>
@@ -1434,29 +1475,42 @@ const App = {
             </div>
             <div id="fetch-tv-logos-status" class="fetch-logos-status" style="display:none"></div>`;
 
-        // Country filter chips
+        // Filter dropdowns — Country / Category / Language in one compact row
         const countries = data?.countries || [];
-        if (countries.length > 0) {
-            html += `<div class="radio-filters"><div class="filter-row">
-                <button class="filter-chip active" onclick="App.filterTvCountry('', this)">All</button>`;
-            countries.forEach(c => { html += `<button class="filter-chip" onclick="App.filterTvCountry('${this.esc(c)}', this)">${this.esc(c)}</button>`; });
-            html += `</div></div>`;
-        }
-
-        // Genre filter chips
         const genres = data?.genres || [];
-        if (genres.length > 0) {
-            html += `<div class="radio-filters"><div class="filter-row">
-                <button class="filter-chip active" onclick="App.filterTvGenre('', this)">All Genres</button>`;
-            genres.forEach(g => { html += `<button class="filter-chip" onclick="App.filterTvGenre('${this.esc(g)}', this)">${this.esc(g)}</button>`; });
-            html += `</div></div>`;
-        }
+        const languages = data?.languages || [];
+        html += `<div class="tv-filter-bar">
+            <div class="tv-filter-group">
+                <label class="tv-filter-label">Country</label>
+                <select class="tv-filter-select" onchange="App.filterTvCountry(this.value)">
+                    <option value="">All Countries</option>
+                    ${countries.map(c => `<option value="${this.esc(c)}">${this.esc(c)}</option>`).join('')}
+                </select>
+            </div>
+            <div class="tv-filter-group">
+                <label class="tv-filter-label">Category</label>
+                <select class="tv-filter-select" onchange="App.filterTvGenre(this.value)">
+                    <option value="">All Categories</option>
+                    ${genres.map(g => `<option value="${this.esc(g)}">${this.esc(g)}</option>`).join('')}
+                </select>
+            </div>
+            <div class="tv-filter-group">
+                <label class="tv-filter-label">Language</label>
+                <select class="tv-filter-select" onchange="App.filterTvLanguage(this.value)">
+                    <option value="">All Languages</option>
+                    ${languages.map(l => `<option value="${this.esc(l)}">${this.esc(l)}</option>`).join('')}
+                </select>
+            </div>
+        </div>`;
 
-        html += `<div class="radio-count" id="tv-count">${channels.length} channel${channels.length !== 1 ? 's' : ''}</div>`;
+        html += `<div class="radio-count" id="tv-count"></div>`;
         html += `</div>`;
-        html += `<div class="radio-grid" id="tv-grid">${this.buildTvCards(channels)}</div>`;
+        html += `<div class="radio-grid" id="tv-grid"></div>`;
+        html += `<div id="tv-pager"></div>`;
 
         el.innerHTML = html;
+        this.tvPage = 1;
+        this.applyTvFilters();
     },
 
     buildTvCards(channels) {
@@ -1476,7 +1530,7 @@ const App = {
                 <div class="radio-card-info">
                     <div class="radio-card-name">${this.esc(c.name)} ${res}</div>
                     <div class="radio-card-desc">${this.esc(c.description || c.genre || '')}</div>
-                    <div class="radio-card-meta">${this.esc(c.country || '')} ${c.genre ? '&middot; ' + this.esc(c.genre) : ''}</div>
+                    <div class="radio-card-meta">${[c.country, c.genre, c.language].filter(Boolean).map(s => this.esc(s)).join(' &middot; ')}</div>
                 </div>
                 <button class="radio-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleTvFav(${c.id}, this)" title="Favourite">&#10084;</button>
                 <div class="radio-card-play"><svg style="width:16px;height:16px;fill:white;stroke:none"><polygon points="5,3 15,10 5,17"/></svg></div>
@@ -1518,10 +1572,13 @@ const App = {
                         <button class="tv-player-fav" id="tv-player-fav" onclick="App.toggleTvFavFromPlayer()" title="Add to Favorites">
                             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z"/></svg>
                         </button>
+                        <button class="tv-player-record" id="tv-player-record" onclick="App._tvToggleRecord()" title="Record stream">
+                            <span class="tv-record-dot" id="tv-record-dot"></span><span id="tv-record-label">Record</span>
+                        </button>
                         <button class="tv-player-close" onclick="App.closeTvPlayer()">&#10005;</button>
                     </div>
                 </div>
-                <video id="tv-video" controls autoplay style="width:100%;height:100%;background:#000"></video>`;
+                <video id="tv-video" controls autoplay style="width:100%;flex:1;min-height:0;background:#000"></video>`;
             document.body.appendChild(overlay);
         }
 
@@ -1540,12 +1597,86 @@ const App = {
     },
 
     closeTvPlayer() {
+        this._tvStopRecord();
         const overlay = document.getElementById('tv-player-overlay');
         if (overlay) {
             overlay.querySelectorAll('video').forEach(v => this.stopVideoStream(v));
             overlay.querySelectorAll('iframe').forEach(f => { f.src = ''; });
             overlay.style.display = 'none';
         }
+    },
+
+    _tvToggleRecord() {
+        if (this._tvRecorder?.state === 'recording') {
+            this._tvStopRecord();
+        } else {
+            this._tvStartRecord();
+        }
+    },
+
+    _tvStartRecord() {
+        const video = document.getElementById('tv-video');
+        if (!video) return;
+        if (!video.captureStream) { alert('Recording is not supported in this browser.'); return; }
+
+        try {
+            const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+                ? 'video/webm;codecs=vp9' : 'video/webm';
+            const stream = video.captureStream();
+            const recorder = new MediaRecorder(stream, { mimeType });
+            this._tvRecordChunks = [];
+            recorder.ondataavailable = e => { if (e.data?.size > 0) this._tvRecordChunks.push(e.data); };
+            recorder.onstop = () => this._tvSaveRecord();
+            recorder.start(1000);
+            this._tvRecorder = recorder;
+            this._tvRecordStart = Date.now();
+
+            const dot = document.getElementById('tv-record-dot');
+            const label = document.getElementById('tv-record-label');
+            const btn = document.getElementById('tv-player-record');
+            if (dot) dot.classList.add('recording');
+            if (label) label.textContent = '00:00';
+            if (btn) btn.classList.add('recording');
+
+            this._tvRecordTimer = setInterval(() => {
+                const s = Math.floor((Date.now() - this._tvRecordStart) / 1000);
+                const mm = String(Math.floor(s / 60)).padStart(2, '0');
+                const ss = String(s % 60).padStart(2, '0');
+                const label = document.getElementById('tv-record-label');
+                if (label) label.textContent = `${mm}:${ss}`;
+            }, 1000);
+        } catch(e) {
+            alert('Could not start recording: ' + e.message);
+        }
+    },
+
+    _tvStopRecord() {
+        if (this._tvRecorder) {
+            if (this._tvRecorder.state !== 'inactive') this._tvRecorder.stop();
+            this._tvRecorder = null;
+        }
+        if (this._tvRecordTimer) { clearInterval(this._tvRecordTimer); this._tvRecordTimer = null; }
+        const dot = document.getElementById('tv-record-dot');
+        const label = document.getElementById('tv-record-label');
+        const btn = document.getElementById('tv-player-record');
+        if (dot) dot.classList.remove('recording');
+        if (label) label.textContent = 'Record';
+        if (btn) btn.classList.remove('recording');
+    },
+
+    _tvSaveRecord() {
+        const chunks = this._tvRecordChunks || [];
+        if (!chunks.length) return;
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const channel = this.tvChannels?.find(c => c.id === this._currentTvChannelId);
+        const name = (channel?.name || 'tv-clip').replace(/[^\w\- ]/g, '').trim().replace(/\s+/g, '_');
+        const ts = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${name}_${ts}.webm`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        this._tvRecordChunks = [];
     },
 
     async toggleTvFav(id, btn) {
@@ -1577,19 +1708,18 @@ const App = {
         }
     },
 
-    filterTvCountry(country, btn) {
+    filterTvCountry(country) {
         this.tvCountryFilter = country;
-        const row = btn?.closest('.filter-row');
-        if (row) row.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-        if (btn) btn.classList.add('active');
         this.applyTvFilters();
     },
 
-    filterTvGenre(genre, btn) {
+    filterTvGenre(genre) {
         this.tvGenreFilter = genre;
-        const row = btn?.closest('.filter-row');
-        if (row) row.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-        if (btn) btn.classList.add('active');
+        this.applyTvFilters();
+    },
+
+    filterTvLanguage(language) {
+        this.tvLanguageFilter = language;
         this.applyTvFilters();
     },
 
@@ -1602,14 +1732,72 @@ const App = {
         let filtered = this.tvChannels || [];
         if (this.tvCountryFilter) filtered = filtered.filter(c => c.country === this.tvCountryFilter);
         if (this.tvGenreFilter) filtered = filtered.filter(c => c.genre === this.tvGenreFilter);
+        if (this.tvLanguageFilter) filtered = filtered.filter(c => c.language === this.tvLanguageFilter);
         if (this.tvSearchFilter) {
             const q = this.tvSearchFilter.toLowerCase();
-            filtered = filtered.filter(c => c.name.toLowerCase().includes(q) || (c.description||'').toLowerCase().includes(q) || (c.country||'').toLowerCase().includes(q));
+            filtered = filtered.filter(c => c.name.toLowerCase().includes(q) || (c.description||'').toLowerCase().includes(q) || (c.country||'').toLowerCase().includes(q) || (c.language||'').toLowerCase().includes(q));
         }
+        this.tvFiltered = filtered;
+        this.tvPage = 1;
+        this._tvRenderPage();
+    },
+
+    _tvSetPage(n) {
+        this.tvPage = n;
+        this._tvRenderPage();
+        const mc = document.getElementById('main-content');
+        if (mc) mc.scrollTop = 0;
+    },
+
+    _tvRenderPage() {
+        const filtered = this.tvFiltered || [];
+        const total = filtered.length;
+        const pageSize = 100;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        const page = Math.max(1, Math.min(this.tvPage || 1, totalPages));
+        const start = (page - 1) * pageSize;
+        const pageItems = filtered.slice(start, start + pageSize);
+
         const grid = document.getElementById('tv-grid');
         const count = document.getElementById('tv-count');
-        if (grid) grid.innerHTML = this.buildTvCards(filtered);
-        if (count) count.textContent = `${filtered.length} channel${filtered.length !== 1 ? 's' : ''}`;
+        const pager = document.getElementById('tv-pager');
+
+        if (grid) grid.innerHTML = this.buildTvCards(pageItems);
+        if (count) {
+            const allCount = (this.tvChannels || []).length;
+            const showing = `${start + 1}–${Math.min(start + pageSize, total)}`;
+            count.textContent = total === allCount
+                ? `${total} channels — showing ${showing}`
+                : `${total} channels matching filters — showing ${showing}`;
+        }
+        if (pager) pager.innerHTML = totalPages > 1 ? this._buildTvPager(page, totalPages) : '';
+    },
+
+    _buildTvPager(page, totalPages) {
+        const btn = (p, label, disabled, active) =>
+            `<button class="tv-pager-btn${active ? ' active' : ''}" ${disabled ? 'disabled' : `onclick="App._tvSetPage(${p})"`}>${label}</button>`;
+
+        let pages = [];
+        if (totalPages <= 9) {
+            for (let i = 1; i <= totalPages; i++) pages.push(i);
+        } else {
+            pages.push(1);
+            if (page > 4) pages.push('…');
+            for (let i = Math.max(2, page - 2); i <= Math.min(totalPages - 1, page + 2); i++) pages.push(i);
+            if (page < totalPages - 3) pages.push('…');
+            pages.push(totalPages);
+        }
+
+        let html = '<div class="tv-pager">';
+        html += btn(page - 1, '&#8592; Prev', page <= 1, false);
+        pages.forEach(p => {
+            html += p === '…'
+                ? `<span class="tv-pager-ellipsis">…</span>`
+                : btn(p, p, false, p === page);
+        });
+        html += btn(page + 1, 'Next &#8594;', page >= totalPages, false);
+        html += '</div>';
+        return html;
     },
 
     async importM3u(input) {
@@ -1639,6 +1827,38 @@ const App = {
             alert('Import failed: ' + e.message);
         }
         input.value = '';
+    },
+
+    async importM3uFromUrl() {
+        const input = document.getElementById('tv-url-input');
+        const url = input?.value?.trim();
+        if (!url) { alert('Please enter an M3U URL'); return; }
+
+        const grid = document.getElementById('tv-grid');
+        if (grid) grid.innerHTML = '<div class="spinner"></div>';
+        if (input) input.disabled = true;
+
+        try {
+            const res = await fetch('/api/tvchannels/import-url', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                alert(data.message);
+                if (input) { input.value = ''; input.disabled = false; }
+                this.renderInternetTv(document.getElementById('main-content'));
+            } else {
+                alert(data.message || 'Import failed');
+                if (input) input.disabled = false;
+                this.renderInternetTv(document.getElementById('main-content'));
+            }
+        } catch(e) {
+            alert('Import failed: ' + e.message);
+            if (input) input.disabled = false;
+            this.renderInternetTv(document.getElementById('main-content'));
+        }
     },
 
     async fetchTvLogos() {
@@ -2249,14 +2469,6 @@ const App = {
         });
     },
 
-    formatDuration(secs) {
-        if (!secs) return '';
-        const h = Math.floor(secs / 3600);
-        const m = Math.floor((secs % 3600) / 60);
-        const s = secs % 60;
-        if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-        return `${m}:${String(s).padStart(2,'0')}`;
-    },
 
     // Returns a short audio format name ("MP3", "FLAC", "AAC", "ALAC", etc.) from mimeType/codec
     trackFormat(t) {
@@ -2613,139 +2825,230 @@ const App = {
         const data = await this.api('insights');
         if (!data) { el.innerHTML = this.emptyState(this.t('insights.title'), this.t('insights.loadError')); return; }
 
-        let html = `<div class="insights-page">`;
-        html += `<div class="page-header"><h1>${this.t('insights.title')}</h1></div>`;
+        const totalWatched = data.totalWatched || 0;
+        const movies = data.moviesWatched || 0;
+        const tvEps = data.tvEpisodesWatched || 0;
+        const docs = data.docsWatched || 0;
+        const anime = data.animeWatched || 0;
+        const lib = data.library || {};
 
-        // ── Insight Messages ──
-        if (data.insightMessages && data.insightMessages.length > 0) {
-            html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.learnedAboutYou')}</div>`;
-            data.insightMessages.forEach(m => {
-                let text = '';
-                if (m.key === 'completed') {
-                    const parts = [];
-                    if (m.movies > 0) parts.push(this.t('insights.msg.movies').replace('{0}', m.movies));
-                    if (m.tvEpisodes > 0) parts.push(this.t('insights.msg.tvEpisodes').replace('{0}', m.tvEpisodes));
-                    if (m.docs > 0) parts.push(this.t('insights.msg.docs').replace('{0}', m.docs));
-                    text = this.t('insights.msg.completed').replace('{0}', parts.join(` ${this.t('insights.msg.and')} `));
-                } else if (m.key === 'watchDays') {
-                    text = this.t('insights.msg.watchDays').replace('{0}', m.days);
-                } else if (m.key === 'watchHours') {
-                    text = this.t('insights.msg.watchHours').replace('{0}', m.hours);
-                } else if (m.key === 'topGenre') {
-                    text = this.t('insights.msg.topGenre').replace('{0}', m.genre).replace('{1}', m.count);
-                } else if (m.key === 'comfortTitle') {
-                    text = this.t('insights.msg.comfortTitle').replace('{0}', m.title).replace('{1}', m.playCount);
-                } else if (m.key === 'startWatching') {
-                    text = this.t('insights.msg.startWatching');
-                }
-                if (text) html += `<div class="insight-message"><span class="insight-icon"><svg style="width:18px;height:18px;stroke:#a78bfa;fill:none;stroke-width:2"><use href="#icon-trending"/></svg></span><span>${this.esc(text)}</span></div>`;
+        let html = `<div class="insights-page">`;
+
+        // ── Hero Banner ──
+        html += `<div class="insights-hero">
+            <div class="page-header" style="margin-bottom:18px"><h1>${this.t('insights.title')}</h1></div>
+            <div class="an-panel an-stats-panel" style="margin-bottom:16px">
+            <table class="an-stats-table an-stats-table--ov">
+                <thead><tr><th>Category</th><th>Watched</th><th>Of Library</th></tr></thead>
+                <tbody>`;
+        [
+            { icon: 'film',      color: '#6366f1', val: movies, label: this.t('insights.movies'),     sub: lib.movies     ? `${Math.round(movies/lib.movies*100)||0}% of ${lib.movies}`         : '' },
+            { icon: 'tv',        color: '#3b82f6', val: tvEps,  label: this.t('insights.tvEpisodes'), sub: lib.tvEpisodes ? `${Math.round(tvEps/lib.tvEpisodes*100)||0}% of ${lib.tvEpisodes}` : '' },
+            { icon: 'file-text', color: '#10b981', val: docs,   label: this.t('insights.doc'),        sub: lib.docs       ? `${Math.round(docs/lib.docs*100)||0}% of ${lib.docs}`               : '' },
+            { icon: 'layers',    color: '#ec4899', val: anime,  label: 'Anime',                       sub: lib.anime      ? `${Math.round(anime/lib.anime*100)||0}% of ${lib.anime}`             : '' },
+            { icon: 'clock',     color: '',        val: `${data.totalWatchTimeHours}h`, label: this.t('insights.watchTime'), sub: '' },
+        ].forEach(s => {
+            html += `<tr>
+                <td${s.color ? ` style="color:${s.color}"` : ''}>
+                    <svg class="ins-tbl-icon"${s.color ? ` style="stroke:${s.color}"` : ''}><use href="#icon-${s.icon}"/></svg>${s.label}
+                </td>
+                <td>${s.val}</td>
+                <td>${s.sub || ''}</td>
+            </tr>`;
+        });
+        html += `</tbody></table></div>`;
+        if (totalWatched > 0) {
+            const segs = [
+                { n: movies, c: '#6366f1', l: this.t('insights.movies') },
+                { n: tvEps,  c: '#3b82f6', l: this.t('insights.tvEpisodes') },
+                { n: docs,   c: '#10b981', l: this.t('insights.doc') },
+                { n: anime,  c: '#ec4899', l: 'Anime' },
+            ].filter(s => s.n > 0);
+            html += `<div class="ins-type-bar">${segs.map(s => `<div class="ins-type-bar-seg" style="width:${(s.n/totalWatched*100).toFixed(1)}%;background:${s.c}" title="${s.l}: ${s.n}"></div>`).join('')}</div>`;
+            html += `<div class="ins-type-bar-legend">${segs.map(s => `<div class="ins-type-legend-item"><span class="ins-type-legend-dot" style="background:${s.c}"></span><span>${s.l}: ${s.n}</span></div>`).join('')}</div>`;
+        }
+        html += `</div>`; // end hero
+
+        // ── Recently Watched ──
+        if (data.recentlyCompleted && data.recentlyCompleted.length > 0) {
+            html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.recentlyWatched')}</div>
+                <div class="home-row"><button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this,-1)">&#10094;</button>
+                <div class="home-row-scroll home-row-wide">`;
+            data.recentlyCompleted.forEach(v => {
+                const thumb = v.posterPath ? `/videometa/${v.posterPath}` : v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '';
+                const tl = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
+                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})">
+                    <div class="mv-card-thumb">${thumb
+                        ? `<img src="${thumb}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
+                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                        <span class="video-type-badge video-type-${v.mediaType}">${tl}</span>
+                    </div>
+                    <div class="mv-card-info"><div class="mv-card-title">${this.esc(v.title)}</div><div class="mv-card-artist">${v.year||''}</div></div>
+                </div>`;
+            });
+            html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
+        }
+
+        // ── 2-column grid: Genre Breakdown | Watchlist Intelligence ──
+        html += `<div class="insights-grid-2col">`;
+
+        // Genre Breakdown
+        if (data.favoriteGenres && data.favoriteGenres.length > 0) {
+            const maxG = data.favoriteGenres[0].count;
+            html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.genreBreakdown')}</div>`;
+            data.favoriteGenres.forEach(g => {
+                const pct = Math.round(g.count / maxG * 100);
+                html += `<div class="ins-genre-row">
+                    <div class="ins-genre-name">${this.esc(g.name)}</div>
+                    <div class="ins-genre-bar-wrap"><div class="ins-genre-bar" style="width:${pct}%"></div></div>
+                    <div class="ins-genre-count">${g.count}</div>
+                </div>`;
             });
             html += `</div>`;
         }
 
-        // ── Stats Grid ──
-        html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.viewingStats')}</div>`;
-        html += `<div class="insights-stats-grid">
-            <div class="stat-card"><div class="stat-value">${data.totalWatched}</div><div class="stat-label">${this.t('insights.watched')}</div></div>
-            <div class="stat-card"><div class="stat-value">${data.moviesWatched}</div><div class="stat-label">${this.t('insights.movies')}</div></div>
-            <div class="stat-card"><div class="stat-value">${data.tvEpisodesWatched}</div><div class="stat-label">${this.t('insights.tvEpisodes')}</div></div>
-            <div class="stat-card"><div class="stat-value">${data.totalWatchTimeHours}h</div><div class="stat-label">${this.t('insights.watchTime')}</div></div>
-        </div>`;
-
-        // ── Library progress bar ──
-        if (data.library && data.library.total > 0) {
-            const pct = Math.round(data.totalWatched / data.library.total * 100);
-            html += `<div class="insights-progress-wrap">
-                <div class="insights-progress-label">${this.t('insights.libraryProgress')}: ${data.totalWatched} / ${data.library.total} (${pct}%)</div>
-                <div class="insights-progress-bar"><div class="insights-progress-fill" style="width:${pct}%"></div></div>
+        // Watchlist Intelligence
+        const wl = data.watchlistStats || {};
+        const wlPending = (wl.total || 0) - (wl.watchedCount || 0);
+        const wlPct = wl.total > 0 ? Math.round((wl.watchedCount || 0) / wl.total * 100) : 0;
+        html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.watchlistTitle')}</div>`;
+        if ((wl.total || 0) > 0) {
+            html += `<div class="an-panel an-stats-panel" style="margin-bottom:16px">
+                <table class="an-stats-table an-stats-table--ov"><tbody>
+                    <tr>
+                        <td><svg class="ins-tbl-icon"><use href="#icon-bookmark"/></svg>${this.t('insights.wlTotal')}</td>
+                        <td>${wl.total}</td><td></td>
+                    </tr>
+                    <tr>
+                        <td><svg class="ins-tbl-icon"><use href="#icon-eye"/></svg>${this.t('insights.wlPending')}</td>
+                        <td>${wlPending}</td><td></td>
+                    </tr>
+                    <tr>
+                        <td><svg class="ins-tbl-icon"><use href="#icon-check-circle"/></svg>${this.t('insights.wlCompleted')}</td>
+                        <td>${wlPct}%</td><td></td>
+                    </tr>
+                </tbody></table>
             </div>`;
+            html += `<div class="insights-progress-wrap" style="margin-bottom:16px">
+                <div class="insights-progress-label" style="font-size:12px">${this.t('insights.wlWatchedFrom').replace('{0}', wl.watchedCount||0)}</div>
+                <div class="insights-progress-bar"><div class="insights-progress-fill" style="width:${wlPct}%"></div></div>
+            </div>`;
+            if (wl.oldestItem) {
+                const old = wl.oldestItem;
+                const ps = old.posterPath ? `/videometa/${old.posterPath}` : '';
+                html += `<div class="ins-wl-oldest" onclick="App.openVideoDetail(${old.id})">
+                    ${ps ? `<div class="ins-wl-poster"><img src="${ps}" loading="lazy" onerror="this.style.display='none'" alt=""></div>` : ''}
+                    <div class="ins-wl-info">
+                        <div style="font-size:10px;color:rgba(255,255,255,.4);text-transform:uppercase;letter-spacing:.04em;margin-bottom:3px">${this.t('insights.wlWaiting')}</div>
+                        <div class="ins-wl-title">${this.esc(old.title)}</div>
+                        <div class="ins-wl-days">${this.t('insights.wlDaysOnList').replace('{0}', old.daysAgo)}</div>
+                        <button class="ins-wl-btn" onclick="event.stopPropagation();App.openVideoDetail(${old.id})">
+                            <svg style="width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2"><use href="#icon-play"/></svg>
+                            ${this.t('insights.watchNow')}
+                        </button>
+                    </div>
+                </div>`;
+            }
+        } else {
+            html += `<div style="color:rgba(255,255,255,.4);font-size:13px;padding:20px 0;text-align:center">${this.t('insights.wlEmpty')}</div>`;
         }
         html += `</div>`;
 
-        // ── Favorite Genres ──
-        if (data.favoriteGenres && data.favoriteGenres.length > 0) {
-            html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.favoriteGenres')}</div><div class="insights-genre-tags">`;
-            data.favoriteGenres.forEach(g => {
-                html += `<span class="insights-genre-tag">${this.esc(g.name)} <small>(${g.count})</small></span>`;
-            });
-            html += `</div></div>`;
-        }
+        html += `</div>`; // end 2-col grid
 
-        // ── Comfort Content (Most Replayed) ──
-        if (data.comfortContent && data.comfortContent.length > 0) {
-            html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.comfortContent')}</div>
-                <p class="insights-section-desc">${this.t('insights.comfortContentDesc')}</p>
-                <div class="insights-comfort-list">`;
-            data.comfortContent.forEach(item => {
-                const imgSrc = item.posterPath ? `/videometa/${item.posterPath}` : item.thumbnailPath ? `/videothumb/${item.thumbnailPath}` : '';
-                const typeLabel = item.mediaType === 'tv' ? this.t('insights.tv') : item.mediaType === 'documentary' ? this.t('insights.doc') : item.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
-                html += `<div class="insights-comfort-item" onclick="App.openVideoDetail(${item.id})">
-                    <div class="insights-comfort-thumb">
-                        ${imgSrc ? `<img src="${imgSrc}" loading="lazy" onerror="this.style.display='none'" alt="">` : ''}
-                        <span class="video-type-badge video-type-${item.mediaType}">${typeLabel}</span>
-                    </div>
-                    <div class="insights-comfort-info">
-                        <div class="insights-comfort-title">${this.esc(item.title)}</div>
-                        <div class="insights-comfort-plays">${this.t('insights.playedTimes').replace('{0}', item.playCount)}</div>
-                    </div>
+        // ── Monthly Activity Chart ──
+        if (data.monthlyActivity && data.monthlyActivity.length > 0) {
+            const maxAct = Math.max(...data.monthlyActivity.map(m => m.count), 1);
+            html += `<div class="insights-section">
+                <div class="insights-section-title">
+                    <svg style="width:20px;height:20px;stroke:var(--accent);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-activity"/></svg>
+                    ${this.t('insights.activityChart')}
+                </div>
+                <div class="ins-activity-chart">`;
+            data.monthlyActivity.forEach(m => {
+                const h = m.count > 0 ? Math.max(Math.round(m.count / maxAct * 96), 4) : 0;
+                let mLbl = m.label;
+                try { mLbl = new Date(m.year, m.month - 1).toLocaleString(this._langCode || 'en', { month: 'short' }); } catch(e) {}
+                html += `<div class="ins-activity-col">
+                    <div class="ins-activity-bar" style="height:${h}px"></div>
+                    <div class="ins-activity-tip">${mLbl} ${m.year}: ${m.count}</div>
+                    <div class="ins-activity-lbl">${mLbl}</div>
                 </div>`;
             });
             html += `</div></div>`;
         }
 
-        // ── Recently Completed ──
-        if (data.recentlyCompleted && data.recentlyCompleted.length > 0) {
-            html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.recentlyWatched')}</div>
-                <div class="home-row"><button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this, -1)">&#10094;</button>
+        // ── Genre Recommendations ("Because you like…") ──
+        if (data.genreRecommendations && data.genreRecommendations.items && data.genreRecommendations.items.length > 0) {
+            const gr = data.genreRecommendations;
+            html += `<div class="insights-section">
+                <div class="insights-section-title">${this.t('insights.becauseYouLike')} <span style="color:var(--accent)">${this.esc(gr.genre)}</span></div>
+                <div class="home-row"><button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this,-1)">&#10094;</button>
                 <div class="home-row-scroll home-row-wide">`;
-            data.recentlyCompleted.forEach(v => {
-                const thumbSrc = v.posterPath ? `/videometa/${v.posterPath}` : v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '';
-                const typeLabel = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
-                const subtitle = v.year ? String(v.year) : '';
+            gr.items.forEach(v => {
+                const img = v.posterPath ? `/videometa/${v.posterPath}` : '';
+                const tl = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
+                const rb = v.rating ? `<span class="insights-rating-badge">${v.rating.toFixed(1)}</span>` : '';
                 html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})">
-                    <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
-                        <span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
+                    <div class="mv-card-thumb mv-card-poster">${img
+                        ? `<img src="${img}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
+                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}${rb}
+                        <span class="video-type-badge video-type-${v.mediaType}">${tl}</span>
                     </div>
-                    <div class="mv-card-info">
-                        <div class="mv-card-title">${this.esc(v.title)}</div>
-                        <div class="mv-card-artist">${subtitle}</div>
-                    </div>
+                    <div class="mv-card-info"><div class="mv-card-title">${this.esc(v.title)}</div><div class="mv-card-artist">${v.year||''}</div></div>
                 </div>`;
             });
-            html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this, 1)">&#10095;</button></div></div>`;
+            html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
         }
 
-        // ── Top Rated Unwatched ──
-        if (data.topRatedUnwatched && data.topRatedUnwatched.length > 0) {
-            html += `<div class="insights-section"><div class="insights-section-title">${this.t('insights.topRatedUnwatched')}</div>
-                <p class="insights-section-desc">${this.t('insights.topRatedUnwatchedDesc')}</p>
-                <div class="home-row"><button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this, -1)">&#10094;</button>
+        // ── Unfinished Series (Continue Watching) ──
+        if (data.unfinishedSeries && data.unfinishedSeries.length > 0) {
+            html += `<div class="insights-section">
+                <div class="insights-section-title">${this.t('insights.unfinishedSeries')}</div>
+                <p class="insights-section-desc">${this.t('insights.unfinishedDesc')}</p>
+                <div class="home-row"><button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this,-1)">&#10094;</button>
                 <div class="home-row-scroll home-row-wide">`;
-            data.topRatedUnwatched.forEach(v => {
-                const imgSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '');
-                const hasPoster = !!v.posterPath;
-                const typeLabel = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
-                const ratingBadge = v.rating ? `<span class="insights-rating-badge">${v.rating.toFixed(1)}</span>` : '';
-                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})">
-                    <div class="mv-card-thumb${hasPoster ? ' mv-card-poster' : ''}">
-                        ${imgSrc
-                            ? `<img src="${imgSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
-                        ${ratingBadge}
-                        <span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
+            data.unfinishedSeries.forEach(s => {
+                const rep = s.representative;
+                const img = rep.posterPath ? `/videometa/${rep.posterPath}` : rep.thumbnailPath ? `/videothumb/${rep.thumbnailPath}` : '';
+                const pct = Math.round(s.watchedCount / s.totalCount * 100);
+                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${rep.id})">
+                    <div class="mv-card-thumb mv-card-poster">${img
+                        ? `<img src="${img}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-tv"/></svg></span>`
+                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-tv"/></svg></span>`}
+                        <span class="video-type-badge video-type-tv">${this.t('insights.tv')}</span>
                     </div>
                     <div class="mv-card-info">
-                        <div class="mv-card-title">${this.esc(v.title)}</div>
-                        <div class="mv-card-artist">${v.year || ''} ${v.genre ? '&middot; ' + this.esc(v.genre.split(',')[0]) : ''}</div>
+                        <div class="mv-card-title">${this.esc(s.seriesName)}</div>
+                        <div class="mv-card-artist">${s.watchedCount}/${s.totalCount} ep</div>
+                        <div class="ins-series-prog"><div class="ins-series-prog-fill" style="width:${pct}%"></div></div>
                     </div>
                 </div>`;
             });
-            html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this, 1)">&#10095;</button></div></div>`;
+            html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
+        }
+
+        // ── Hidden Gems ──
+        if (data.hiddenGems && data.hiddenGems.length > 0) {
+            html += `<div class="insights-section">
+                <div class="insights-section-title">${this.t('insights.hiddenGems')}</div>
+                <p class="insights-section-desc">${this.t('insights.hiddenGemsDesc')}</p>
+                <div class="home-row"><button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this,-1)">&#10094;</button>
+                <div class="home-row-scroll home-row-wide">`;
+            data.hiddenGems.forEach(v => {
+                const img = v.posterPath ? `/videometa/${v.posterPath}` : '';
+                const tl = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
+                const rb = v.rating ? `<span class="insights-rating-badge">${v.rating.toFixed(1)}</span>` : '';
+                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})">
+                    <div class="mv-card-thumb mv-card-poster">${img
+                        ? `<img src="${img}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
+                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}${rb}
+                        <span class="video-type-badge video-type-${v.mediaType}">${tl}</span>
+                    </div>
+                    <div class="mv-card-info"><div class="mv-card-title">${this.esc(v.title)}</div><div class="mv-card-artist">${v.year||''}</div></div>
+                </div>`;
+            });
+            html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
         }
 
         // ── Mood Explorer ──
@@ -2830,7 +3133,14 @@ const App = {
     async renderActors(el) {
         this._actorsPage = 1;
         this._actorsSearch = '';
+        this._actorsViewMode = 'grid';
+
         const render = async () => {
+            if (this._actorsViewMode === 'byname') {
+                await this._renderActorsByName(el);
+                return;
+            }
+
             const params = `page=${this._actorsPage}&limit=60&search=${encodeURIComponent(this._actorsSearch)}`;
             const data = await this.api(`actors?${params}`);
             if (!data) { el.innerHTML = this.emptyState('Error', 'Could not load actors.'); return; }
@@ -2838,6 +3148,8 @@ const App = {
             let html = `<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px">
                 <h2 style="margin:0">${this.t('page.actors')}</h2>
                 <div style="display:flex;align-items:center;gap:10px">
+                    <button class="filter-chip active">${this.t('filter.all')} ${this.t('nav.actors')}</button>
+                    <button class="filter-chip" onclick="App._actorsViewMode='byname';App._actorsRender()">${this.t('sort.byName')}</button>
                     <span style="color:var(--text-secondary);font-size:0.85rem">${this.t('actors.total')}: ${data.total}</span>
                     <input type="text" id="actors-search" placeholder="${this.t('actors.search')}" value="${this._actorsSearch}"
                         style="padding:6px 12px;background:var(--bg-card);border:1px solid var(--border-color);border-radius:6px;color:var(--text-primary);font-size:0.9rem;width:200px">
@@ -2859,18 +3171,7 @@ const App = {
                 html += this.emptyState(this.t('page.actors'), this.t('actors.noResults') || 'No actors found.');
             } else {
                 html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:16px">';
-                data.actors.forEach(a => {
-                    const photo = a.imageCached ? `/actorphoto/${a.imageCached}` : '';
-                    html += `<div class="actor-card" onclick="App.openActorDetail(${a.id})" style="cursor:pointer;text-align:center">
-                        <div style="width:100px;height:100px;border-radius:50%;margin:0 auto 8px;overflow:hidden;background:var(--bg-card);display:flex;align-items:center;justify-content:center;border:2px solid var(--border-color)">
-                            ${photo
-                                ? `<img src="${photo}" alt="${a.name}" style="width:100%;height:100%;object-fit:cover">`
-                                : `<svg style="width:40px;height:40px;stroke:var(--text-secondary);fill:none;stroke-width:1.5"><use href="#icon-users"/></svg>`}
-                        </div>
-                        <div style="font-size:0.85rem;font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.name}</div>
-                        <div style="font-size:0.75rem;color:var(--text-secondary)">${a.movieCount} ${this.t('actors.movies')}</div>
-                    </div>`;
-                });
+                data.actors.forEach(a => { html += this._renderActorCardHtml(a); });
                 html += '</div>';
             }
 
@@ -2900,6 +3201,7 @@ const App = {
                         render();
                     }, 400);
                 });
+                searchInput.focus();
             }
 
             // Populate actors button
@@ -2925,6 +3227,72 @@ const App = {
         };
         this._actorsRender = render;
         await render();
+    },
+
+    _renderActorCardHtml(a) {
+        const photo = a.imageCached ? `/actorphoto/${a.imageCached}` : '';
+        return `<div class="actor-card" onclick="App.openActorDetail(${a.id})" style="cursor:pointer;text-align:center">
+            <div style="width:100px;height:100px;border-radius:50%;margin:0 auto 8px;overflow:hidden;background:var(--bg-card);display:flex;align-items:center;justify-content:center;border:2px solid var(--border-color)">
+                ${photo
+                    ? `<img src="${photo}" alt="${this.esc(a.name)}" style="width:100%;height:100%;object-fit:cover" loading="lazy">`
+                    : `<svg style="width:40px;height:40px;stroke:var(--text-secondary);fill:none;stroke-width:1.5"><use href="#icon-users"/></svg>`}
+            </div>
+            <div style="font-size:0.85rem;font-weight:500;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${this.esc(a.name)}</div>
+            <div style="font-size:0.75rem;color:var(--text-secondary)">${a.movieCount} ${this.t('actors.movies')}</div>
+        </div>`;
+    },
+
+    _actorFirstLetter(name) {
+        const c = (name || '').charAt(0).toUpperCase();
+        return /[A-Z]/.test(c) ? c : '#';
+    },
+
+    async _renderActorsByName(el) {
+        el.innerHTML = `<div style="text-align:center;padding:60px"><div class="spinner"></div></div>`;
+        const data = await this.api('actors?limit=2000&sort=name');
+        if (!data) { el.innerHTML = this.emptyState('Error', 'Could not load actors.'); return; }
+
+        const ALL_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
+        const groups = new Map();
+        data.actors.forEach(a => {
+            const letter = this._actorFirstLetter(a.name);
+            if (!groups.has(letter)) groups.set(letter, []);
+            groups.get(letter).push(a);
+        });
+        const activeLetters = new Set(groups.keys());
+
+        let html = `<div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px">
+            <h2 style="margin:0">${this.t('page.actors')}</h2>
+            <div style="display:flex;align-items:center;gap:10px">
+                <button class="filter-chip" onclick="App._actorsViewMode='grid';App._actorsRender()">${this.t('filter.all')} ${this.t('nav.actors')}</button>
+                <button class="filter-chip active">${this.t('sort.byName')}</button>
+                <span style="color:var(--text-secondary);font-size:0.85rem">${this.t('actors.total')}: ${data.total}</span>
+            </div>
+        </div>`;
+
+        // Scrubber
+        let scrubHtml = `<div class="vid-scrubber" id="vid-scrubber">`;
+        ALL_LETTERS.forEach(l => {
+            scrubHtml += `<div class="vid-scrubber-item${activeLetters.has(l) ? '' : ' empty'}" data-key="${l}" onclick="App._vidScrollToAnchor('vid-letter-${l}')">${l}</div>`;
+        });
+        scrubHtml += `</div>`;
+
+        // Content grouped by letter
+        html += `<div class="vid-timeline-wrapper">`;
+        ALL_LETTERS.forEach(l => {
+            if (!groups.has(l)) return;
+            html += `<div class="vid-letter-anchor" id="vid-letter-${l}" data-key="${l}"></div>`;
+            html += `<div class="vid-letter-header">${l}</div>`;
+            html += `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:16px;margin-bottom:28px">`;
+            groups.get(l).forEach(a => { html += this._renderActorCardHtml(a); });
+            html += `</div>`;
+        });
+        html += `</div>`;
+
+        el.innerHTML = html + scrubHtml;
+
+        const activeKeys = ALL_LETTERS.filter(l => activeLetters.has(l));
+        this._setupVidScrubber(activeKeys, 'vid-letter-');
     },
 
     async openActorDetail(id) {
@@ -3500,7 +3868,87 @@ const App = {
             }
         }
 
+        // ════════════════ DUPLICATE DETECTION ════════════════
+        html += `<div class="section-title"><svg class="an-section-icon"><use href="#icon-copy"/></svg> ${this.t('analysis.duplicates')}</div>`;
+        html += `<div class="an-panel" id="dup-panel">
+            <p style="font-size:13px;color:var(--text-secondary);margin:0 0 14px">${this.t('analysis.duplicatesDesc')}</p>
+            <button class="an-dup-scan-btn" onclick="App._dupScan()">${this.t('analysis.duplicatesScan')}</button>
+            <div id="dup-results" style="margin-top:16px"></div>
+        </div>`;
+
         el.innerHTML = html;
+    },
+
+    async _dupScan() {
+        const btn = document.querySelector('.an-dup-scan-btn');
+        const results = document.getElementById('dup-results');
+        if (!btn || !results) return;
+        btn.disabled = true;
+        btn.textContent = this.t('analysis.duplicatesScanning');
+        results.innerHTML = '<div class="spinner" style="margin:12px auto"></div>';
+
+        const data = await this.api('analysis/duplicates');
+        btn.disabled = false;
+        btn.textContent = this.t('analysis.duplicatesScan');
+        if (!data) { results.innerHTML = ''; return; }
+
+        if (data.totalGroups === 0) {
+            results.innerHTML = `<div class="dup-empty">${this.t('analysis.duplicatesNone')}</div>`;
+            return;
+        }
+
+        const sections = [
+            { key: 'music',       label: this.t('analysis.duplicatesMusic'),      color: '#1db954', items: data.music },
+            { key: 'videos',      label: this.t('analysis.duplicatesVideos'),     color: '#e67e22', items: data.videos },
+            { key: 'tvEpisodes',  label: this.t('analysis.duplicatesTv'),         color: '#e67e22', items: data.tvEpisodes },
+            { key: 'musicVideos', label: this.t('analysis.duplicatesMv'),         color: '#9b59b6', items: data.musicVideos },
+            { key: 'ebooks',      label: this.t('analysis.duplicatesEbooks'),     color: '#e74c3c', items: data.ebooks },
+            { key: 'audiobooks',  label: this.t('analysis.duplicatesAudiobooks'), color: '#3498db', items: data.audiobooks },
+        ].filter(s => s.items && s.items.length > 0);
+
+        let html = `<div class="dup-summary">
+            <span class="dup-stat"><strong>${data.totalGroups.toLocaleString()}</strong> ${this.t('analysis.duplicatesGroups')}</span>
+            <span class="dup-stat-sep">·</span>
+            <span class="dup-stat"><strong>${data.totalDuplicateFiles.toLocaleString()}</strong> ${this.t('analysis.duplicatesFiles')}</span>
+            <span class="dup-stat-sep">·</span>
+            <span class="dup-stat"><strong>${this.formatSize(data.totalWastedBytes)}</strong> ${this.t('analysis.duplicatesWasted')}</span>
+        </div>`;
+
+        for (const sec of sections) {
+            html += `<div class="dup-section">
+                <div class="dup-section-header" onclick="App._dupToggleSection(this)">
+                    <span class="dup-section-dot" style="background:${sec.color}"></span>
+                    <span class="dup-section-label">${sec.label}</span>
+                    <span class="dup-section-count">${sec.items.length}</span>
+                    <svg class="dup-chevron" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                </div>
+                <div class="dup-section-body">
+                ${sec.items.map(g => `
+                    <div class="dup-group">
+                        <div class="dup-group-title">
+                            <span>${this.esc(g.label)}</span>
+                            <span class="dup-badge">${g.count} ${this.t('analysis.duplicatesCopies')}</span>
+                        </div>
+                        ${g.items.map((item, idx) => `
+                        <div class="dup-item${idx === 0 ? ' dup-item--best' : ''}">
+                            <div class="dup-item-path" title="${this.esc(item.filePath)}">${this.esc(item.filePath)}</div>
+                            <div class="dup-item-meta">
+                                ${item.detail ? `<span>${this.esc(item.detail)}</span>` : ''}
+                                <span>${this.formatSize(item.fileSize)}</span>
+                            </div>
+                        </div>`).join('')}
+                    </div>`).join('')}
+                </div>
+            </div>`;
+        }
+
+        results.innerHTML = html;
+    },
+
+    _dupToggleSection(header) {
+        const body = header.nextElementSibling;
+        const open = body.classList.toggle('dup-section-body--open');
+        header.querySelector('.dup-chevron').style.transform = open ? 'rotate(180deg)' : '';
     },
 
     async _deepScanTrigger() {
@@ -3552,7 +4000,7 @@ const App = {
     // ─── Music Library Page (with sub-navigation tabs) ──
     async renderMusic(el) {
         this.musicPage = 1;
-        this.musicSort = 'title';
+        this.musicSort = 'recent';
         this.musicSubView = 'all';
         this.musicFormat = '';
         this._musicFormats = null;
@@ -3590,7 +4038,7 @@ const App = {
                 break;
             default:
                 this.musicPage = 1;
-                this.musicSort = 'title';
+                this.musicSort = 'recent';
                 await this.loadMusicPage();
                 break;
         }
@@ -3599,6 +4047,78 @@ const App = {
     async loadMusicPage(el) {
         const target = el || document.getElementById('music-sub-content') || document.getElementById('main-content');
         const fmtParam = this.musicFormat ? `&format=${this.musicFormat}` : '';
+
+        // Letter browse mode: fetch all tracks + formats in one parallel round, skip paginated fetch
+        if (this.musicSort === 'title') {
+            const [allData, allFormats] = await Promise.all([
+                this.api(`tracks?limit=5000&page=1&sort=title${fmtParam}`),
+                this._musicFormats ? Promise.resolve(null) : this.api('tracks/formats')
+            ]);
+            if (!allData) { target.innerHTML = this.emptyState('Error', 'Could not load tracks.'); return; }
+            if (allFormats && Array.isArray(allFormats) && allFormats.length > 0) {
+                this._musicFormats = new Set(allFormats);
+            } else if (!this._musicFormats) {
+                this._musicFormats = new Set();
+                (allData.tracks || []).forEach(t => { const f = this.trackFormat(t); if (f) this._musicFormats.add(f); });
+            }
+            const fmtList = [...this._musicFormats].sort();
+            const allTracks = allData.tracks || [];
+            const sortLabels = { title: this.t('sort.name'), recent: this.t('sort.recent') };
+
+
+            let html = `<div class="page-header" style="margin-top:4px">
+                <div style="font-size:13px;color:var(--text-secondary)">${allTracks.length} tracks in library</div>
+                <div class="filter-bar">
+                <button class="mv-shuffle-btn" onclick="App.shuffleMusic()" title="Play a random track">
+                    <svg><use href="#icon-shuffle"/></svg> ${this.t('btn.shufflePlay')}
+                </button>
+                <button class="mv-nightclub-btn" onclick="App.startNightClubModeFromMusic()" title="Night Club Mode">
+                    <svg viewBox="0 0 24 16"><path d="M0 8 C2 2, 4 2, 6 8 S10 14, 12 8 S16 2, 18 8 S22 14, 24 8"/></svg> Night Club Mode
+                </button>
+                <button class="mv-android-btn" onclick="App.shuffleWithAndroidPlayer()" title="Shuffle with Android Player">
+                    <svg style="width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0"><use href="#icon-android"/></svg> Shuffle with Android
+                </button>`;
+            for (const [key, label] of Object.entries(sortLabels)) {
+                html += `<button class="filter-chip${this.musicSort === key ? ' active' : ''}" onclick="App.changeMusicSort('${key}')">${label}</button>`;
+            }
+            html += `</div></div>`;
+            if (fmtList.length > 0) {
+                html += `<div class="songs-format-bar"><span class="songs-format-label">Format:</span>`;
+                html += `<button class="filter-chip${!this.musicFormat ? ' active' : ''}" onclick="App.changeMusicFormat('')">All</button>`;
+                fmtList.forEach(f => {
+                    const cls = this.trackFormatClass(f);
+                    html += `<button class="filter-chip${this.musicFormat === f.toLowerCase() ? ' active' : ''}" onclick="App.changeMusicFormat('${f.toLowerCase()}')"><span class="track-format-badge ${cls}" style="margin-left:0">${f}</span></button>`;
+                });
+                html += `</div>`;
+            }
+
+            const groups = {};
+            allTracks.forEach((t, i) => {
+                const letter = this._actorFirstLetter(t.title).toUpperCase();
+                if (!groups[letter]) groups[letter] = [];
+                groups[letter].push({ t, i });
+            });
+            const letters = Object.keys(groups).sort();
+
+            html += `<div class="vid-timeline-wrapper">`;
+            letters.forEach(letter => {
+                html += `<div class="vid-letter-anchor" id="song-letter-${letter}"></div>`;
+                html += `<div class="vid-letter-header">${letter}</div>`;
+                html += `<div class="songs-grid">`;
+                groups[letter].forEach(({ t, i }) => { html += this._songCardHtml(t, i, { playFn: 'playMusicFromCards', showDots: true }); });
+                html += `</div>`;
+            });
+            html += `</div>`;
+            html += `<div class="vid-scrubber" id="music-letter-scrubber">`;
+            letters.forEach(l => {
+                html += `<div class="vid-scrubber-item" data-key="${l}" onclick="App._vidScrollToAnchor('song-letter-${l}')">${l}</div>`;
+            });
+            html += `</div>`;
+            target.innerHTML = html;
+            this._setupVidScrubber(letters, 'song-letter-');
+            return;
+        }
+
         const [data, allFormats] = await Promise.all([
             this.api(`tracks?limit=${this.musicPerPage}&page=${this.musicPage}&sort=${this.musicSort}${fmtParam}`),
             this._musicFormats ? Promise.resolve(null) : this.api('tracks/formats')
@@ -3616,8 +4136,7 @@ const App = {
 
         this.musicTotal = data.total;
         const totalPages = Math.ceil(data.total / this.musicPerPage);
-        const sortLabels = { title: this.t('sort.az'), recent: this.t('sort.recent') };
-
+        const sortLabels = { title: this.t('sort.name'), recent: this.t('sort.recent') };
         let html = `<div class="page-header" style="margin-top:4px">
             <div style="font-size:13px;color:var(--text-secondary)">${data.total} tracks in library</div>
             <div class="filter-bar">
@@ -3626,16 +4145,16 @@ const App = {
             </button>
             <button class="mv-nightclub-btn" onclick="App.startNightClubModeFromMusic()" title="Night Club Mode">
                 <svg viewBox="0 0 24 16"><path d="M0 8 C2 2, 4 2, 6 8 S10 14, 12 8 S16 2, 18 8 S22 14, 24 8"/></svg> Night Club Mode
+            </button>
+            <button class="mv-android-btn" onclick="App.shuffleWithAndroidPlayer()" title="Shuffle with Android Player">
+                <svg style="width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0"><use href="#icon-android"/></svg> Shuffle with Android
             </button>`;
         for (const [key, label] of Object.entries(sortLabels)) {
             html += `<button class="filter-chip${this.musicSort === key ? ' active' : ''}" onclick="App.changeMusicSort('${key}')">${label}</button>`;
         }
         html += `</div></div>`;
-
-        // Format filter bar — own row, always visible when formats are known
         if (fmtList.length > 0) {
-            html += `<div class="songs-format-bar">`;
-            html += `<span class="songs-format-label">Format:</span>`;
+            html += `<div class="songs-format-bar"><span class="songs-format-label">Format:</span>`;
             html += `<button class="filter-chip${!this.musicFormat ? ' active' : ''}" onclick="App.changeMusicFormat('')">All</button>`;
             fmtList.forEach(f => {
                 const cls = this.trackFormatClass(f);
@@ -3649,32 +4168,7 @@ const App = {
                 html += `<div style="text-align:right;margin-bottom:12px;color:var(--text-muted);font-size:12px">Page ${this.musicPage} of ${totalPages}</div>`;
             }
             html += '<div class="songs-grid">';
-            data.tracks.forEach((t, i) => {
-                const artSrc = this.getArtUrl(t);
-                const dur = this.formatDuration(t.duration);
-                const favClass = t.isFavourite ? 'active' : '';
-                const fmt = this.trackFormat(t);
-                html += `<div class="song-card" onclick="App.playMusicFromCards(${i})" data-track-id="${t.id}">
-                    <div class="song-card-art">
-                        ${artSrc
-                            ? `<img src="${artSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="song-card-placeholder" style="display:none">&#9835;</span>`
-                            : `<span class="song-card-placeholder">&#9835;</span>`
-                        }
-                        <button class="song-card-play" onclick="event.stopPropagation(); App.playMusicFromCards(${i})">&#9654;</button>
-                        <button class="song-card-dots" onclick="event.stopPropagation(); App.showTrackMenu(${t.id}, event)" title="More options">&#8942;</button>
-                    </div>
-                    <div class="song-card-info">
-                        <div class="song-card-title">${this.esc(t.title)}</div>
-                        <div class="song-card-artist">${this.esc(t.artist)}</div>
-                        <div class="song-card-meta">
-                            <span>${this.esc(t.album)}</span>
-                            <span>${dur}</span>
-                            ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
-                        </div>
-                    </div>
-                    <button class="song-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
-                </div>`;
-            });
+            data.tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playMusicFromCards', showDots: true }); });
             html += '</div>';
             html += this.renderPagination(this.musicPage, totalPages);
         } else {
@@ -3684,6 +4178,10 @@ const App = {
     },
 
     changeMusicSort(sort) {
+        if (this._videoScrollHandler) {
+            document.getElementById('main-content')?.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
         this.musicSort = sort;
         this.musicPage = 1;
         this.loadMusicPage();
@@ -3720,6 +4218,40 @@ const App = {
         this._playlistTracks = [];
         await this.shuffleMusic();
         this.startNightClubMode();
+    },
+
+    // Launch the fullscreen Android-style music player (from Go Big mode) standalone
+    launchAndroidMusicPlayer(tracks, startIdx) {
+        if (!tracks || !tracks.length) return;
+        // Pause the classic player so two streams don't play simultaneously
+        const classicAudio = document.getElementById('audio-player');
+        if (classicAudio && !classicAudio.paused) {
+            classicAudio.pause();
+            const btn = document.getElementById('btn-play');
+            if (btn) btn.innerHTML = '<svg style="width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-play"/></svg>';
+        }
+        if (!this._gbActive) {
+            this._androidPlayerFromClassic = true;
+            this.startGoBigMode();
+            // Hide Go Big background content — only show the music player overlay
+            const ol = this._gbOverlay;
+            if (ol) {
+                const scroll  = ol.querySelector('#gb-scroll');
+                const topbar  = ol.querySelector('#gb-topbar');
+                const loading = ol.querySelector('#gb-loading');
+                if (scroll)  scroll.style.display  = 'none';
+                if (topbar)  topbar.style.display  = 'none';
+                if (loading) loading.style.display = 'none';
+            }
+        }
+        this._gbOpenMusicPlayer(startIdx || 0, tracks);
+    },
+
+    async shuffleWithAndroidPlayer() {
+        const data = await this.api('tracks?limit=200&page=1&sort=recent');
+        if (!data || !data.tracks || !data.tracks.length) return;
+        const tracks = [...data.tracks].sort(() => Math.random() - 0.5);
+        this.launchAndroidMusicPlayer(tracks, 0);
     },
 
     goMusicPage(page) {
@@ -3793,19 +4325,57 @@ const App = {
     async loadAlbumsPage(el) {
         const perPage = 100;
         const target = el || document.getElementById('music-sub-content');
+
+        const headerHtml = () => `<div class="page-header"><h1>${this.t('page.albums')}</h1>
+            <div class="filter-bar">
+                <button class="filter-chip${this._albumsSort === 'recent' ? ' active' : ''}" onclick="App.changeAlbumsSort('recent')">${this.t('sort.recent')}</button>
+                <button class="filter-chip${this._albumsSort === 'name' ? ' active' : ''}" onclick="App.changeAlbumsSort('name')">${this.t('sort.name')}</button>
+                <button class="filter-chip${this._albumsSort === 'artist' ? ' active' : ''}" onclick="App.changeAlbumsSort('artist')">${this.t('sort.artist')}</button>
+                <button class="filter-chip${this._albumsSort === 'year' ? ' active' : ''}" onclick="App.changeAlbumsSort('year')">${this.t('sort.year')}</button>
+            </div>
+        </div>`;
+
+        // Letter browse mode
+        if (this._albumsSort === 'name') {
+            const allData = await this.api('albums?limit=5000&page=1&sort=name');
+            if (!allData) { target.innerHTML = this.emptyState('Error', 'Could not load albums.'); return; }
+            const allAlbums = allData.albums || [];
+
+            const groups = {};
+            allAlbums.forEach(album => {
+                const letter = this._actorFirstLetter(album.name).toUpperCase();
+                if (!groups[letter]) groups[letter] = [];
+                groups[letter].push(album);
+            });
+            const letters = Object.keys(groups).sort();
+
+            let html = headerHtml();
+            html += `<div class="vid-timeline-wrapper">`;
+            letters.forEach(letter => {
+                html += `<div class="vid-letter-anchor" id="album-letter-${letter}"></div>`;
+                html += `<div class="vid-letter-header">${letter}</div>`;
+                html += `<div class="card-grid">`;
+                groups[letter].forEach(album => { html += this.albumCard(album); });
+                html += `</div>`;
+            });
+            html += `</div>`;
+            html += `<div class="vid-scrubber" id="albums-letter-scrubber">`;
+            letters.forEach(l => {
+                html += `<div class="vid-scrubber-item" data-key="${l}" onclick="App._vidScrollToAnchor('album-letter-${l}')">${l}</div>`;
+            });
+            html += `</div>`;
+
+            target.innerHTML = html;
+            this._setupVidScrubber(letters, 'album-letter-');
+            return;
+        }
+
         const data = await this.api(`albums?limit=${perPage}&page=${this._albumsPage}&sort=${this._albumsSort}`);
         if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load albums.'); return; }
         this._albumsTotal = data.total;
         const totalPages = Math.ceil(data.total / perPage);
 
-        let html = `<div class="page-header"><h1>${this.t('page.albums')}</h1>
-            <div class="filter-bar">
-                <button class="filter-chip${this._albumsSort === 'recent' ? ' active' : ''}" onclick="App.changeAlbumsSort('recent')">${this.t('sort.recent')}</button>
-                <button class="filter-chip${this._albumsSort === 'name' ? ' active' : ''}" onclick="App.changeAlbumsSort('name')">${this.t('sort.az')}</button>
-                <button class="filter-chip${this._albumsSort === 'artist' ? ' active' : ''}" onclick="App.changeAlbumsSort('artist')">${this.t('sort.artist')}</button>
-                <button class="filter-chip${this._albumsSort === 'year' ? ' active' : ''}" onclick="App.changeAlbumsSort('year')">${this.t('sort.year')}</button>
-            </div>
-        </div>`;
+        let html = headerHtml();
 
         if (data.albums && data.albums.length > 0) {
             if (totalPages > 1) {
@@ -3824,6 +4394,10 @@ const App = {
     },
 
     changeAlbumsSort(sort) {
+        if (this._videoScrollHandler) {
+            document.getElementById('main-content')?.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
         this._albumsSort = sort;
         this._albumsPage = 1;
         this.loadAlbumsPage();
@@ -3875,23 +4449,68 @@ const App = {
         if (!album) return;
         const el = document.getElementById('main-content');
         document.getElementById('page-title').innerHTML = `<span>${this.esc(album.name)}</span>`;
-        let html = `<div class="page-header">
-            <div><h1>${this.esc(album.name)}</h1>
-                <div style="color:var(--text-secondary);font-size:14px;margin-top:4px">
-                    ${this.esc(album.artist)}${album.year ? ' &middot; ' + album.year : ''} &middot;
-                    ${album.tracks ? album.tracks.length : 0} tracks &middot; ${this.formatDuration(album.totalDuration)}
+
+        let html = `<div class="album-hero">
+            <div class="album-hero-art">
+                <img src="/api/cover/${album.id}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
+                <div class="album-hero-art-placeholder" style="display:none">&#127925;</div>
+            </div>
+            <div class="album-hero-info">
+                <div class="album-hero-label">Album</div>
+                <div class="album-hero-title">${this.esc(album.name)}</div>
+                <div class="album-hero-meta">
+                    ${this.esc(album.artist)}${album.year ? ' &middot; ' + album.year : ''}
+                    &middot; ${album.tracks ? album.tracks.length : 0} tracks
+                    &middot; ${this.formatDuration(album.totalDuration)}
+                </div>
+                <div class="album-hero-actions">
+                    <button class="btn-primary" onclick="App.playAlbum(${album.id})">&#9654; ${this.t('btn.playAll')}</button>
+                    <button class="btn-secondary album-add-pl-btn" onclick="App._showAlbumAddToPlaylist(${album.id}, this)">&#43; Add to Playlist</button>
                 </div>
             </div>
-            <button class="btn-primary" onclick="App.playAlbum(${album.id})">&#9654; ${this.t('btn.playAll')}</button>
         </div>`;
+
         if (album.tracks && album.tracks.length > 0) html += this.renderTrackTable(album.tracks, true);
         el.innerHTML = html;
+    },
 
-        // Auto-play the album from the first track
-        if (album.tracks && album.tracks.length > 0) {
-            this.playlist = album.tracks;
-            this.playIndex = 0;
-            this.playTrack(this.playlist[0]);
+    async _showAlbumAddToPlaylist(albumId, btn) {
+        event.stopPropagation();
+        document.querySelectorAll('.add-pl-popup').forEach(p => p.remove());
+
+        const [album, playlists] = await Promise.all([
+            this.api(`albums/${albumId}`),
+            this.api('playlists')
+        ]);
+        if (!album || !album.tracks || !album.tracks.length) { alert('No tracks in this album.'); return; }
+        if (!playlists || !playlists.length) { alert('No playlists yet. Create one first from the Playlists page.'); return; }
+
+        const trackIds = album.tracks.map(t => t.id);
+
+        const popup = document.createElement('div');
+        popup.className = 'add-pl-popup';
+        popup.dataset.trackIds = JSON.stringify(trackIds);
+        popup.innerHTML = `<div class="add-pl-popup-title">Add album to playlist</div>` +
+            playlists.map(p => `<div class="add-pl-popup-item" onclick="App._addAlbumTracksToPlaylist(${p.id}, this)">${this.esc(p.name)} <span style="opacity:.5;font-size:11px">(${p.trackCount})</span></div>`).join('');
+
+        const rect = btn.getBoundingClientRect();
+        popup.style.top = Math.min(rect.bottom + 4, window.innerHeight - 320) + 'px';
+        popup.style.left = Math.min(rect.left, window.innerWidth - 220) + 'px';
+        document.body.appendChild(popup);
+
+        const close = (e) => { if (!popup.contains(e.target) && e.target !== btn) { popup.remove(); document.removeEventListener('click', close); } };
+        setTimeout(() => document.addEventListener('click', close), 10);
+    },
+
+    async _addAlbumTracksToPlaylist(playlistId, el) {
+        const popup = el.closest('.add-pl-popup');
+        const trackIds = JSON.parse(popup?.dataset.trackIds || '[]');
+        if (!trackIds.length) return;
+        const res = await this.apiPost(`playlists/${playlistId}/add-tracks`, { trackIds });
+        if (res && el) {
+            el.classList.add('added');
+            el.innerHTML = `&#10004; ${res.count || trackIds.length} tracks added!`;
+            setTimeout(() => { if (popup) popup.remove(); }, 1200);
         }
     },
 
@@ -3906,53 +4525,107 @@ const App = {
     // ─── Artists Page ────────────────────────────────────────
     _artistsPage: 1,
     _artistsTotal: 0,
+    _artistsSort: 'paginated',
 
     async renderArtists(el) {
         this._artistsPage = 1;
+        this._artistsSort = 'paginated';
         await this.loadArtistsPage(el);
+    },
+
+    _artistCardHtml(artist) {
+        const imgHtml = artist.imagePath
+            ? `<img src="/singerphoto/${artist.imagePath}" class="artist-portrait" loading="lazy"
+                   onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
+               <div class="artist-portrait-fallback" style="display:none">
+                   <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`
+            : `<div class="artist-portrait-fallback">
+                   <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`;
+        return `<div class="card" onclick="App.openArtist('${this.esc(artist.name).replace(/'/g, "\\'")}')">
+            <div class="card-cover artist-cover">${imgHtml}</div>
+            <div class="card-info">
+                <div class="card-title">${this.esc(artist.name)}</div>
+                <div class="card-subtitle">${artist.albumCount || 0} albums &middot; ${artist.trackCount || 0} tracks</div>
+            </div>
+        </div>`;
     },
 
     async loadArtistsPage(el) {
         const perPage = 100;
         const target = el || document.getElementById('music-sub-content');
+
+        const headerHtml = (totalCount) => `<div class="page-header"><h1>${this.t('page.artists')}</h1>
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+                <div style="font-size:13px;color:var(--text-secondary)">${totalCount} artists</div>
+                <button class="filter-chip${this._artistsSort === 'paginated' ? ' active' : ''}" onclick="App.changeArtistsSort('paginated')">${this.t('sort.recent')}</button>
+                <button class="filter-chip${this._artistsSort === 'name' ? ' active' : ''}" onclick="App.changeArtistsSort('name')">${this.t('sort.name')}</button>
+                <button class="filter-chip" id="btn-fetch-artist-images" onclick="App.fetchArtistImages()">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:middle;margin-right:4px"><use href="#icon-download"/></svg>Fetch Artist Images</button>
+            </div></div>`;
+
+        // Letter browse mode
+        if (this._artistsSort === 'name') {
+            const allData = await this.api('artists?limit=2000&page=1&sort=name');
+            if (!allData) { target.innerHTML = this.emptyState('Error', 'Could not load artists.'); return; }
+            const allArtists = allData.artists || [];
+
+            const groups = {};
+            allArtists.forEach(artist => {
+                const letter = this._actorFirstLetter(artist.name).toUpperCase();
+                if (!groups[letter]) groups[letter] = [];
+                groups[letter].push(artist);
+            });
+            const letters = Object.keys(groups).sort();
+
+            let html = headerHtml(allArtists.length);
+            html += `<div class="vid-timeline-wrapper">`;
+            letters.forEach(letter => {
+                html += `<div class="vid-letter-anchor" id="artist-letter-${letter}"></div>`;
+                html += `<div class="vid-letter-header">${letter}</div>`;
+                html += `<div class="card-grid">`;
+                groups[letter].forEach(artist => { html += this._artistCardHtml(artist); });
+                html += `</div>`;
+            });
+            html += `</div>`;
+            html += `<div class="vid-scrubber" id="artists-letter-scrubber">`;
+            letters.forEach(l => {
+                html += `<div class="vid-scrubber-item" data-key="${l}" onclick="App._vidScrollToAnchor('artist-letter-${l}')">${l}</div>`;
+            });
+            html += `</div>`;
+
+            target.innerHTML = html;
+            this._setupVidScrubber(letters, 'artist-letter-');
+            return;
+        }
+
         const data = await this.api(`artists?limit=${perPage}&page=${this._artistsPage}`);
         if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load artists.'); return; }
         this._artistsTotal = data.total;
         const totalPages = Math.ceil(data.total / perPage);
 
-        let html = `<div class="page-header"><h1>${this.t('page.artists')}</h1>
-            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                <div style="font-size:13px;color:var(--text-secondary)">${data.total} artists</div>
-                <button class="filter-chip" id="btn-fetch-artist-images" onclick="App.fetchArtistImages()">
-                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:middle;margin-right:4px"><use href="#icon-download"/></svg>Fetch Artist Images</button>
-            </div></div>`;
+        let html = headerHtml(data.total);
         if (data.artists && data.artists.length > 0) {
             if (totalPages > 1) {
                 html += `<div style="text-align:right;margin-bottom:12px;color:var(--text-muted);font-size:12px">Page ${this._artistsPage} of ${totalPages}</div>`;
             }
             html += '<div class="card-grid">';
-            data.artists.forEach(artist => {
-                const imgHtml = artist.imagePath
-                    ? `<img src="/singerphoto/${artist.imagePath}" class="artist-portrait" loading="lazy"
-                           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                       <div class="artist-portrait-fallback" style="display:none">
-                           <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`
-                    : `<div class="artist-portrait-fallback">
-                           <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`;
-                html += `<div class="card" onclick="App.openArtist('${this.esc(artist.name).replace(/'/g, "\\'")}')">
-                    <div class="card-cover artist-cover">${imgHtml}</div>
-                    <div class="card-info">
-                        <div class="card-title">${this.esc(artist.name)}</div>
-                        <div class="card-subtitle">${artist.albumCount || 0} albums &middot; ${artist.trackCount || 0} tracks</div>
-                    </div>
-                </div>`;
-            });
+            data.artists.forEach(artist => { html += this._artistCardHtml(artist); });
             html += '</div>';
             if (totalPages > 1) html += this.renderArtistsPagination(this._artistsPage, totalPages);
         } else {
             html += this.emptyState(this.t('empty.noArtists.title'), this.t('empty.noArtists.desc'));
         }
         target.innerHTML = html;
+    },
+
+    changeArtistsSort(sort) {
+        if (this._videoScrollHandler) {
+            document.getElementById('main-content')?.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
+        this._artistsSort = sort;
+        this._artistsPage = 1;
+        this.loadArtistsPage();
     },
 
     renderArtistsPagination(currentPage, totalPages) {
@@ -4036,31 +4709,7 @@ const App = {
                 html += `<div style="text-align:right;margin-bottom:12px;color:var(--text-muted);font-size:12px">Page ${this._artistPage} of ${totalPages}</div>`;
             }
             html += '<div class="songs-grid">';
-            data.tracks.forEach((t, i) => {
-                const artSrc = this.getArtUrl(t);
-                const dur = this.formatDuration(t.duration);
-                const favClass = t.isFavourite ? 'active' : '';
-                const fmt = this.trackFormat(t);
-                html += `<div class="song-card" onclick="App.playArtistTrack(${i})" data-track-id="${t.id}">
-                    <div class="song-card-art">
-                        ${artSrc
-                            ? `<img src="${artSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="song-card-placeholder" style="display:none">&#9835;</span>`
-                            : `<span class="song-card-placeholder">&#9835;</span>`
-                        }
-                        <button class="song-card-play" onclick="event.stopPropagation(); App.playArtistTrack(${i})">&#9654;</button>
-                    </div>
-                    <div class="song-card-info">
-                        <div class="song-card-title">${this.esc(t.title)}</div>
-                        <div class="song-card-artist">${this.esc(t.artist)}</div>
-                        <div class="song-card-meta">
-                            <span>${this.esc(t.album)}</span>
-                            <span>${dur}</span>
-                            ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
-                        </div>
-                    </div>
-                    <button class="song-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
-                </div>`;
-            });
+            data.tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playArtistTrack' }); });
             html += '</div>';
             if (totalPages > 1) html += this.renderArtistPagination(this._artistPage, totalPages);
         } else {
@@ -4160,33 +4809,7 @@ const App = {
                 <span>Page ${this.songsPage} of ${totalPages}</span>
             </div>`;
             html += '<div class="songs-grid">';
-            data.tracks.forEach((t, i) => {
-                const artSrc = this.getArtUrl(t);
-                const dur = this.formatDuration(t.duration);
-                const favClass = t.isFavourite ? 'active' : '';
-                const fmt = this.trackFormat(t);
-                html += `<div class="song-card" onclick="App.playSongFromCards(${i})" data-track-id="${t.id}">
-                    <div class="song-card-art">
-                        ${artSrc
-                            ? `<img src="${artSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="song-card-placeholder" style="display:none">&#9835;</span>`
-                            : `<span class="song-card-placeholder">&#9835;</span>`
-                        }
-                        <button class="song-card-play" onclick="event.stopPropagation(); App.playSongFromCards(${i})">&#9654;</button>
-                        <button class="song-card-dots" onclick="event.stopPropagation(); App.showTrackMenu(${t.id}, event)" title="More options">&#8942;</button>
-                        <button class="song-card-add-pl" onclick="App.showAddToPlaylistPopup(${t.id}, this)" title="Add to playlist">+</button>
-                    </div>
-                    <div class="song-card-info">
-                        <div class="song-card-title">${this.esc(t.title)}</div>
-                        <div class="song-card-artist">${this.esc(t.artist)}</div>
-                        <div class="song-card-meta">
-                            <span>${this.esc(t.album)}</span>
-                            <span>${dur}</span>
-                            ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
-                        </div>
-                    </div>
-                    <button class="song-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
-                </div>`;
-            });
+            data.tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playSongFromCards', showDots: true, showAddPl: true }); });
             html += '</div>';
             html += this.renderSongsPagination(this.songsPage, totalPages);
         } else {
@@ -4357,31 +4980,7 @@ const App = {
                 html += `<div style="text-align:right;margin-bottom:12px;color:var(--text-muted);font-size:12px">Page ${this._genrePage} of ${totalPages}</div>`;
             }
             html += '<div class="songs-grid">';
-            data.tracks.forEach((t, i) => {
-                const artSrc = this.getArtUrl(t);
-                const dur = this.formatDuration(t.duration);
-                const favClass = t.isFavourite ? 'active' : '';
-                const fmt = this.trackFormat(t);
-                html += `<div class="song-card" onclick="App.playGenreTrack(${i})" data-track-id="${t.id}">
-                    <div class="song-card-art">
-                        ${artSrc
-                            ? `<img src="${artSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="song-card-placeholder" style="display:none">&#9835;</span>`
-                            : `<span class="song-card-placeholder">&#9835;</span>`
-                        }
-                        <button class="song-card-play" onclick="event.stopPropagation(); App.playGenreTrack(${i})">&#9654;</button>
-                    </div>
-                    <div class="song-card-info">
-                        <div class="song-card-title">${this.esc(t.title)}</div>
-                        <div class="song-card-artist">${this.esc(t.artist)}</div>
-                        <div class="song-card-meta">
-                            <span>${this.esc(t.album)}</span>
-                            <span>${dur}</span>
-                            ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
-                        </div>
-                    </div>
-                    <button class="song-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
-                </div>`;
-            });
+            data.tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playGenreTrack' }); });
             html += '</div>';
             if (totalPages > 1) html += this.renderGenrePagination(this._genrePage, totalPages);
         } else {
@@ -4668,31 +5267,7 @@ const App = {
         if (data && data.tracks && data.tracks.length > 0) {
             this._genreTracks = data.tracks; // reuse genre track list for playback
             html += '<div class="songs-grid">';
-            data.tracks.forEach((t, i) => {
-                const artSrc = this.getArtUrl(t);
-                const dur = this.formatDuration(t.duration);
-                const favClass = t.isFavourite ? 'active' : '';
-                const fmt = this.trackFormat(t);
-                html += `<div class="song-card" onclick="App.playGenreTrack(${i})" data-track-id="${t.id}">
-                    <div class="song-card-art">
-                        ${artSrc
-                            ? `<img src="${artSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="song-card-placeholder" style="display:none">&#9835;</span>`
-                            : `<span class="song-card-placeholder">&#9835;</span>`
-                        }
-                        <button class="song-card-play" onclick="event.stopPropagation(); App.playGenreTrack(${i})">&#9654;</button>
-                    </div>
-                    <div class="song-card-info">
-                        <div class="song-card-title">${this.esc(t.title)}</div>
-                        <div class="song-card-artist">${this.esc(t.artist)}</div>
-                        <div class="song-card-meta">
-                            <span>${this.esc(t.album)}</span>
-                            <span>${dur}</span>
-                            ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
-                        </div>
-                    </div>
-                    <button class="song-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
-                </div>`;
-            });
+            data.tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playGenreTrack' }); });
             html += '</div>';
         } else {
             html += this.emptyState('No tracks found', 'No tracks found in this folder category.');
@@ -4805,29 +5380,7 @@ const App = {
         if (hasTracks) {
             html += `<div class="section-title" style="margin-top:12px">Music (${trackData.tracks.length})</div>`;
             html += '<div class="songs-grid">';
-            trackData.tracks.forEach((t, i) => {
-                const artSrc = this.getArtUrl(t);
-                const dur = this.formatDuration(t.duration);
-                const fmt = this.trackFormat(t);
-                html += `<div class="song-card" onclick="App.playFavTrack(${i})" data-track-id="${t.id}">
-                    <div class="song-card-art">
-                        ${artSrc
-                            ? `<img src="${artSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="song-card-placeholder" style="display:none">&#9835;</span>`
-                            : `<span class="song-card-placeholder">&#9835;</span>`}
-                        <button class="song-card-play" onclick="event.stopPropagation(); App.playFavTrack(${i})">&#9654;</button>
-                    </div>
-                    <div class="song-card-info">
-                        <div class="song-card-title">${this.esc(t.title)}</div>
-                        <div class="song-card-artist">${this.esc(t.artist)}</div>
-                        <div class="song-card-meta">
-                            <span>${this.esc(t.album)}</span>
-                            <span>${dur}</span>
-                            ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
-                        </div>
-                    </div>
-                    <button class="song-card-fav active" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
-                </div>`;
-            });
+            trackData.tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playFavTrack', favActive: true }); });
             html += '</div>';
             this._favTracks = trackData.tracks;
         }
@@ -5032,11 +5585,6 @@ const App = {
         if (this.playlist[index]) this.playTrack(this.playlist[index]);
     },
 
-    openFavAudioBook(id) {
-        this.navigate('audiobooks');
-        setTimeout(() => this.openAudioBookDetail(id), 300);
-    },
-
     // ─── Watchlist ───────────────────────────────────────────
     async renderWatchlist(el) {
         const data = await this.api('watchlist');
@@ -5088,10 +5636,8 @@ const App = {
                 const data = await res.json();
                 if (data.inWatchlist) {
                     this._watchlistIds.add(videoId);
-                    this.showToast(this.t('watchlist.added'));
                 } else {
                     this._watchlistIds.delete(videoId);
-                    this.showToast(this.t('watchlist.removed'));
                     // If on the watchlist page, remove the card
                     if (this.currentPage === 'watchlist') {
                         document.querySelector(`[data-video-id="${videoId}"]`)?.remove();
@@ -5390,6 +5936,9 @@ const App = {
             <button class="playlist-btn playlist-btn-nightclub" onclick="App.startNightClubMode()"${entries.length === 0 ? ' disabled' : ''}>
                 <svg style="width:16px;height:14px" viewBox="0 0 24 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M0 8 C2 2, 4 2, 6 8 S10 14, 12 8 S16 2, 18 8 S22 14, 24 8"/></svg> Night Club Mode
             </button>
+            <button class="playlist-btn playlist-btn-android" onclick="App.launchAndroidMusicPlayer(App._playlistTracks, 0)"${entries.length === 0 ? ' disabled' : ''}>
+                <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-android"/></svg> Android Player
+            </button>
             <button class="playlist-btn playlist-btn-delete" onclick="App.deletePlaylist(${id})">Delete Playlist</button>
         </div>`;
 
@@ -5654,7 +6203,7 @@ const App = {
         };
 
         const agpMenuBtn = (type, param) => {
-            const paramStr = param !== undefined ? `, ${param}` : '';
+            const paramStr = param !== undefined ? `, ${param}` : ', null';
             return `<button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showAgpMenu('${type}'${paramStr}, event)" title="More options">&#8942;</button>`;
         };
 
@@ -5823,6 +6372,9 @@ const App = {
             <button class="playlist-btn playlist-btn-nightclub" onclick="App.startNightClubMode()"${dis}>
                 <svg style="width:16px;height:14px" viewBox="0 0 24 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M0 8 C2 2, 4 2, 6 8 S10 14, 12 8 S16 2, 18 8 S22 14, 24 8"/></svg> Night Club Mode
             </button>
+            <button class="playlist-btn playlist-btn-android" onclick="App.launchAndroidMusicPlayer(App._playlistTracks, 0)"${dis}>
+                <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-android"/></svg> Android Player
+            </button>
             <button class="playlist-btn playlist-btn-delete" onclick="App._agpDeletePlaylist('${type}',${JSON.stringify(param ?? null)})">Delete Playlist</button>
         </div>`;
 
@@ -5962,11 +6514,13 @@ const App = {
         let overlay = document.getElementById('lyrics-overlay');
         if (overlay && overlay.style.display === 'flex') {
             overlay.style.display = 'none';
-            document.getElementById('btn-player-lyrics').style.color = '';
+            const lBtn = document.getElementById('btn-player-lyrics');
+            if (lBtn) lBtn.style.color = '';
             return;
         }
         if (!this.currentTrack) return;
-        document.getElementById('btn-player-lyrics').style.color = 'var(--accent)';
+        const lBtn = document.getElementById('btn-player-lyrics');
+        if (lBtn) lBtn.style.color = 'var(--accent)';
 
         if (!overlay) {
             overlay = document.createElement('div');
@@ -6232,58 +6786,59 @@ const App = {
 
     // ─── Rescan Folders ──────────────────────────────────────
     async renderRescan(el) {
-        const icon = (id) => `<svg><use href="#icon-${id}"/></svg>`;
+        const svgIcon = (id) => `<svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0"><use href="#icon-${id}"/></svg>`;
         const primaryBtn = (label, onclick, iconId) =>
-            `<button class="rescan-btn rescan-btn-primary" onclick="${onclick}">${icon(iconId)} ${label}</button>`;
+            `<button class="rescan-btn rescan-btn-primary" onclick="${onclick}">${svgIcon(iconId)} ${label}</button>`;
         const secondaryBtn = (label, onclick, iconId) =>
-            `<button class="rescan-btn rescan-btn-secondary" onclick="${onclick}">${icon(iconId)} ${label}</button>`;
+            `<button class="rescan-btn rescan-btn-secondary" onclick="${onclick}">${svgIcon(iconId)} ${label}</button>`;
 
-        const card = (iconId, title, desc, actions, statusId) => `
-            <div class="rescan-card">
-                <div class="rescan-card-header">
-                    <div class="rescan-card-icon">${icon(iconId)}</div>
-                    <h3 class="rescan-card-title">${title}</h3>
+        const row = (iconId, title, desc, actions, statusId) => `
+            <div class="rescan-row">
+                <div class="rescan-row-icon">${svgIcon(iconId)}</div>
+                <div class="rescan-row-body">
+                    <div class="rescan-row-title">${title}</div>
+                    <div class="rescan-row-desc">${desc}</div>
                 </div>
-                <p class="rescan-card-desc">${desc}</p>
-                <div class="rescan-card-actions">${actions}</div>
+                <div class="rescan-row-actions">${actions}</div>
                 <div class="rescan-status" id="${statusId}"></div>
             </div>`;
 
         let html = `<div class="page-header"><h1>${this.t('page.rescan')}</h1></div>`;
-        html += `<div class="rescan-grid">`;
+        html += `<div class="rescan-list">`;
 
-        html += card('music',
+        html += row('music',
             this.t('rescan.musicLibraryScan'),
             this.t('rescan.musicDesc'),
             primaryBtn(this.t('btn.startMusicScan'), 'App.startScan()', 'scan'),
             'scan-status');
 
-        html += card('image',
+        html += row('image',
             this.t('rescan.picturesLibraryScan'),
             this.t('rescan.picturesDesc'),
-            primaryBtn(this.t('btn.startPicturesScan'), 'App.startPictureScan()', 'scan'),
+            primaryBtn(this.t('btn.startPicturesScan'), 'App.startPictureScan()', 'scan') +
+            secondaryBtn('Re-read EXIF &amp; GPS', 'App.startPictureExifRescan()', 'refresh'),
             'pic-scan-status');
 
-        html += card('book',
+        html += row('book',
             this.t('rescan.ebooksLibraryScan'),
             this.t('rescan.ebooksDesc'),
             primaryBtn(this.t('btn.startEBooksScan'), 'App.startEBookScan()', 'scan'),
             'ebook-scan-status');
 
-        html += card('headphones',
+        html += row('headphones',
             this.t('rescan.audioBooksLibraryScan'),
             this.t('rescan.audioBooksDesc'),
             primaryBtn(this.t('btn.startAudioBooksScan'), 'App.startAudioBookScan()', 'scan'),
             'audiobook-scan-status');
 
-        html += card('video',
+        html += row('video',
             this.t('rescan.musicVideosLibraryScan'),
             this.t('rescan.musicVideosDesc'),
             primaryBtn(this.t('btn.startMusicVideosScan'), 'App.startMvScan()', 'scan') +
             secondaryBtn(this.t('btn.generateThumbnails'), 'App.generateMvThumbnails()', 'image'),
             'mv-scan-status');
 
-        html += card('film',
+        html += row('film',
             this.t('rescan.moviesTvScan'),
             this.t('rescan.moviesTvDesc'),
             primaryBtn(this.t('btn.startMoviesTvScan'), 'App.startVideoScan()', 'scan') +
@@ -6295,7 +6850,7 @@ const App = {
             secondaryBtn(this.t('btn.refetchAll'), 'App.fetchAllVideoMetadata(true)', 'refresh'),
             'video-scan-status');
 
-        html += card('film',
+        html += row('film',
             this.t('nav.anime'),
             'Scan your Anime folders and fetch metadata from MyAnimeList via Jikan.',
             primaryBtn('Start Anime Scan', 'App.startAnimeScan()', 'scan'),
@@ -6399,6 +6954,7 @@ const App = {
                     <span class="setting-value" id="trakt-status-cell">
                         ${traktConnected
                             ? `<span class="trakt-connected-badge">&#9679; ${this.t('settings.traktConnectedAs')} <strong>${this.esc(traktUser)}</strong></span>
+                               <a href="https://trakt.tv/users/${this.esc(traktUser)}" target="_blank" rel="noopener" class="trakt-profile-link">trakt.tv/users/${this.esc(traktUser)}</a>
                                <button class="btn-secondary trakt-action-btn" onclick="App.traktDisconnect()">${this.t('btn.traktDisconnect')}</button>`
                             : `<span style="color:var(--text-secondary)">&#9675; ${this.t('settings.traktNotConnected')}</span>
                                <button class="btn-secondary trakt-action-btn" onclick="App.traktConnect()">${this.t('btn.traktConnect')}</button>`
@@ -6530,7 +7086,7 @@ const App = {
             </div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.theme')}</span><span class="setting-value">${select('theme', config.theme, [{v:'dark',l:this.t('settings.dark')},{v:'blue',l:this.t('settings.blue')},{v:'purple',l:this.t('settings.purple')},{v:'emerald',l:this.t('settings.emerald')},{v:'sky-grey',l:this.t('settings.skyGrey')},{v:'sky-blue',l:this.t('settings.skyBlue')}])}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.defaultView')}</span><span class="setting-value">${select('defaultView', config.defaultView, [{v:'grid',l:this.t('settings.grid')},{v:'list',l:this.t('settings.list')}])}</span></div>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.language')}</span><span class="setting-value">${select('language', config.language, [{v:'en',l:'English'},{v:'fr',l:'Francais'},{v:'de',l:'Deutsch'},{v:'es',l:'Espanol'},{v:'it',l:'Italiano'},{v:'nl',l:'Nederlands'},{v:'pl',l:'Polski'},{v:'pt',l:'Portugues'},{v:'ro',l:'Română'},{v:'ru',l:'Русский'},{v:'sv',l:'Svenska'},{v:'uk',l:'Українська'},{v:'sl',l:'Slovenščina'},{v:'et',l:'Eesti'},{v:'fi',l:'Suomi'},{v:'no',l:'Norsk'},{v:'lt',l:'Lietuvių'},{v:'sr',l:'Српски'},{v:'sq',l:'Shqip'}])}</span></div>
+            <div class="setting-row"><span class="setting-label">${this.t('settings.language')}</span><span class="setting-value">${select('language', config.language, [{v:'en',l:'English'},{v:'fr',l:'Francais'},{v:'de',l:'Deutsch'},{v:'es',l:'Espanol'},{v:'it',l:'Italiano'},{v:'nl',l:'Nederlands'},{v:'pl',l:'Polski'},{v:'pt',l:'Portugues'},{v:'ro',l:'Română'},{v:'ru',l:'Русский'},{v:'sv',l:'Svenska'},{v:'uk',l:'Українська'},{v:'sl',l:'Slovenščina'},{v:'et',l:'Eesti'},{v:'fi',l:'Suomi'},{v:'no',l:'Norsk'},{v:'lt',l:'Lietuvių'},{v:'sr',l:'Српски'},{v:'sq',l:'Shqip'},{v:'zh',l:'中文'},{v:'ja',l:'日本語'},{v:'id',l:'Bahasa Indonesia'},{v:'ko',l:'한국어'},{v:'hi',l:'हिन्दी'},{v:'vi',l:'Tiếng Việt'},{v:'th',l:'ภาษาไทย'}])}</span></div>
         </div>`;
 
         // ── UI Templates ──
@@ -6562,6 +7118,16 @@ const App = {
                 <div class="setting-row"><span class="setting-label">${this.t('settings.deepScanInterval')}</span><span class="setting-value">${input('deepScanIntervalMinutes', config.deepScanIntervalMinutes ?? 60, 'number', 'setting-input-sm')} <span class="setting-hint">${this.t('settings.deepScanIntervalHint')}</span></span></div>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.deepScanDelay')}</span><span class="setting-value">${input('deepScanDelayMs', config.deepScanDelayMs ?? 1500, 'number', 'setting-input-sm')} <span class="setting-hint">${this.t('settings.deepScanDelayHint')}</span></span></div>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.deepScanBatch')}</span><span class="setting-value">${input('deepScanBatchSize', config.deepScanBatchSize ?? 20, 'number', 'setting-input-sm')} <span class="setting-hint">${this.t('settings.deepScanBatchHint')}</span></span></div>
+            </div>`;
+        }
+
+        // ── Seek Preview Thumbnails ──
+        if (isAdmin) {
+            html += `<div class="settings-section">
+                <h3><svg class="settings-icon"><use href="#icon-image"/></svg> ${this.t('settings.videoThumbnails')}</h3>
+                <p class="settings-section-hint">${this.t('settings.videoThumbnailsHint')}</p>
+                <div class="setting-row"><span class="setting-label">${this.t('settings.videoThumbnailsEnabled')}</span><span class="setting-value">${toggle('videoThumbnailsEnabled', config.videoThumbnailsEnabled)}</span></div>
+                <div class="setting-row"><span class="setting-label">${this.t('settings.videoThumbnailsInterval')}</span><span class="setting-value">${input('videoThumbnailsIntervalSeconds', config.videoThumbnailsInterval ?? 10, 'number', 'setting-input-sm')} <span class="setting-hint">${this.t('settings.videoThumbnailsIntervalHint')}</span></span></div>
             </div>`;
         }
 
@@ -6606,12 +7172,16 @@ const App = {
         ];
         html += `<div class="settings-section">
             <h3><svg class="settings-icon"><use href="#icon-folder"/></svg> ${this.t('settings.libraryFolders')}</h3>
-            <p class="setting-hint" style="margin-bottom:12px">${this.t('settings.libraryFoldersHint')}</p>`;
+            <p class="setting-hint" style="margin-bottom:12px">${this.t('settings.libraryFoldersHint')}</p>
+            ${config.isDocker ? `<div class="settings-docker-notice">
+                <svg style="width:15px;height:15px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-info"/></svg>
+                <div>${this.t('settings.dockerNotice')}</div>
+            </div>` : ''}`;
         folderTypes.forEach(f => {
             html += `<div class="setting-row setting-row-col" style="margin-bottom:4px">
                 <span class="setting-label">${f.label}</span>
                 <span class="setting-value" style="display:flex;gap:6px;align-items:center">
-                    ${input(f.key, config[f.key], 'text', 'setting-input-wide')}
+                    <input type="text" id="cfg-${f.key}" class="setting-input setting-input-wide" value="${this.esc((config[f.key] || '') + '')}" oninput="this.style.outline='';this.style.outlineOffset=''"${!isAdmin ? ' disabled' : ''}>
                     <button class="btn-action" style="font-size:11px;padding:4px 8px;white-space:nowrap" onclick="App.toggleShareCredentials('${f.type}')" title="${this.t('btn.credentials', 'Credentials')}">&#128274;</button>
                 </span>
             </div>
@@ -6733,6 +7303,7 @@ const App = {
             <h3><svg class="settings-icon"><use href="#icon-disc"/></svg> ${this.t('settings.databases')}</h3>`;
         if (config.databases && config.databases.length > 0) {
             html += `<table class="settings-shares-table"><thead><tr><th>${this.t('table.database')}</th><th>${this.t('table.path')}</th><th>${this.t('table.status')}</th><th>${this.t('label.size')}</th></tr></thead><tbody>`;
+            const _dbNameKeys = {'Music':'nav.music','Pictures':'settings.dbPictures','eBooks':'nav.ebooks','Audio Books':'nav.audioBooks','Podcasts':'nav.podcasts','Music Videos':'nav.musicVideos','Movies & TV':'analysis.moviesTv','Shares':'settings.dbShares'};
             config.databases.forEach(db => {
                 const status = db.exists
                     ? `<span class="status-ok">${this.t('nav.online')}</span>`
@@ -6741,7 +7312,7 @@ const App = {
                     ? `<span style="color:var(--text-muted)">${this.formatSize(db.sizeBytes)}</span>`
                     : '';
                 html += `<tr>
-                    <td style="font-weight:500">${this.esc(db.name)}</td>
+                    <td style="font-weight:500">${this.esc(_dbNameKeys[db.name] ? this.t(_dbNameKeys[db.name]) : db.name)}</td>
                     <td class="settings-share-path">${this.esc(db.path)}</td>
                     <td>${status}</td>
                     <td>${sizeHtml}</td>
@@ -6754,16 +7325,16 @@ const App = {
         // ── System Power (admin only) ──
         if (isAdmin) {
             html += `<div class="settings-section">
-                <h3><svg class="settings-icon"><use href="#icon-power"/></svg> System Power</h3>
-                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">Shut down or restart the host machine running the NexusM server.</p>
+                <h3><svg class="settings-icon"><use href="#icon-power"/></svg> ${this.t('settings.systemPower')}</h3>
+                <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">${this.t('settings.systemPowerDesc')}</p>
                 <div style="display:flex;gap:12px;flex-wrap:wrap">
                     <button class="btn-primary" style="background:#e67e22;display:inline-flex;align-items:center;gap:8px" onclick="App.rebootHost()">
                         <svg style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-reboot"/></svg>
-                        Reboot
+                        ${this.t('btn.reboot')}
                     </button>
                     <button class="btn-primary" style="background:#e74c3c;display:inline-flex;align-items:center;gap:8px" onclick="App.shutdownHost()">
                         <svg style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-power"/></svg>
-                        Shut Down
+                        ${this.t('btn.shutdown')}
                     </button>
                 </div>
                 <div id="system-power-msg" style="margin-top:12px;font-size:13px"></div>
@@ -6998,6 +7569,7 @@ const App = {
                 if (pinPanel) pinPanel.style.display = 'none';
                 if (statusCell) statusCell.innerHTML =
                     `<span class="trakt-connected-badge">&#9679; ${this.t('settings.traktConnectedAs')} <strong>${this.esc(poll.traktUsername)}</strong></span>
+                     <a href="https://trakt.tv/users/${this.esc(poll.traktUsername)}" target="_blank" rel="noopener" class="trakt-profile-link">trakt.tv/users/${this.esc(poll.traktUsername)}</a>
                      <button class="btn-secondary trakt-action-btn" onclick="App.traktDisconnect()">${this.t('btn.traktDisconnect')}</button>`;
                 // Update cached config so scrobbling works without page reload
                 if (this._initCfg) { this._initCfg.traktConnected = true; this._initCfg.traktUsername = poll.traktUsername; }
@@ -7038,6 +7610,7 @@ const App = {
         if (pinPanel) pinPanel.style.display = 'none';
         if (statusCell) statusCell.innerHTML =
             `<span class="trakt-connected-badge">&#9679; ${this.t('settings.traktConnectedAs')} <strong>${this.esc(data.traktUsername)}</strong></span>
+             <a href="https://trakt.tv/users/${this.esc(data.traktUsername)}" target="_blank" rel="noopener" class="trakt-profile-link">trakt.tv/users/${this.esc(data.traktUsername)}</a>
              <button class="btn-secondary trakt-action-btn" onclick="App.traktDisconnect()">${this.t('btn.traktDisconnect')}</button>`;
         if (this._initCfg) { this._initCfg.traktConnected = true; this._initCfg.traktUsername = data.traktUsername; }
     },
@@ -7048,6 +7621,8 @@ const App = {
         const v = id => { const e = document.getElementById('cfg-' + id); return e ? e.value : ''; };
         const b = id => { const e = document.getElementById('cfg-' + id); return e ? e.checked : false; };
         const n = id => { const e = document.getElementById('cfg-' + id); return e ? parseInt(e.value) || 0 : 0; };
+        // Folder paths support comma-separated multiple paths per media type
+        const p = id => { const e = document.getElementById('cfg-' + id); return e ? e.value.trim() : ''; };
 
         const payload = {
             // Server
@@ -7095,15 +7670,15 @@ const App = {
             showAnime: b('showAnime'),
             goBigDefault: b('goBigDefault'),
             // Library
-            musicFolders: v('musicFolders'),
-            moviesTVFolders: v('moviesTVFolders'),
-            moviesFolders: v('moviesFolders'),
-            tvShowsFolders: v('tvShowsFolders'),
-            musicVideosFolders: v('musicVideosFolders'),
-            picturesFolders: v('picturesFolders'),
-            ebooksFolders: v('ebooksFolders'),
-            audioBooksFolders: v('audioBooksFolders'),
-            animeFolders: v('animeFolders'),
+            musicFolders: p('musicFolders'),
+            moviesTVFolders: p('moviesTVFolders'),
+            moviesFolders: p('moviesFolders'),
+            tvShowsFolders: p('tvShowsFolders'),
+            musicVideosFolders: p('musicVideosFolders'),
+            picturesFolders: p('picturesFolders'),
+            ebooksFolders: p('ebooksFolders'),
+            audioBooksFolders: p('audioBooksFolders'),
+            animeFolders: p('animeFolders'),
             autoScanOnStartup: b('autoScanOnStartup'),
             autoScanInterval: n('autoScanInterval'),
             scanThreads: n('scanThreads'),
@@ -7147,6 +7722,9 @@ const App = {
             hlsCacheEnabled: b('hlsCacheEnabled'),
             hlsCacheMaxSizeGB: n('hlsCacheMaxSizeGB'),
             hlsCacheRetentionDays: n('hlsCacheRetentionDays'),
+            // Video Thumbnails
+            videoThumbnailsEnabled:  b('videoThumbnailsEnabled'),
+            videoThumbnailsInterval: n('videoThumbnailsIntervalSeconds'),
             // Logging
             logLevel: v('logLevel'),
             maxLogSizeMB: n('maxLogSizeMB')
@@ -7174,10 +7752,45 @@ const App = {
                 return;
             }
             if (msg) { msg.style.color = 'var(--success)'; msg.textContent = this.t('status.saved'); }
-            this.showRestartModal();
+
+            // Warn if any saved folder paths are not accessible inside the process.
+            // In Docker this means the volume mount is missing from docker-compose.yml.
+            const bad = res.inaccessibleFolders;
+            if (bad && bad.length > 0) {
+                this._showDockerFolderWarning(bad);
+            } else {
+                this.showRestartModal();
+            }
         } else {
             if (msg) { msg.style.color = 'var(--danger)'; msg.textContent = this.t('status.failedToSave'); }
         }
+    },
+
+    _showDockerFolderWarning(folders) {
+        let overlay = document.getElementById('nexus-docker-warn-modal');
+        if (overlay) overlay.remove();
+        overlay = document.createElement('div');
+        overlay.id = 'nexus-docker-warn-modal';
+        overlay.className = 'nexus-modal-overlay';
+        const isDocker = this._initCfg && this._initCfg.isDocker;
+        const folderList = folders.map(f => `<code style="display:block;background:var(--bg-surface);padding:3px 7px;border-radius:4px;margin:3px 0;font-size:12px;word-break:break-all">${this.esc(f)}</code>`).join('');
+        const dockerSteps = isDocker ? `<div style="margin-top:10px;font-size:12px;color:var(--text-secondary)">${this.t('settings.dockerFolderWarningSteps')
+            .replace('{folders}', folders.map(f => `      - ${f}:${f}:ro`).join('\n'))}</div>` : '';
+        overlay.innerHTML = `
+            <div class="nexus-modal" style="max-width:480px">
+                <div class="nexus-modal-icon">
+                    <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="var(--warning)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-alert-triangle"/></svg>
+                </div>
+                <div class="nexus-modal-title">${this.t('settings.savedFolderNotAccessible')}</div>
+                <div class="nexus-modal-body" style="text-align:left">
+                    <p style="margin:0 0 8px 0">${this.t('settings.savedFolderNotAccessibleDesc')}</p>
+                    ${folderList}
+                    ${dockerSteps}
+                </div>
+                <button class="nexus-modal-btn" onclick="document.getElementById('nexus-docker-warn-modal').remove();App.showRestartModal()">${this.t('btn.ok')}</button>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.style.display = 'flex';
     },
 
     showRestartModal() {
@@ -7862,6 +8475,11 @@ const App = {
         if (result) this.pollPictureScanStatus();
     },
 
+    async startPictureExifRescan() {
+        const result = await this.apiPost('scan/pictures/reread-exif');
+        if (result) this.pollPictureScanStatus();
+    },
+
     async pollPictureScanStatus() {
         const poll = async () => {
             const s = await this.api('scan/pictures/status');
@@ -8257,6 +8875,7 @@ const App = {
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="mv-format-badge ${formatClass}">${this.esc(v.format)}</span>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.playMusicVideo(${v.id})">&#9654;</button>
+                        <button class="mv-card-menu-btn mv-card-menu-btn-thumb" onclick="event.stopPropagation(); App.showMvMenu(${v.id}, event)" title="More options">&#8942;</button>
                     </div>
                     <div class="mv-card-info">
                         <div class="mv-card-title">${this.esc(v.title)}</div>
@@ -8421,6 +9040,10 @@ const App = {
                 <source src="/api/stream-musicvideo/${video.id}" type="video/mp4">
                 Your browser does not support the video tag.
             </video>
+            <div class="vp-thumb-tooltip" id="vp-thumb-tooltip" style="display:none">
+                <div class="vp-thumb-img" id="vp-thumb-img"></div>
+                <div class="vp-thumb-time" id="vp-thumb-time"></div>
+            </div>
         </div>`;
 
         el.innerHTML = html;
@@ -8432,6 +9055,9 @@ const App = {
             player.addEventListener('ended', () => {
                 if (this._mvShuffleMode) this._playNextShuffleMv();
             });
+            if (this._initCfg?.videoThumbnailsEnabled && this._initCfg?.ffmpegAvailable) {
+                this._setupVideoThumbnailPreview(video.id, 'musicvideo', player);
+            }
         }
     },
 
@@ -8491,8 +9117,105 @@ const App = {
         await this.loadEBooksPage(el);
     },
 
+    _ebookCardHtml(book) {
+        const formatBadge = book.format ? book.format.toLowerCase() : 'epub';
+        const author = book.author || 'Unknown Author';
+        const pages = book.pageCount > 0 ? `${book.pageCount} pages` : book.format;
+        return `<div class="ebook-card" onclick="App.openEBookDetail(${book.id})" data-ebook-id="${book.id}">
+            <div class="ebook-card-cover">
+                ${book.coverImage
+                    ? `<img src="/ebookcover/${book.coverImage}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
+                       <span class="ebook-card-placeholder" style="display:none">&#128214;</span>`
+                    : `<span class="ebook-card-placeholder">&#128214;</span>`}
+                <span class="ebook-format-badge ebook-format-${formatBadge}">${book.format}</span>
+            </div>
+            <div class="ebook-card-info">
+                <div class="ebook-card-title">${this.esc(book.title)}</div>
+                <div class="ebook-card-author">${this.esc(author)}</div>
+                <div class="ebook-card-meta">
+                    <span>${pages}</span>
+                    <span>${this.formatSize(book.fileSize)}</span>
+                </div>
+            </div>
+        </div>`;
+    },
+
     async loadEBooksPage(el) {
         const target = el || document.getElementById('main-content');
+
+        const buildSortBar = () => {
+            const sortLabels = { recent: this.t('sort.recent'), title: this.t('sort.title'), author: this.t('sort.author'), name: this.t('sort.name'), size: this.t('sort.size') };
+            let h = `<div class="page-header"><h1>${this.t('page.ebooks')}</h1><div class="filter-bar">`;
+            for (const [key, label] of Object.entries(sortLabels)) {
+                h += `<button class="filter-chip${this.ebooksSort === key ? ' active' : ''}" onclick="App.changeEBooksSort('${key}')">${label}</button>`;
+            }
+            h += `</div></div>`;
+            return h;
+        };
+
+        const buildFormatBar = () => {
+            let h = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">';
+            [{ key: null, label: 'All' }, { key: 'PDF', label: 'PDF' }, { key: 'EPUB', label: 'EPUB' }, { key: 'comic', label: '&#128366; Comic Books' }].forEach(f => {
+                h += `<button class="filter-chip${this.ebooksFormat === f.key ? ' active' : ''}" onclick="App.filterEBookFormat(${f.key ? `'${f.key}'` : 'null'})">${f.label}</button>`;
+            });
+            h += '</div>';
+            return h;
+        };
+
+        const buildCategoryBar = (categories) => {
+            if (!categories || categories.length === 0) return '';
+            let h = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">';
+            h += `<button class="filter-chip${!this.ebooksCategory ? ' active' : ''}" onclick="App.filterEBookCategory(null)">${this.t('filter.allEbooks')}</button>`;
+            categories.forEach(c => {
+                const isActive = this.ebooksCategory === c.name;
+                const displayName = c.name || 'Uncategorized';
+                h += `<button class="filter-chip${isActive ? ' active' : ''}" onclick="App.filterEBookCategory('${this.esc(c.name)}')">${this.esc(displayName)} <span style="opacity:.6">${c.count}</span></button>`;
+            });
+            h += '</div>';
+            return h;
+        };
+
+        // Letter browse mode — for Name and Author sorts
+        if (this.ebooksSort === 'name' || this.ebooksSort === 'author' || this.ebooksSort === 'title') {
+            let url = `ebooks?limit=5000&page=1&sort=${this.ebooksSort}`;
+            if (this.ebooksFormat) url += `&format=${encodeURIComponent(this.ebooksFormat)}`;
+            if (this.ebooksCategory) url += `&category=${encodeURIComponent(this.ebooksCategory)}`;
+            const [allData, categories] = await Promise.all([this.api(url), this.api('ebooks/categories')]);
+            if (!allData) { target.innerHTML = this.emptyState('Error', 'Could not load eBooks.'); return; }
+            const allBooks = allData.ebooks || [];
+
+            const groups = {};
+            allBooks.forEach(book => {
+                const label = this.ebooksSort === 'author' ? (book.author || 'Unknown Author')
+                            : this.ebooksSort === 'title'  ? (book.title || book.fileName || '')
+                            : (book.fileName || book.title || '');
+                const letter = this._actorFirstLetter(label).toUpperCase();
+                if (!groups[letter]) groups[letter] = [];
+                groups[letter].push(book);
+            });
+            const letters = Object.keys(groups).sort();
+
+            let html = buildSortBar() + buildFormatBar() + buildCategoryBar(categories);
+            html += `<div class="vid-timeline-wrapper">`;
+            letters.forEach(letter => {
+                html += `<div class="vid-letter-anchor" id="ebook-letter-${letter}"></div>`;
+                html += `<div class="vid-letter-header">${letter}</div>`;
+                html += `<div class="ebooks-grid">`;
+                groups[letter].forEach(book => { html += this._ebookCardHtml(book); });
+                html += `</div>`;
+            });
+            html += `</div>`;
+            html += `<div class="vid-scrubber" id="ebooks-letter-scrubber">`;
+            letters.forEach(l => {
+                html += `<div class="vid-scrubber-item" data-key="${l}" onclick="App._vidScrollToAnchor('ebook-letter-${l}')">${l}</div>`;
+            });
+            html += `</div>`;
+
+            target.innerHTML = html;
+            this._setupVidScrubber(letters, 'ebook-letter-');
+            return;
+        }
+
         let url = `ebooks?limit=${this.ebooksPerPage}&page=${this.ebooksPage}&sort=${this.ebooksSort}`;
         if (this.ebooksCategory) url += `&category=${encodeURIComponent(this.ebooksCategory)}`;
         if (this.ebooksFormat) url += `&format=${encodeURIComponent(this.ebooksFormat)}`;
@@ -8506,32 +9229,7 @@ const App = {
         this.ebooksTotal = data.total;
         const totalPages = Math.ceil(data.total / this.ebooksPerPage);
 
-        let html = `<div class="page-header"><h1>${this.t('page.ebooks')}</h1>
-            <div class="filter-bar">`;
-        const sortLabels = { recent: this.t('sort.recent'), title: this.t('sort.title'), author: this.t('sort.author'), name: this.t('sort.filename'), size: this.t('sort.size') };
-        for (const [key, label] of Object.entries(sortLabels)) {
-            html += `<button class="filter-chip${this.ebooksSort === key ? ' active' : ''}" onclick="App.changeEBooksSort('${key}')">${label}</button>`;
-        }
-        html += `</div></div>`;
-
-        // Format filter chips
-        html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">';
-        [{ key: null, label: 'All' }, { key: 'PDF', label: 'PDF' }, { key: 'EPUB', label: 'EPUB' }, { key: 'comic', label: '&#128366; Comic Books' }].forEach(f => {
-            html += `<button class="filter-chip${this.ebooksFormat === f.key ? ' active' : ''}" onclick="App.filterEBookFormat(${f.key ? `'${f.key}'` : 'null'})">${f.label}</button>`;
-        });
-        html += '</div>';
-
-        // Category filter chips
-        if (categories && categories.length > 0) {
-            html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">';
-            html += `<button class="filter-chip${!this.ebooksCategory ? ' active' : ''}" onclick="App.filterEBookCategory(null)">${this.t('filter.allEbooks')}</button>`;
-            categories.forEach(c => {
-                const isActive = this.ebooksCategory === c.name;
-                const displayName = c.name || 'Uncategorized';
-                html += `<button class="filter-chip${isActive ? ' active' : ''}" onclick="App.filterEBookCategory('${this.esc(c.name)}')">${this.esc(displayName)} <span style="opacity:.6">${c.count}</span></button>`;
-            });
-            html += '</div>';
-        }
+        let html = buildSortBar() + buildFormatBar() + buildCategoryBar(categories);
 
         if (data.ebooks && data.ebooks.length > 0) {
             html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:var(--text-secondary);font-size:13px">
@@ -8540,28 +9238,7 @@ const App = {
             </div>`;
 
             html += '<div class="ebooks-grid">';
-            data.ebooks.forEach(book => {
-                const formatBadge = book.format ? book.format.toLowerCase() : 'epub';
-                const author = book.author || 'Unknown Author';
-                const pages = book.pageCount > 0 ? `${book.pageCount} pages` : book.format;
-                html += `<div class="ebook-card" onclick="App.openEBookDetail(${book.id})" data-ebook-id="${book.id}">
-                    <div class="ebook-card-cover">
-                        ${book.coverImage
-                            ? `<img src="/ebookcover/${book.coverImage}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="ebook-card-placeholder" style="display:none">&#128214;</span>`
-                            : `<span class="ebook-card-placeholder">&#128214;</span>`}
-                        <span class="ebook-format-badge ebook-format-${formatBadge}">${book.format}</span>
-                    </div>
-                    <div class="ebook-card-info">
-                        <div class="ebook-card-title">${this.esc(book.title)}</div>
-                        <div class="ebook-card-author">${this.esc(author)}</div>
-                        <div class="ebook-card-meta">
-                            <span>${pages}</span>
-                            <span>${this.formatSize(book.fileSize)}</span>
-                        </div>
-                    </div>
-                </div>`;
-            });
+            data.ebooks.forEach(book => { html += this._ebookCardHtml(book); });
             html += '</div>';
             html += this.renderEBooksPagination(this.ebooksPage, totalPages);
         } else {
@@ -8580,6 +9257,10 @@ const App = {
     },
 
     changeEBooksSort(sort) {
+        if (this._videoScrollHandler) {
+            document.getElementById('main-content')?.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
         this.ebooksSort = sort;
         this.ebooksPage = 1;
         this.loadEBooksPage();
@@ -9278,6 +9959,8 @@ const App = {
         this.videosCustomCategory = null;
         this.videosCustomGenreId = null;
         this._cgVideoPage = 0;
+        this._videosGenrePage = 0;
+        this._videosCatPage = 0;
         this._videosView = 'all';
         await this.loadVideosPage(el);
     },
@@ -9292,6 +9975,8 @@ const App = {
         this.videosCustomCategory = null;
         this.videosCustomGenreId = null;
         this._cgVideoPage = 0;
+        this._videosGenrePage = 0;
+        this._videosCatPage = 0;
         this._videosView = 'all';
         await this.loadVideosPage(el);
     },
@@ -9309,7 +9994,13 @@ const App = {
             apiMediaType = 'movie';
         }
 
-        let url = `videos?limit=${this.videosPerPage}&page=${this.videosPage}&sort=${this.videosSort}&grouped=true&mediaType=${encodeURIComponent(apiMediaType)}`;
+        // For byname/year timeline views, fetch all items at once
+        const isVidSpecialView = this.videosSort === 'byname' || this.videosSort === 'year';
+        const vidApiLimit = isVidSpecialView ? 5000 : this.videosPerPage;
+        const vidApiPage  = isVidSpecialView ? 1 : this.videosPage;
+        const vidApiSort  = this.videosSort === 'byname' ? 'title' : this.videosSort;
+
+        let url = `videos?limit=${vidApiLimit}&page=${vidApiPage}&sort=${vidApiSort}&grouped=true&mediaType=${encodeURIComponent(apiMediaType)}`;
         if (this.videosGenre) url += `&genre=${encodeURIComponent(this.videosGenre)}`;
         if (this.videosCustomCategory) url += `&customCategory=${encodeURIComponent(this.videosCustomCategory)}`;
         if (this.videosCustomGenreId) url += `&customGenreId=${encodeURIComponent(this.videosCustomGenreId)}`;
@@ -9331,13 +10022,23 @@ const App = {
         const totalPages = Math.ceil(data.total / this.videosPerPage);
 
         const pageTitle = isTvSection ? this.t('page.tvShows') : this.t('page.movies');
+        // Sort icon map
+        const sortIcons = { recent:'clock', title:'list', byname:'az', year:'calendar', size:'layers', duration:'trending', series:'tv' };
+        const sortTitles = isTvSection
+            ? { recent: this.t('sort.recent'), title: this.t('sort.title'), byname: this.t('sort.byName'), year: this.t('sort.year'), size: this.t('sort.size'), duration: this.t('sort.duration'), series: this.t('sort.series') }
+            : { recent: this.t('sort.recent'), title: this.t('sort.title'), byname: this.t('sort.byName'), year: this.t('sort.year'), size: this.t('sort.size'), duration: this.t('sort.duration') };
+        const hasFolders = (customCatData || []).length > 0;
         let html = `<div class="page-header"><h1>${pageTitle}</h1>
             <div class="filter-bar">`;
-        const sortLabels = { recent: this.t('sort.recent'), title: this.t('sort.title'), year: this.t('sort.year'), size: this.t('sort.size'), duration: this.t('sort.duration'), series: this.t('sort.series') };
-        for (const [key, label] of Object.entries(sortLabels)) {
-            html += `<button class="filter-chip${this.videosSort === key ? ' active' : ''}" onclick="App.changeVideosSort('${key}')">${label}</button>`;
+        for (const [key, label] of Object.entries(sortTitles)) {
+            const ico = sortIcons[key] || 'list';
+            html += `<button class="vid-sort-icon${this.videosSort === key ? ' active' : ''}" title="${label}" onclick="App.changeVideosSort('${key}')"><svg><use href="#icon-${ico}"/></svg></button>`;
         }
-        html += `<button class="filter-chip batch-edit-chip${this._batchSelectMode ? ' active' : ''}" onclick="App._batchToggleSelect()" title="Select multiple items to edit in bulk"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>${this._batchSelectMode ? `Batch (${this._batchSelectedIds?.size || 0})` : 'Batch Edit'}</button>`;
+        if (hasFolders) {
+            const folderActive = !!this.videosCustomCategory;
+            html += `<button class="vid-sort-icon vid-folder-btn${folderActive ? ' active' : ''}" title="Folders" onclick="App._toggleVidFolderBar()" id="vid-folder-btn"><svg><use href="#icon-folder"/></svg></button>`;
+        }
+        html += `<button class="vid-sort-icon${this._batchSelectMode ? ' active' : ''}" onclick="App._batchToggleSelect()" title="${this._batchSelectMode ? `Batch (${this._batchSelectedIds?.size || 0})` : 'Batch Edit'}"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></button>`;
         html += `</div></div>`;
 
         // Media type / section chips
@@ -9353,31 +10054,21 @@ const App = {
         }
         html += '</div>';
 
-        // Custom category chips row (folder-based user categories, e.g. "Kids Movies", "Christmas Music")
+        // Custom category folder panel (hidden by default, toggled by folder icon button)
         const customCats = customCatData || [];
+        this._videosCats = customCats;
+        const folderPanelOpen = this._vidFolderBarOpen && customCats.length > 0;
         if (customCats.length > 0) {
-            html += '<div class="genre-bar custom-cat-bar">';
-            html += `<span class="genre-bar-label">${this.t('filter.myFolders')}</span>`;
-            html += `<button class="filter-chip${!this.videosCustomCategory ? ' active' : ''}" onclick="App.filterVideosCustomCategory(null)">${this.t('filter.allFolders')}</button>`;
-            customCats.forEach(c => {
-                const active = this.videosCustomCategory === c.name ? ' active' : '';
-                html += `<button class="filter-chip${active}" onclick="App.filterVideosCustomCategory('${this.esc(c.name).replace(/'/g, "\\'")}')">
-                    ${this.esc(c.name)}<span class="genre-count">${c.count}</span></button>`;
-            });
-            html += '</div>';
+            html += `<div class="vid-folder-panel${folderPanelOpen ? '' : ' hidden'}" id="vid-folder-panel">`;
+            html += this._buildVideosCatBar();
+            html += `</div>`;
         }
 
         // Genre chips row
         const genres = genreData || [];
+        this._videosGenres = genres;
         if (genres.length > 0) {
-            html += '<div class="genre-bar">';
-            html += `<button class="filter-chip${!this.videosGenre ? ' active' : ''}" onclick="App.filterVideosGenre(null)">All Genres</button>`;
-            genres.forEach(g => {
-                const active = this.videosGenre === g.name ? ' active' : '';
-                html += `<button class="filter-chip${active}" onclick="App.filterVideosGenre('${this.esc(g.name).replace(/'/g, "\\'")}')">
-                    ${this.esc(g.name)}<span class="genre-count">${g.count}</span></button>`;
-            });
-            html += '</div>';
+            html += this._buildVideosGenreBar();
         }
 
         // Custom genre chips row
@@ -9436,6 +10127,20 @@ const App = {
         }
 
         if (data.videos && data.videos.length > 0) {
+            if (this.videosSort === 'byname') {
+                const { contentHtml, scrubHtml, keys } = this._buildVideosLetterContent(data.videos);
+                html += contentHtml;
+                target.innerHTML = html + scrubHtml;
+                this._setupVidScrubber(keys, 'vid-letter-');
+                return;
+            } else if (this.videosSort === 'year') {
+                const { contentHtml, scrubHtml, keys } = this._buildVideosYearContent(data.videos);
+                html += contentHtml;
+                target.innerHTML = html + scrubHtml;
+                this._setupVidScrubber(keys, 'vid-year-');
+                return;
+            }
+
             if (totalPages > 1) {
                 html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:var(--text-secondary);font-size:13px">
                     <span>${data.total} videos</span>
@@ -9444,78 +10149,7 @@ const App = {
             }
 
             html += '<div class="mv-grid">';
-            const buildHdrBadge = hdr => {
-                if (!hdr) return '';
-                const cls = hdr === 'Dolby Vision' ? 'mv-hdr-dv'
-                          : hdr === 'HDR10+' ? 'mv-hdr-plus'
-                          : hdr === 'HLG' ? 'mv-hdr-hlg' : '';
-                return `<span class="mv-hdr-badge ${cls}">${this.esc(hdr)}</span>`;
-            };
-
-            data.videos.forEach(v => {
-                // Prefer poster > thumbnail > placeholder
-                const thumbSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '');
-                const hasPoster = !!v.posterPath;
-                const dur = this.formatDuration(v.duration);
-                const resLabel = v.height >= 2160 ? '4K' : v.height >= 1080 ? '1080p' : v.height >= 720 ? '720p' : v.height > 0 ? v.height + 'p' : '';
-                const hdrBadge = buildHdrBadge(v.hdrFormat || '');
-                const ratingBadge = v.rating > 0 ? `<span class="mv-rating-badge" style="background:${v.rating >= 7 ? 'rgba(39,174,96,.85)' : v.rating >= 5 ? 'rgba(241,196,15,.85)' : 'rgba(231,76,60,.85)'}">${v.rating.toFixed(1)}</span>` : '';
-
-                if (v.type === 'series') {
-                    // TV Series grouped card
-                    const epLabel = `${v.episodeCount} Episode${v.episodeCount !== 1 ? 's' : ''}`;
-                    const seasonLabel = `${v.seasonCount} Season${v.seasonCount !== 1 ? 's' : ''}`;
-                    html += `<div class="mv-card mv-card-series${hasPoster ? ' mv-card-poster' : ''}" onclick="App.openSeriesDetail('${this.esc(v.seriesName).replace(/'/g, "\\'")}')" data-series="${this.esc(v.seriesName)}">
-                        <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">
-                            ${thumbSrc
-                                ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                                   <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`
-                                : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`}
-                            <span class="mv-duration-badge">${dur}</span>
-                            ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
-                            ${hdrBadge}
-                            <span class="video-type-badge video-type-tv">TV</span>
-                            <span class="mv-episode-badge">${v.episodeCount}</span>
-                            ${ratingBadge}
-                        </div>
-                        <div class="mv-card-info">
-                            <div class="mv-card-title">${this.esc(v.seriesName)}</div>
-                            <div class="mv-card-artist">${seasonLabel} &middot; ${epLabel}</div>
-                        </div>
-                        <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showVideoMenu(${v.firstEpisodeId || v.id}, 'tv', event)" title="More options">&#8942;</button>
-                    </div>`;
-                } else {
-                    // Individual video card (movie or ungrouped episode)
-                    const typeLabel = v.mediaType === 'tv' ? 'TV' : v.mediaType === 'documentary' ? 'Doc' : v.mediaType === 'anime' ? 'Anime' : 'Movie';
-                    const subtitle = v.mediaType === 'tv' && v.seriesName
-                        ? `${this.esc(v.seriesName)} S${(v.season||0).toString().padStart(2,'0')}E${(v.episode||0).toString().padStart(2,'0')}`
-                        : (v.year ? v.year : '');
-                    const vidFavClass = v.isFavourite ? 'active' : '';
-                    const watchedBadge = v.isWatched ? `<span class="mv-watched-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>WATCHED</span>` : '';
-                    html += `<div class="mv-card${hasPoster ? ' mv-card-poster' : ''}${this._batchSelectMode && this._batchSelectedIds?.has(v.id) ? ' batch-selected' : ''}" onclick="App._batchSelectMode ? App._batchToggleCard(${v.id}, this) : App.openVideoDetail(${v.id})" data-video-id="${v.id}" data-watched="${v.isWatched ? '1' : '0'}">
-                        ${this._batchSelectMode ? `<label class="batch-cb-wrap" onclick="event.stopPropagation()"><input type="checkbox" class="batch-cb" ${this._batchSelectedIds?.has(v.id) ? 'checked' : ''} onchange="App._batchToggleCard(${v.id}, this.closest('.mv-card'))"></label>` : ''}
-                        <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">
-                            ${thumbSrc
-                                ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                                   <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`
-                                : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`}
-                            ${watchedBadge}
-                            <span class="mv-duration-badge">${dur}</span>
-                            ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
-                            ${hdrBadge}
-                            <span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
-                            <button class="mv-card-play" onclick="event.stopPropagation(); App.playVideo(${v.id})">&#9654;</button>
-                            ${ratingBadge}
-                        </div>
-                        <div class="mv-card-info">
-                            <div class="mv-card-title">${this.esc(v.title)}</div>
-                            <div class="mv-card-artist">${subtitle}</div>
-                        </div>
-                        <button class="song-card-fav ${vidFavClass}" onclick="event.stopPropagation(); App.toggleVideoFav(${v.id}, this)">&#10084;</button>
-                        <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showVideoMenu(${v.id}, '${v.mediaType}', event)" title="More options">&#8942;</button>
-                    </div>`;
-                }
-            });
+            data.videos.forEach(v => { html += this._renderVideoCardHtml(v); });
             html += '</div>';
             html += this.renderVideosPagination(this.videosPage, totalPages);
         } else {
@@ -9537,8 +10171,14 @@ const App = {
     },
 
     changeVideosSort(sort) {
+        if (this._videoScrollHandler) {
+            const mc = document.getElementById('main-content');
+            if (mc) mc.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
         this.videosSort = sort;
         this.videosPage = 1;
+        this._vidFolderBarOpen = false;   // close folder panel when changing sort
         this.loadVideosPage();
     },
 
@@ -9546,7 +10186,194 @@ const App = {
         this.videosMediaType = type;
         this._videosView = 'all';
         this.videosPage = 1;
+        this._vidFolderBarOpen = false;   // close folder panel when switching media type
+        // Reset genre / folder / custom-genre filters so they don't carry over across tab switches
+        this.videosGenre = null;
+        this.videosCustomCategory = null;
+        this.videosCustomGenreId = null;
         this.loadVideosPage();
+    },
+
+    _toggleVidFolderBar() {
+        this._vidFolderBarOpen = !this._vidFolderBarOpen;
+        const panel = document.getElementById('vid-folder-panel');
+        const btn = document.getElementById('vid-folder-btn');
+        if (panel) panel.classList.toggle('hidden', !this._vidFolderBarOpen);
+        if (btn) btn.classList.toggle('active', this._vidFolderBarOpen || !!this.videosCustomCategory);
+    },
+
+    // ─── Genre / category bar builders (paginated, same pattern as mv-artist-chips) ───
+
+    _buildVideosGenreBar() {
+        const genres = this._videosGenres || [];
+        if (!genres.length) return '';
+        // Persist poster assignments in localStorage so they don't change on every reload
+        const section = this._currentVideoSection || 'movies';
+        const cacheKey = `nexusm-genre-posters-v2-${section}`;
+        const postersKey = `nexusm-genre-allposters-v1-${section}`;
+        let posterCache = {};
+        let allPostersCache = {};
+        try { posterCache = JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e) {}
+        try { allPostersCache = JSON.parse(localStorage.getItem(postersKey) || '{}'); } catch(e) {}
+        let cacheUpdated = false;
+        genres.forEach(g => {
+            if (g.samplePoster && !posterCache[g.name]) {
+                posterCache[g.name] = g.samplePoster;
+                cacheUpdated = true;
+            }
+            // Always refresh the available posters list (randomised by server each load, capped at 12)
+            if (g.samplePosters && g.samplePosters.length) {
+                allPostersCache[g.name] = g.samplePosters.slice(0, 12);
+                cacheUpdated = true;
+            }
+        });
+        if (cacheUpdated) {
+            try { localStorage.setItem(cacheKey, JSON.stringify(posterCache)); } catch(e) {}
+            try { localStorage.setItem(postersKey, JSON.stringify(allPostersCache)); } catch(e) {}
+        }
+
+        // When already filtered to Documentaries by MediaType, suppress the "Documentary" genre chip
+        // — it only matches docs with that specific TMDB genre tag (often just 1), which is confusing
+        // since the user expects it to represent all docs in the section.
+        const isDocsTab = this.videosMediaType === 'documentary';
+        const filteredGenres = isDocsTab
+            ? genres.filter(g => !/^documentar/i.test(g.name))
+            : genres;
+
+        if (!filteredGenres.length) return '';
+
+        let h = '<div class="genre-thumb-grid" id="videos-genre-bar">';
+        // "All" card
+        const allActive = !this.videosGenre;
+        h += `<div class="genre-thumb-card genre-thumb-all${allActive ? ' active' : ''}" onclick="App.filterVideosGenre(null)">
+            <div class="genre-thumb-img genre-thumb-all-bg"><svg style="width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:1.5;opacity:.7"><use href="#icon-film"/></svg></div>
+            <div class="genre-thumb-label">All</div>
+        </div>`;
+        filteredGenres.forEach(g => {
+            const safe = this.esc(g.name).replace(/'/g, "\\'");
+            const isActive = this.videosGenre === g.name;
+            const poster = posterCache[g.name] || g.samplePoster || '';
+            const imgUrl = poster ? `/videometa/${poster}` : '';
+            h += `<div class="genre-thumb-card${isActive ? ' active' : ''}" onclick="App.filterVideosGenre('${safe}')">
+                <div class="genre-thumb-img">${imgUrl ? `<img src="${imgUrl}" loading="lazy" onerror="this.style.display='none'" alt="">` : ''}</div>
+                <div class="genre-thumb-label">${this.esc(g.name)}<span class="genre-thumb-count">${g.count}</span></div>
+                <button class="genre-thumb-menu-btn" title="Change poster" onclick="event.stopPropagation();App._openGenrePosterPicker('${safe}',event)">&#8942;</button>
+            </div>`;
+        });
+        h += '</div>';
+        return h;
+    },
+
+    async _openGenrePosterPicker(genreName, evt) {
+        // Remove any existing picker
+        document.querySelectorAll('.genre-poster-picker').forEach(el => el.remove());
+
+        const section = this._currentVideoSection || 'movies';
+        const cacheKey = `nexusm-genre-posters-v2-${section}`;
+        let posterCache = {};
+        try { posterCache = JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e) {}
+        const currentPoster = posterCache[genreName] || '';
+
+        // Build the popup shell immediately, load first page
+        const picker = document.createElement('div');
+        picker.className = 'genre-poster-picker';
+        picker.dataset.genre = genreName;
+        picker.dataset.page = '1';
+        picker.dataset.currentPoster = currentPoster;
+        picker.innerHTML = `
+            <div class="gpp-header">
+                <span class="gpp-title">Choose poster for <strong>${this.esc(genreName)}</strong></span>
+                <button class="gpp-close" onclick="this.closest('.genre-poster-picker').remove()">&#x2715;</button>
+            </div>
+            <div class="gpp-grid" id="gpp-grid">
+                <div class="gpp-loading"><span class="spinner" style="width:20px;height:20px;border-width:2px"></span></div>
+            </div>
+            <div class="gpp-footer">
+                <button class="gpp-nav-btn" id="gpp-prev" onclick="App._gppChangePage(-1)" disabled>&#8592; Prev</button>
+                <span class="gpp-page-info" id="gpp-page-info"></span>
+                <button class="gpp-nav-btn" id="gpp-next" onclick="App._gppChangePage(1)">Next &#8594;</button>
+            </div>`;
+        document.body.appendChild(picker);
+
+        // Center in viewport
+        picker.style.left = `${Math.round((window.innerWidth - 460) / 2)}px`;
+        picker.style.top  = `${Math.round((window.innerHeight - 560) / 2)}px`;
+
+        // Close on outside click
+        const close = e => { if (!picker.contains(e.target) && !e.target.closest('.genre-thumb-menu-btn')) { picker.remove(); document.removeEventListener('click', close, true); } };
+        setTimeout(() => document.addEventListener('click', close, true), 0);
+
+        await this._gppLoadPage(1);
+    },
+
+    async _gppLoadPage(page) {
+        const picker = document.querySelector('.genre-poster-picker');
+        if (!picker) return;
+        const grid = picker.querySelector('#gpp-grid');
+        const currentPoster = picker.dataset.currentPoster || '';
+        const genreName = picker.dataset.genre;
+        grid.innerHTML = `<div class="gpp-loading"><span class="spinner" style="width:20px;height:20px;border-width:2px"></span></div>`;
+
+        const data = await this.api(`video-posters?page=${page}&limit=12`);
+        if (!data || !picker.isConnected) return;
+
+        picker.dataset.page = page;
+        const totalPages = Math.ceil(data.total / 12);
+
+        picker.querySelector('#gpp-page-info').textContent = `Page ${page} of ${totalPages}`;
+        picker.querySelector('#gpp-prev').disabled = page <= 1;
+        picker.querySelector('#gpp-next').disabled = page >= totalPages;
+
+        if (!data.posters.length) {
+            grid.innerHTML = `<div style="padding:24px;color:var(--text-secondary);font-size:13px;text-align:center">No posters found</div>`;
+            return;
+        }
+        grid.innerHTML = data.posters.map(p =>
+            `<div class="genre-poster-pick-item${p === currentPoster ? ' active' : ''}" onclick="App._setGenrePoster('${genreName.replace(/'/g,"\\'")}','${p}')">
+                <img src="/videometa/${p}" loading="lazy" onerror="this.parentElement.style.display='none'" alt="">
+            </div>`
+        ).join('');
+    },
+
+    _gppChangePage(dir) {
+        const picker = document.querySelector('.genre-poster-picker');
+        if (!picker) return;
+        const newPage = parseInt(picker.dataset.page || '1') + dir;
+        this._gppLoadPage(newPage);
+    },
+
+    _setGenrePoster(genreName, poster) {
+        document.querySelectorAll('.genre-poster-picker').forEach(el => el.remove());
+        const section = this._currentVideoSection || 'movies';
+        const cacheKey = `nexusm-genre-posters-v2-${section}`;
+        let posterCache = {};
+        try { posterCache = JSON.parse(localStorage.getItem(cacheKey) || '{}'); } catch(e) {}
+        posterCache[genreName] = poster;
+        try { localStorage.setItem(cacheKey, JSON.stringify(posterCache)); } catch(e) {}
+        // Re-render just the genre bar in-place
+        const bar = document.getElementById('videos-genre-bar');
+        if (bar) bar.outerHTML = this._buildVideosGenreBar();
+    },
+
+    _buildVideosCatBar() {
+        const cats = this._videosCats || [];
+        if (!cats.length) return '';
+        let h = '<div class="vid-folder-list" id="videos-cat-bar">';
+        h += `<div class="vid-folder-list-item${!this.videosCustomCategory ? ' active' : ''}" onclick="App.filterVideosCustomCategory(null)">
+            <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+            <span>${this.t('filter.allFolders')}</span>
+        </div>`;
+        cats.forEach(c => {
+            const safe = this.esc(c.name).replace(/'/g, "\\'");
+            const isActive = this.videosCustomCategory === c.name;
+            h += `<div class="vid-folder-list-item${isActive ? ' active' : ''}" onclick="App.filterVideosCustomCategory('${safe}')">
+                <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+                <span>${this.esc(c.name)}</span>
+                <span class="vid-folder-count">${c.count}</span>
+            </div>`;
+        });
+        h += '</div>';
+        return h;
     },
 
     filterVideosGenre(genre) {
@@ -9559,9 +10386,10 @@ const App = {
 
     filterVideosCustomCategory(cat) {
         this.videosCustomCategory = cat;
-        this.videosGenre = null; // clear genre when selecting a folder category
+        this.videosGenre = null;
         this.videosCustomGenreId = null;
         this.videosPage = 1;
+        this._vidFolderBarOpen = true;   // keep panel open while browsing folders
         this.loadVideosPage();
     },
 
@@ -9745,7 +10573,11 @@ const App = {
 
     async loadAnimePage(el) {
         const target = el || document.getElementById('main-content');
-        let url = `videos?mediaType=anime&limit=${this.videosPerPage}&page=${this.animePage}&sort=${this.animeSort}&grouped=true`;
+        const isAnimeSpecialView = this.animeSort === 'byname' || this.animeSort === 'year';
+        const animeApiLimit = isAnimeSpecialView ? 5000 : this.videosPerPage;
+        const animeApiPage  = isAnimeSpecialView ? 1 : this.animePage;
+        const animeApiSort  = this.animeSort === 'byname' ? 'title' : this.animeSort;
+        let url = `videos?mediaType=anime&limit=${animeApiLimit}&page=${animeApiPage}&sort=${animeApiSort}&grouped=true`;
         if (this.animeGenre) url += `&genre=${encodeURIComponent(this.animeGenre)}`;
         if (this.animeSearch) url += `&search=${encodeURIComponent(this.animeSearch)}`;
 
@@ -9757,7 +10589,7 @@ const App = {
 
         let html = `<div class="page-header"><h1>${this.t('nav.anime')}</h1>
             <div class="filter-bar">`;
-        const sortLabels = { recent: this.t('sort.recent'), title: this.t('sort.title'), year: this.t('sort.year'), series: this.t('sort.series') };
+        const sortLabels = { recent: this.t('sort.recent'), title: this.t('sort.title'), byname: this.t('sort.byName'), year: this.t('sort.year'), series: this.t('sort.series') };
         for (const [key, label] of Object.entries(sortLabels)) {
             html += `<button class="filter-chip${this.animeSort === key ? ' active' : ''}" onclick="App.changeAnimeSort('${key}')">${label}</button>`;
         }
@@ -9769,6 +10601,20 @@ const App = {
             return;
         }
 
+        if (this.animeSort === 'byname') {
+            const { contentHtml, scrubHtml, keys } = this._buildVideosLetterContent(data.videos, true);
+            html += contentHtml;
+            target.innerHTML = html + scrubHtml;
+            this._setupVidScrubber(keys, 'vid-letter-');
+            return;
+        } else if (this.animeSort === 'year') {
+            const { contentHtml, scrubHtml, keys } = this._buildVideosYearContent(data.videos, true);
+            html += contentHtml;
+            target.innerHTML = html + scrubHtml;
+            this._setupVidScrubber(keys, 'vid-year-');
+            return;
+        }
+
         if (totalPages > 1) {
             html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:var(--text-secondary);font-size:13px">
                 <span>${data.total} episodes</span>
@@ -9777,76 +10623,223 @@ const App = {
         }
 
         html += '<div class="mv-grid">';
-        const buildHdrBadge = hdr => {
-            if (!hdr) return '';
-            const cls = hdr === 'Dolby Vision' ? 'mv-hdr-dv' : hdr === 'HDR10+' ? 'mv-hdr-plus' : hdr === 'HLG' ? 'mv-hdr-hlg' : '';
-            return `<span class="mv-hdr-badge ${cls}">${this.esc(hdr)}</span>`;
-        };
-
-        data.videos.forEach(v => {
-            const thumbSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '');
-            const hasPoster = !!v.posterPath;
-            const dur = this.formatDuration(v.duration);
-            const resLabel = v.height >= 2160 ? '4K' : v.height >= 1080 ? '1080p' : v.height >= 720 ? '720p' : v.height > 0 ? v.height + 'p' : '';
-            const hdrBadge = buildHdrBadge(v.hdrFormat || '');
-            const ratingBadge = v.rating > 0 ? `<span class="mv-rating-badge" style="background:${v.rating >= 7 ? 'rgba(39,174,96,.85)' : 'rgba(241,196,15,.85)'}">${v.rating.toFixed(1)}</span>` : '';
-
-            if (v.type === 'series') {
-                const epLabel = `${v.episodeCount} Ep${v.episodeCount !== 1 ? 's' : ''}`;
-                html += `<div class="mv-card mv-card-series${hasPoster ? ' mv-card-poster' : ''}" onclick="App.openSeriesDetail('${this.esc(v.seriesName).replace(/'/g, "\\'")}', 'anime')" data-series="${this.esc(v.seriesName)}">
-                    <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
-                        <span class="mv-duration-badge">${dur}</span>
-                        ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
-                        ${hdrBadge}
-                        <span class="video-type-badge video-type-anime">Anime</span>
-                        <span class="mv-episode-badge">${v.episodeCount}</span>
-                        ${ratingBadge}
-                    </div>
-                    <div class="mv-card-info">
-                        <div class="mv-card-title">${this.esc(v.seriesName)}</div>
-                        <div class="mv-card-artist">${epLabel}</div>
-                        <div class="mv-card-meta"><span>${v.year || ''}</span><span>${this.formatSize(v.sizeBytes)}</span></div>
-                    </div>
-                    <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showVideoMenu(${v.firstEpisodeId || v.id}, 'anime', event)" title="More options">&#8942;</button>
-                </div>`;
-            } else {
-                const subtitle = v.seriesName ? `${v.seriesName}${v.episode ? ' EP' + String(v.episode).padStart(2,'0') : ''}` : (v.year || '');
-                html += `<div class="mv-card${hasPoster ? ' mv-card-poster' : ''}" onclick="App.openVideoDetail(${v.id})">
-                    <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
-                        <span class="mv-duration-badge">${dur}</span>
-                        ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
-                        ${hdrBadge}
-                        <span class="video-type-badge video-type-anime">Anime</span>
-                        ${ratingBadge}
-                    </div>
-                    <div class="mv-card-info">
-                        <div class="mv-card-title">${this.esc(v.title)}</div>
-                        <div class="mv-card-artist">${this.esc(subtitle)}</div>
-                        <div class="mv-card-meta"><span>${this.formatSize(v.sizeBytes)}</span></div>
-                    </div>
-                    <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showVideoMenu(${v.id}, 'anime', event)" title="More options">&#8942;</button>
-                </div>`;
-            }
-        });
+        data.videos.forEach(v => { html += this._renderAnimeCardHtml(v); });
         html += '</div>';
 
         if (totalPages > 1) html += this.renderAnimePagination(this.animePage, totalPages);
         target.innerHTML = html;
     },
 
-    changeAnimeSort(sort) { this.animeSort = sort; this.animePage = 1; this.loadAnimePage(); },
-    filterAnimeGenre(genre) { this.animeGenre = genre; this.animePage = 1; this.loadAnimePage(); },
-    searchAnime(val) {
-        clearTimeout(this._animeSearchTimer);
-        this._animeSearchTimer = setTimeout(() => { this.animeSearch = val; this.animePage = 1; this.loadAnimePage(); }, 350);
+    changeAnimeSort(sort) {
+        if (this._videoScrollHandler) {
+            const mc = document.getElementById('main-content');
+            if (mc) mc.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
+        this.animeSort = sort; this.animePage = 1; this.loadAnimePage();
+    },
+
+    // ─── Video card helpers (shared by grid + letter/year views) ─────────────
+
+    _vidFirstLetter(title) {
+        const t = (title || '').replace(/^(the |a |an )/i, '').trim();
+        const c = t.charAt(0).toUpperCase();
+        return /[A-Z]/.test(c) ? c : '#';
+    },
+
+    _renderVideoCardHtml(v) {
+        const thumbSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '');
+        const hasPoster = !!v.posterPath;
+        const dur = this.formatDuration(v.duration);
+        const resLabel = v.height >= 2160 ? '4K' : v.height >= 1080 ? '1080p' : v.height >= 720 ? '720p' : v.height > 0 ? v.height + 'p' : '';
+        const hdr = v.hdrFormat || '';
+        const hdrCls = hdr === 'Dolby Vision' ? 'mv-hdr-dv' : hdr === 'HDR10+' ? 'mv-hdr-plus' : hdr === 'HLG' ? 'mv-hdr-hlg' : '';
+        const hdrBadge = hdr ? `<span class="mv-hdr-badge ${hdrCls}">${this.esc(hdr)}</span>` : '';
+        const ratingBadge = v.rating > 0 ? `<span class="mv-rating-badge" style="background:${v.rating >= 7 ? 'rgba(39,174,96,.85)' : v.rating >= 5 ? 'rgba(241,196,15,.85)' : 'rgba(231,76,60,.85)'}">${v.rating.toFixed(1)}</span>` : '';
+        const imgHtml = thumbSrc
+            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`
+            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`;
+        if (v.type === 'series') {
+            const epLabel = `${v.episodeCount} Episode${v.episodeCount !== 1 ? 's' : ''}`;
+            const seasonLabel = `${v.seasonCount} Season${v.seasonCount !== 1 ? 's' : ''}`;
+            return `<div class="mv-card mv-card-series${hasPoster ? ' mv-card-poster' : ''}" onclick="App.openSeriesDetail('${this.esc(v.seriesName).replace(/'/g, "\\'")}')" data-series="${this.esc(v.seriesName)}">
+                <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">${imgHtml}
+                    <span class="mv-duration-badge">${dur}</span>
+                    ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
+                    ${hdrBadge}<span class="video-type-badge video-type-tv">TV</span>
+                    <span class="mv-episode-badge">${v.episodeCount}</span>${ratingBadge}
+                </div>
+                <div class="mv-card-info">
+                    <div class="mv-card-title">${this.esc(v.seriesName)}</div>
+                    <div class="mv-card-artist">${seasonLabel} &middot; ${epLabel}</div>
+                </div>
+                <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showSeriesMenu('${this.esc(v.seriesName).replace(/'/g, "\\'")}', 'tv', ${v.firstEpisodeId || v.id}, event)" title="More options">&#8942;</button>
+            </div>`;
+        } else {
+            const typeLabel = v.mediaType === 'tv' ? 'TV' : v.mediaType === 'documentary' ? 'Doc' : v.mediaType === 'anime' ? 'Anime' : 'Movie';
+            const subtitle = v.mediaType === 'tv' && v.seriesName
+                ? `${this.esc(v.seriesName)} S${(v.season||0).toString().padStart(2,'0')}E${(v.episode||0).toString().padStart(2,'0')}`
+                : (v.year ? v.year : '');
+            const vidFavClass = v.isFavourite ? 'active' : '';
+            const watchedBadge = v.isWatched ? `<span class="mv-watched-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>WATCHED</span>` : '';
+            return `<div class="mv-card${hasPoster ? ' mv-card-poster' : ''}${this._batchSelectMode && this._batchSelectedIds?.has(v.id) ? ' batch-selected' : ''}" onclick="App._batchSelectMode ? App._batchToggleCard(${v.id}, this) : App.openVideoDetail(${v.id})" data-video-id="${v.id}" data-watched="${v.isWatched ? '1' : '0'}">
+                ${this._batchSelectMode ? `<label class="batch-cb-wrap" onclick="event.stopPropagation()"><input type="checkbox" class="batch-cb" ${this._batchSelectedIds?.has(v.id) ? 'checked' : ''} onchange="App._batchToggleCard(${v.id}, this.closest('.mv-card'))"></label>` : ''}
+                <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">${imgHtml}
+                    ${watchedBadge}<span class="mv-duration-badge">${dur}</span>
+                    ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
+                    ${hdrBadge}<span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
+                    <button class="mv-card-play" onclick="event.stopPropagation(); App.playVideo(${v.id})">&#9654;</button>${ratingBadge}
+                </div>
+                <div class="mv-card-info">
+                    <div class="mv-card-title">${this.esc(v.title)}</div>
+                    <div class="mv-card-artist">${subtitle}</div>
+                </div>
+                <button class="song-card-fav ${vidFavClass}" onclick="event.stopPropagation(); App.toggleVideoFav(${v.id}, this)">&#10084;</button>
+                <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showVideoMenu(${v.id}, '${v.mediaType}', event)" title="More options">&#8942;</button>
+            </div>`;
+        }
+    },
+
+    _renderAnimeCardHtml(v) {
+        const thumbSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '');
+        const hasPoster = !!v.posterPath;
+        const dur = this.formatDuration(v.duration);
+        const resLabel = v.height >= 2160 ? '4K' : v.height >= 1080 ? '1080p' : v.height >= 720 ? '720p' : v.height > 0 ? v.height + 'p' : '';
+        const hdr = v.hdrFormat || '';
+        const hdrCls = hdr === 'Dolby Vision' ? 'mv-hdr-dv' : hdr === 'HDR10+' ? 'mv-hdr-plus' : hdr === 'HLG' ? 'mv-hdr-hlg' : '';
+        const hdrBadge = hdr ? `<span class="mv-hdr-badge ${hdrCls}">${this.esc(hdr)}</span>` : '';
+        const ratingBadge = v.rating > 0 ? `<span class="mv-rating-badge" style="background:${v.rating >= 7 ? 'rgba(39,174,96,.85)' : 'rgba(241,196,15,.85)'}">${v.rating.toFixed(1)}</span>` : '';
+        const imgHtml = thumbSrc
+            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
+            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`;
+        if (v.type === 'series') {
+            const epLabel = `${v.episodeCount} Ep${v.episodeCount !== 1 ? 's' : ''}`;
+            return `<div class="mv-card mv-card-series${hasPoster ? ' mv-card-poster' : ''}" onclick="App.openSeriesDetail('${this.esc(v.seriesName).replace(/'/g, "\\'")}', 'anime')" data-series="${this.esc(v.seriesName)}">
+                <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">${imgHtml}
+                    <span class="mv-duration-badge">${dur}</span>
+                    ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
+                    ${hdrBadge}<span class="video-type-badge video-type-anime">Anime</span>
+                    <span class="mv-episode-badge">${v.episodeCount}</span>${ratingBadge}
+                </div>
+                <div class="mv-card-info">
+                    <div class="mv-card-title">${this.esc(v.seriesName)}</div>
+                    <div class="mv-card-artist">${epLabel}</div>
+                    <div class="mv-card-meta"><span>${v.year || ''}</span><span>${this.formatSize(v.sizeBytes)}</span></div>
+                </div>
+                <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showSeriesMenu('${this.esc(v.seriesName).replace(/'/g, "\\'")}', 'anime', ${v.firstEpisodeId || v.id}, event)" title="More options">&#8942;</button>
+            </div>`;
+        } else {
+            const subtitle = v.seriesName ? `${v.seriesName}${v.episode ? ' EP' + String(v.episode).padStart(2,'0') : ''}` : (v.year || '');
+            return `<div class="mv-card${hasPoster ? ' mv-card-poster' : ''}" onclick="App.openVideoDetail(${v.id})">
+                <div class="mv-card-thumb${hasPoster ? ' mv-poster-thumb' : ''}">${imgHtml}
+                    <span class="mv-duration-badge">${dur}</span>
+                    ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
+                    ${hdrBadge}<span class="video-type-badge video-type-anime">Anime</span>${ratingBadge}
+                </div>
+                <div class="mv-card-info">
+                    <div class="mv-card-title">${this.esc(v.title)}</div>
+                    <div class="mv-card-artist">${this.esc(subtitle)}</div>
+                    <div class="mv-card-meta"><span>${this.formatSize(v.sizeBytes)}</span></div>
+                </div>
+                <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showVideoMenu(${v.id}, 'anime', event)" title="More options">&#8942;</button>
+            </div>`;
+        }
+    },
+
+    // ─── Video: Letter (By Name) view ────────────────────────────────────────
+
+    _buildVideosLetterContent(videos, isAnime = false) {
+        const ALL_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
+        const groups = new Map();
+        videos.forEach(v => {
+            const title = v.type === 'series' ? (v.seriesName || '') : (v.title || '');
+            const letter = this._vidFirstLetter(title);
+            if (!groups.has(letter)) groups.set(letter, []);
+            groups.get(letter).push(v);
+        });
+        const activeLetters = new Set(groups.keys());
+        const activeKeys = ALL_LETTERS.filter(l => activeLetters.has(l));
+
+        let scrubHtml = `<div class="vid-scrubber" id="vid-scrubber">`;
+        ALL_LETTERS.forEach(l => {
+            const hasContent = activeLetters.has(l);
+            scrubHtml += `<div class="vid-scrubber-item${hasContent ? '' : ' empty'}" data-key="${l}" onclick="App._vidScrollToAnchor('vid-letter-${l}')">${l}</div>`;
+        });
+        scrubHtml += `</div>`;
+
+        let contentHtml = `<div class="vid-timeline-wrapper">`;
+        ALL_LETTERS.forEach(l => {
+            if (!groups.has(l)) return;
+            contentHtml += `<div class="vid-letter-anchor" id="vid-letter-${l}" data-key="${l}"></div>`;
+            contentHtml += `<div class="vid-letter-header">${l}</div>`;
+            contentHtml += `<div class="mv-grid" style="margin-bottom:28px">`;
+            groups.get(l).forEach(v => { contentHtml += isAnime ? this._renderAnimeCardHtml(v) : this._renderVideoCardHtml(v); });
+            contentHtml += `</div>`;
+        });
+        contentHtml += `</div>`;
+
+        return { contentHtml, scrubHtml, keys: activeKeys };
+    },
+
+    // ─── Video: Year timeline view ────────────────────────────────────────────
+
+    _buildVideosYearContent(videos, isAnime = false) {
+        const groups = new Map();
+        videos.forEach(v => {
+            const yr = v.year > 0 ? v.year : 0;
+            if (!groups.has(yr)) groups.set(yr, []);
+            groups.get(yr).push(v);
+        });
+        const years = [...groups.keys()].sort((a, b) => b - a);
+
+        let scrubHtml = `<div class="vid-scrubber" id="vid-scrubber">`;
+        years.forEach((yr, i) => {
+            scrubHtml += `<div class="vid-scrubber-item${i === 0 ? ' active' : ''}" data-key="${yr}" onclick="App._vidScrollToAnchor('vid-year-${yr}')">${yr || '?'}</div>`;
+        });
+        scrubHtml += `</div>`;
+
+        let contentHtml = `<div class="vid-timeline-wrapper">`;
+        years.forEach(yr => {
+            const items = groups.get(yr);
+            contentHtml += `<div class="vid-year-anchor" id="vid-year-${yr}" data-key="${yr}"></div>`;
+            contentHtml += `<div class="vid-year-header">${yr || 'Unknown Year'} <span class="vid-year-count">${items.length} title${items.length !== 1 ? 's' : ''}</span></div>`;
+            contentHtml += `<div class="mv-grid" style="margin-bottom:28px">`;
+            items.forEach(v => { contentHtml += isAnime ? this._renderAnimeCardHtml(v) : this._renderVideoCardHtml(v); });
+            contentHtml += `</div>`;
+        });
+        contentHtml += `</div>`;
+
+        return { contentHtml, scrubHtml, keys: years };
+    },
+
+    _vidScrollToAnchor(anchorId) {
+        const anchor = document.getElementById(anchorId);
+        if (!anchor) return;
+        // Use pic-grid-panel as scroll container if on pictures page, else main-content
+        const mc = document.getElementById('pic-grid-panel') || document.getElementById('main-content');
+        if (mc) {
+            const top = anchor.getBoundingClientRect().top - mc.getBoundingClientRect().top + mc.scrollTop - 72;
+            mc.scrollTo({ top, behavior: 'smooth' });
+        } else {
+            anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    },
+
+    _setupVidScrubber(keys, anchorPrefix, scrollEl) {
+        const mc = scrollEl || document.getElementById('main-content');
+        if (!mc || !keys.length) return;
+        if (this._videoScrollHandler) mc.removeEventListener('scroll', this._videoScrollHandler);
+        this._videoScrollHandler = () => {
+            const items = document.querySelectorAll('.vid-scrubber-item');
+            if (!items.length) return;
+            let activeKey = keys[keys.length - 1];
+            for (const key of keys) {
+                const anchor = document.getElementById(`${anchorPrefix}${key}`);
+                if (anchor && anchor.getBoundingClientRect().top <= 80) activeKey = key;
+            }
+            items.forEach(el => el.classList.toggle('active', el.dataset.key === String(activeKey)));
+        };
+        mc.addEventListener('scroll', this._videoScrollHandler, { passive: true });
     },
     goAnimePage(page) {
         const totalPages = Math.ceil(this.animeTotal / this.videosPerPage);
@@ -9966,10 +10959,18 @@ const App = {
         const audioTrack = await this._selectAudioTrack(video);
         if (audioTrack < 0) return; // user cancelled
 
-        // Get smart stream info to determine playback method
+        // Get smart stream info to determine playback method.
+        // Pre-flight MSE check: if the browser can't decode HEVC via MediaSource,
+        // pass forceTranscode=true so the server skips HEVC passthrough and goes
+        // straight to H.264 transcode. Avoids silent playback failure where
+        // play() rejects without triggering the HLS.js MEDIA_ERROR fallback.
+        const _hevcMseOk = typeof MediaSource !== 'undefined' && (
+            MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L123.B0"') ||
+            MediaSource.isTypeSupported('video/mp4; codecs="hev1.1.6.L123.B0"'));
         const trackParam = audioTrack > 0 ? `?audioTrack=${audioTrack}` : '';
+        const _ftParam = _hevcMseOk ? '' : (trackParam ? '&forceTranscode=true' : '?forceTranscode=true');
         const [streamInfo, ratingSum] = await Promise.all([
-            this.api(`stream-info/${id}${trackParam}`),
+            this.api(`stream-info/${id}${trackParam}${_ftParam}`),
             this.api(`ratings/summary/video/${id}`)
         ]);
 
@@ -10087,10 +11088,12 @@ const App = {
                         ? `<img src="${photo}" loading="lazy" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
                         : '';
                     const fallback = `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;opacity:.2;${photo?'display:none':''}"><svg style="width:36px;height:36px;fill:none;stroke:currentColor;stroke-width:1.5"><use href="#icon-users"/></svg></div>`;
+                    const epLine = c.episodeCount ? `<div class="mv-cast-eps">${c.episodeCount} ep.</div>` : '';
                     return `<div class="mv-cast-member" ${click} style="${c.actorId ? 'cursor:pointer' : ''}">
                         <div class="mv-cast-photo">${img}${fallback}</div>
                         <div class="mv-cast-name">${this.esc(c.name)}</div>
                         <div class="mv-cast-char">${this.esc(c.character || '')}</div>
+                        ${epLine}
                     </div>`;
                 }).join('');
                 return `<div class="settings-section">
@@ -10108,6 +11111,7 @@ const App = {
                 <button class="vp-fav-btn${video.isFavourite ? ' active' : ''}" id="vp-fav-btn" onclick="App.toggleVideoFav(${id}, this)" title="Add to Favourites">&#10084;</button>
                 <div class="rating-widget vp-inline-rating" data-mt="video" data-mid="${id}">${this._buildRatingWidgetInner(ratingSum || {}, 'video', id)}</div>
                 <button onclick="App.toggleEQPanel()" id="btn-eq-page" class="mv-stats-btn"><svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-equalizer"/></svg> ${this.t('player.equalizer', 'Equalizer')}</button>
+                <button onclick="App.downloadVideo(${id})" class="mv-stats-btn" title="${this.t('videomenu.download')}"><svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-download"/></svg> ${this.t('videomenu.download')}</button>
             </div>
             <div id="video-details-popup" class="vp-details-popup" style="display:none">
                 <div class="setting-row setting-row-col"><span class="setting-label">Filename</span><span class="setting-value" style="word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4">${this.esc(video.fileName)}</span></div>
@@ -10244,14 +11248,13 @@ const App = {
             ${video.mediaType === 'tv' && video.season && video.episode ? `<div id="ep-play-overlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:10;text-align:center;transition:opacity .6s"><span style="font-size:44px;font-weight:700;color:#39ff14;text-shadow:0 0 12px rgba(0,0,0,1),0 2px 8px rgba(0,0,0,.9),0 0 24px rgba(57,255,20,.4);letter-spacing:.04em">${this.t('misc.season')} ${video.season}, ${this.t('misc.episode')} ${video.episode}</span></div>` : ''}
             <button id="skip-intro-btn" class="skip-intro-btn" style="display:none" onclick="App.skipIntro()">${this.t('btn.skipIntro')}</button>`;
         if (isHLS && streamInfo.transcodeId) {
-            const modeLabel = streamInfo.mode === 'transcode-cached' ? this.t('misc.cached') : this.t('misc.transcoding');
-            html += `<div id="transcode-info" style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:0 0 8px 8px;font-size:12px;color:var(--text-secondary)">
-                <span>${modeLabel}${streamInfo.reason ? ' — ' + this.esc(streamInfo.reason) : ''}</span>
-                ${streamInfo.mode === 'transcode' ? `<button onclick="App.stopCurrentTranscode()" style="margin-left:auto;background:none;border:1px solid rgba(255,255,255,.15);color:var(--text-secondary);padding:3px 10px;border-radius:12px;cursor:pointer;font-size:11px">${this.t('btn.stopTranscode')}</button>` : ''}
-            </div>`;
             this._currentTranscodeId = streamInfo.transcodeId;
         }
-        html += `</div>`;
+        html += `    <div class="vp-thumb-tooltip" id="vp-thumb-tooltip" style="display:none">
+                <div class="vp-thumb-img" id="vp-thumb-img"></div>
+                <div class="vp-thumb-time" id="vp-thumb-time"></div>
+            </div>
+        </div>`;
 
         // ── Episode navigation (TV series + Anime) ──
         if (video.mediaType === 'tv' || video.mediaType === 'anime') {
@@ -10260,22 +11263,14 @@ const App = {
 
         el.innerHTML = html;
 
-        // Auto-hide transcode info bar after 15 seconds
-        if (isHLS && streamInfo.transcodeId) {
-            clearTimeout(this._transcodeInfoTimeout);
-            this._transcodeInfoTimeout = setTimeout(() => {
-                const bar = document.getElementById('transcode-info');
-                if (bar) {
-                    bar.style.transition = 'opacity .6s';
-                    bar.style.opacity = '0';
-                    setTimeout(() => { if (bar) bar.style.display = 'none'; }, 600);
-                }
-            }, 15000);
-        }
-
         // Connect EQ to the video player
         const videoEl = document.getElementById('video-player');
-        if (videoEl) this.connectEQToElement(videoEl);
+        if (videoEl) {
+            this.connectEQToElement(videoEl);
+            if (this._initCfg?.videoThumbnailsEnabled && this._initCfg?.ffmpegAvailable) {
+                this._setupVideoThumbnailPreview(video.id, 'video', videoEl);
+            }
+        }
 
         // Episode overlay: show "Season X, Episode Y" for 6s on play (TV only)
         if (video.mediaType === 'tv' && video.season && video.episode && videoEl) {
@@ -10312,19 +11307,6 @@ const App = {
                         // too early and ensures stopCurrentTranscode() kills the right FFmpeg process
                         if (fbInfo.transcodeId) {
                             this._currentTranscodeId = fbInfo.transcodeId;
-                            const infoBar = document.getElementById('transcode-info');
-                            if (infoBar) {
-                                const span = infoBar.querySelector('span');
-                                if (span) span.textContent = this.t('misc.transcoding') + (fbInfo.reason ? ' — ' + fbInfo.reason : '');
-                                infoBar.style.opacity = '1';
-                                infoBar.style.display = 'flex';
-                                clearTimeout(this._transcodeInfoTimeout);
-                                this._transcodeInfoTimeout = setTimeout(() => {
-                                    infoBar.style.transition = 'opacity .6s';
-                                    infoBar.style.opacity = '0';
-                                    setTimeout(() => { infoBar.style.display = 'none'; }, 600);
-                                }, 15000);
-                            }
                         }
                         this.playVideoStream(el, fbInfo.playlistUrl);
                     }
@@ -10779,6 +11761,93 @@ const App = {
         this._stopTraktScrobble();
     },
 
+    // ── Video seek-preview thumbnail methods ────────────────────────────
+
+    _setupVideoThumbnailPreview(videoId, type, videoEl) {
+        this._teardownVideoThumbnailPreview();
+        this._thumbPollId   = videoId;
+        this._thumbPollType = type;
+        this._thumbVideoEl  = videoEl;
+
+        // Fire-and-forget generation; server ignores duplicate requests
+        this.apiPost(`video-thumbnails/${type}/${videoId}/generate`, {}).catch(() => {});
+
+        const poll = async () => {
+            if (this._thumbPollId !== videoId) return;
+            const status = await this.api(`video-thumbnails/${type}/${videoId}/status`).catch(() => null);
+            if (status && status.ready) {
+                this._attachThumbPreviewBar(videoId, type, videoEl, status);
+            } else {
+                this._thumbPollTimer = setTimeout(poll, 3000);
+            }
+        };
+        poll();
+    },
+
+    _attachThumbPreviewBar(videoId, type, videoEl, status) {
+        const container = document.querySelector('.mv-player-container');
+        const tooltip   = document.getElementById('vp-thumb-tooltip');
+        const img       = document.getElementById('vp-thumb-img');
+        const timeLbl   = document.getElementById('vp-thumb-time');
+        if (!container || !tooltip) return;
+
+        const { cols, rows, interval, frameW, frameH, totalFrames } = status;
+        const spriteUrl    = `/api/video-thumbnails/${type}/${videoId}/sprite.jpg`;
+        const totalSpriteW = cols * frameW;
+        const totalSpriteH = rows * frameH;
+
+        this._thumbMouseMove = (e) => {
+            const rect = container.getBoundingClientRect();
+            const relX = e.clientX - rect.left;
+            const relY = e.clientY - rect.top;
+
+            // Only show tooltip when cursor is in the native controls zone (bottom 60px)
+            if (relY < rect.height - 60) {
+                tooltip.style.display = 'none';
+                return;
+            }
+
+            if (!videoEl.duration || !isFinite(videoEl.duration)) return;
+
+            const pct      = Math.max(0, Math.min(1, relX / rect.width));
+            const t        = pct * videoEl.duration;
+            const frameIdx = Math.min(Math.floor(t / interval), totalFrames - 1);
+            const col      = frameIdx % cols;
+            const row      = Math.floor(frameIdx / cols);
+
+            img.style.backgroundImage    = `url("${spriteUrl}")`;
+            img.style.backgroundPosition = `${-(col * frameW)}px ${-(row * frameH)}px`;
+            img.style.backgroundSize     = `${totalSpriteW}px ${totalSpriteH}px`;
+            timeLbl.textContent          = this.formatDuration(Math.floor(t));
+
+            // Clamp so tooltip (160px wide + 4px padding each side = ~168px) stays inside container
+            const half   = 84;
+            const leftPx = Math.max(half, Math.min(rect.width - half, relX));
+            tooltip.style.left    = leftPx + 'px';
+            tooltip.style.display = '';
+        };
+
+        this._thumbMouseLeave = () => { if (tooltip) tooltip.style.display = 'none'; };
+
+        container.addEventListener('mousemove',  this._thumbMouseMove);
+        container.addEventListener('mouseleave', this._thumbMouseLeave);
+        this._thumbBarWrap = container;
+    },
+
+    _teardownVideoThumbnailPreview() {
+        this._thumbPollId = null;
+        clearTimeout(this._thumbPollTimer);
+        this._thumbPollTimer = null;
+        if (this._thumbBarWrap) {
+            this._thumbBarWrap.removeEventListener('mousemove',  this._thumbMouseMove);
+            this._thumbBarWrap.removeEventListener('mouseleave', this._thumbMouseLeave);
+            this._thumbBarWrap = null;
+        }
+        this._thumbMouseMove  = null;
+        this._thumbMouseLeave = null;
+        this._thumbVideoEl    = null;
+    },
+
     async openSeriesDetail(seriesName, mediaType = null) {
         this.stopAllMedia();
         const mtParam = mediaType ? `&mediaType=${mediaType}` : '';
@@ -10883,10 +11952,12 @@ const App = {
                         ? `<img src="${photo}" loading="lazy" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
                         : '';
                     const fallback = `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;opacity:.2;${photo?'display:none':''}"><svg style="width:36px;height:36px;fill:none;stroke:currentColor;stroke-width:1.5"><use href="#icon-users"/></svg></div>`;
+                    const epLine = c.episodeCount ? `<div class="mv-cast-eps">${c.episodeCount} ep.</div>` : '';
                     return `<div class="mv-cast-member" ${click} style="${c.actorId ? 'cursor:pointer' : ''}">
                         <div class="mv-cast-photo">${img}${fallback}</div>
                         <div class="mv-cast-name">${this.esc(c.name)}</div>
                         <div class="mv-cast-char">${this.esc(c.character || '')}</div>
+                        ${epLine}
                     </div>`;
                 }).join('');
                 return `<div class="settings-section">
@@ -10961,40 +12032,62 @@ const App = {
         // Cast section
         html += buildSeriesCastStrip(seriesMeta.castJson);
 
-        // Render each season
-        seasonNums.forEach(sNum => {
-            const eps = seasons[sNum];
-            const seasonLabel = sNum > 0 ? `Season ${sNum}` : 'Specials';
-            html += `<div class="settings-section" style="margin-bottom:16px">
-                <h3 style="margin:0 0 12px 0;font-size:16px;color:var(--text-primary)">${seasonLabel} <span style="color:var(--text-secondary);font-size:13px;font-weight:normal">(${eps.length} episode${eps.length !== 1 ? 's' : ''})</span></h3>`;
-            eps.forEach(ep => {
-                const epThumb = ep.thumbnailPath ? `/videothumb/${ep.thumbnailPath}` : '';
-                const epNum = `S${(ep.season||0).toString().padStart(2,'0')}E${(ep.episode||0).toString().padStart(2,'0')}`;
-                const epDur = this.formatDuration(ep.duration);
-                const resLabel = ep.height >= 2160 ? '4K' : ep.height >= 1080 ? '1080p' : ep.height >= 720 ? '720p' : '';
-                const epHdr = ep.hdrFormat || '';
-                html += `<div class="mv-episode-row" onclick="App.openVideoDetail(${ep.id})" style="display:flex;align-items:center;gap:12px;padding:8px;border-radius:8px;cursor:pointer;transition:background .15s" onmouseenter="this.style.background='rgba(255,255,255,.05)'" onmouseleave="this.style.background='none'">
-                    <div style="width:120px;min-width:120px;height:68px;border-radius:6px;overflow:hidden;background:rgba(255,255,255,.04);position:relative">
-                        ${epThumb
-                            ? `<img src="${epThumb}" loading="lazy" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'" alt="">`
-                            : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><svg style="width:28px;height:28px;stroke:currentColor;fill:none;stroke-width:1.5;opacity:.3"><use href="#icon-film"/></svg></div>`}
-                    </div>
-                    <div style="flex:1;min-width:0">
-                        <div style="font-size:14px;font-weight:500;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                            <span style="color:var(--accent);font-weight:600;margin-right:8px">${epNum}</span>${this.esc(ep.title)}
-                        </div>
-                        <div style="font-size:12px;color:var(--text-secondary);margin-top:2px">
-                            ${epDur}${resLabel ? ' &middot; ' + resLabel : ''}${epHdr ? ' &middot; ' + epHdr : ''} &middot; ${ep.format || ''} &middot; ${this.formatSize(ep.sizeBytes)}
-                        </div>
-                    </div>
-                    <button class="mv-card-play" onclick="event.stopPropagation(); App.openVideoDetail(${ep.id})" style="position:static;width:36px;height:36px;border-radius:50%;background:var(--accent);border:none;color:#fff;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;opacity:.8;flex-shrink:0">&#9654;</button>
-                    <button onclick="event.stopPropagation(); App.openVideoEditModal(${ep.id})" title="Edit metadata" style="width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:var(--text-secondary);cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;opacity:.7;transition:opacity .15s" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='.7'"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-                </div>`;
-            });
-            html += '</div>';
-        });
+        // Season tabs + horizontal episode card row
+        const tabsHtml = seasonNums.map(s => {
+            const label = s > 0 ? `Season ${s}` : 'Specials';
+            return `<button class="series-season-tab${s === seasonNums[0] ? ' active' : ''}"
+                            data-season="${s}"
+                            onclick="App._seriesSelectSeason(${s})">${label}</button>`;
+        }).join('');
+
+        html += `<div class="settings-section series-episodes-section">
+            <div class="series-season-tabs" id="series-season-tabs">${tabsHtml}</div>
+            <div class="series-ep-list" id="series-ep-list"></div>
+        </div>`;
 
         el.innerHTML = html;
+
+        // Store season data and render the first season
+        this._seriesSeasons = seasons;
+        this._seriesRenderSeason(seasonNums[0]);
+    },
+
+    _seriesRenderSeason(sNum) {
+        const listEl  = document.getElementById('series-ep-list');
+        if (!listEl) return;
+        document.querySelectorAll('.series-season-tab').forEach(t =>
+            t.classList.toggle('active', parseInt(t.dataset.season) === sNum));
+
+        const eps = this._seriesSeasons[sNum] || [];
+        listEl.innerHTML = eps.map((ep, i) => {
+            const epThumb  = ep.thumbnailPath ? `/videothumb/${ep.thumbnailPath}` : '';
+            const epNum    = `S${(ep.season||0).toString().padStart(2,'0')}E${(ep.episode||0).toString().padStart(2,'0')}`;
+            const epDur    = this.formatDuration(ep.duration);
+            const resLabel = ep.height >= 2160 ? '4K' : ep.height >= 1080 ? '1080p' : ep.height >= 720 ? '720p' : '';
+            const epHdr    = ep.hdrFormat || '';
+            const meta     = [epDur, resLabel, epHdr, ep.format].filter(Boolean).join(' · ');
+            const thumbHtml = epThumb
+                ? `<img src="${epThumb}" loading="lazy" alt="" onerror="this.style.display='none'">`
+                : `<div class="series-ep-thumb-ph"><svg style="width:32px;height:32px;fill:none;stroke:currentColor;stroke-width:1.5;opacity:.25"><use href="#icon-film"/></svg></div>`;
+            return `<div class="series-ep-card" onclick="App.openVideoDetail(${ep.id})">
+                <div class="series-ep-thumb">
+                    ${thumbHtml}
+                    <div class="series-ep-badge">${epNum}</div>
+                    <div class="series-ep-play-overlay"><svg viewBox="0 0 24 24" fill="currentColor" width="32" height="32"><path d="M8 5v14l11-7z"/></svg></div>
+                </div>
+                <div class="series-ep-foot">
+                    <div class="series-ep-title">${this.esc(ep.title || `Episode ${ep.episode||i+1}`)}</div>
+                    ${meta ? `<div class="series-ep-meta">${meta}</div>` : ''}
+                </div>
+                <button class="series-ep-edit" onclick="event.stopPropagation(); App.openVideoEditModal(${ep.id})" title="Edit metadata">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                </button>
+            </div>`;
+        }).join('');
+    },
+
+    _seriesSelectSeason(sNum) {
+        if (this._seriesSeasons) this._seriesRenderSeason(sNum);
     },
 
     playVideo(id) {
@@ -11095,53 +12188,800 @@ const App = {
         this.picturesPage = 1;
         this.picturesSort = 'recent';
         this.picturesCategory = null;
-        await this.loadPicturesPage(el);
+        this._currentAlbumId = null;
+        const target = el || document.getElementById('main-content');
+        await this._renderPicturesView(target);
+    },
+
+    async _renderPicturesView(target) {
+        const el = target || document.getElementById('main-content');
+        // Album detail view overrides everything
+        if (this._currentAlbumId != null) {
+            await this._renderAlbumView(el, this._currentAlbumId);
+            return;
+        }
+        // Cleanup map when switching away
+        if (this.picturesView !== 'map' && this._picMapInstance) {
+            this._picMapInstance.remove();
+            this._picMapInstance = null;
+        }
+        // Cleanup timeline scroll handler
+        if (this.picturesView !== 'timeline' && this._picScrollHandler) {
+            const mc = document.getElementById('pic-grid-panel') || document.getElementById('main-content');
+            if (mc) mc.removeEventListener('scroll', this._picScrollHandler);
+            this._picScrollHandler = null;
+        }
+        switch (this.picturesView) {
+            case 'albums':   await this._renderAlbumsPage(el); break;
+            case 'timeline': await this._renderPicturesTimeline(el); break;
+            case 'map':      await this._renderPicturesMap(el); break;
+            default:         await this.loadPicturesPage(el); break;
+        }
+    },
+
+    setPicturesView(view) {
+        this._currentAlbumId = null;
+        const prev = this.picturesView;
+        this.picturesView = view;
+        // Cleanup map
+        if (prev === 'map' && view !== 'map' && this._picMapInstance) {
+            this._picMapInstance.remove();
+            this._picMapInstance = null;
+        }
+        // Cleanup timeline scroll
+        if (prev === 'timeline' && view !== 'timeline' && this._picScrollHandler) {
+            const mc = document.getElementById('main-content');
+            if (mc) mc.removeEventListener('scroll', this._picScrollHandler);
+            this._picScrollHandler = null;
+        }
+        if (this._videoScrollHandler) {
+            const mc2 = document.getElementById('main-content');
+            if (mc2) mc2.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
+        const mc = document.getElementById('main-content');
+        switch (view) {
+            case 'albums':   this._renderAlbumsPage(mc); break;
+            case 'timeline': this._renderPicturesTimeline(mc); break;
+            case 'map':      this._renderPicturesMap(mc); break;
+            default:         this.loadPicturesPage(mc); break;
+        }
+    },
+
+    _picViewTabsHtml() {
+        const tabs = [
+            { view: 'grid',     icon: 'icon-image',   label: this.t('pictures.viewGrid') },
+            { view: 'albums',   icon: 'icon-folder',  label: this.t('pictures.albums') },
+            { view: 'timeline', icon: 'icon-clock',   label: this.t('pictures.viewTimeline') },
+            { view: 'map',      icon: 'icon-map-pin', label: this.t('pictures.viewMap') },
+        ];
+        const active = this._currentAlbumId != null ? 'albums' : (this.picturesView || 'grid');
+        return `<div class="pic-view-tabs">`
+            + tabs.map(t => `<button class="pic-view-tab-icon${active===t.view?' active':''}" title="${t.label}" onclick="App.setPicturesView('${t.view}')"><svg><use href="#${t.icon}"/></svg></button>`).join('')
+            + `</div>`;
+    },
+
+    _picSortIconsHtml(hasCategories) {
+        const sortIcons = { recent: 'clock', name: 'az', date: 'calendar', size: 'layers' };
+        const sortTitles = { recent: this.t('sort.recent'), name: this.t('sort.name'), date: this.t('sort.dateTaken'), size: this.t('sort.size') };
+        let h = Object.entries(sortTitles).map(([key, label]) =>
+            `<button class="vid-sort-icon${this.picturesSort === key ? ' active' : ''}" title="${label}" onclick="App.changePicturesSort('${key}')"><svg><use href="#icon-${sortIcons[key]}"/></svg></button>`
+        ).join('');
+        if (hasCategories) {
+            const folderActive = !!this.picturesCategory;
+            h += `<button class="vid-sort-icon vid-folder-btn${folderActive ? ' active' : ''}" title="${this.t('filter.allFolders')}" onclick="App._togglePicFolderBar()" id="pic-folder-btn"><svg><use href="#icon-folder"/></svg></button>`;
+        }
+        return h;
+    },
+
+    _togglePicFolderBar() {
+        this._picFolderBarOpen = !this._picFolderBarOpen;
+        const panel = document.getElementById('pic-folder-panel');
+        const btn = document.getElementById('pic-folder-btn');
+        if (panel) panel.classList.toggle('hidden', !this._picFolderBarOpen);
+        if (btn) btn.classList.toggle('active', this._picFolderBarOpen || !!this.picturesCategory);
+    },
+
+    _picMediaTypeChipsHtml() {
+        const types = [
+            { key: 'all',      label: this.t('filter.all') },
+            { key: 'pictures', label: this.t('nav.pictures').split('/')[0].trim() || 'Pictures' },
+            { key: 'videos',   label: this.t('pictures.videos') },
+        ];
+        return `<div class="pic-mediatype-chips">`
+            + types.map(t => `<button class="filter-chip${this.picturesMediaType===t.key?' active':''}" onclick="App.setPicturesMediaType('${t.key}')">${t.label}</button>`).join('')
+            + `</div>`;
+    },
+
+    setPicturesMediaType(type) {
+        this.picturesMediaType = type;
+        this.picturesPage = 1;
+        this._currentAlbumId = null;
+        this.loadPicturesPage();
+    },
+
+    // ─── Albums ─────────────────────────────────────────────────────
+
+    async _loadAlbums() {
+        const data = await this.api('picture-albums');
+        this._pictureAlbums = data || [];
+        return this._pictureAlbums;
+    },
+
+    // ─── Albums Page (Immich-style card grid) ─────────────────────────
+    async _renderAlbumsPage(target) {
+        target = target || document.getElementById('main-content');
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
+        target.innerHTML = `<div style="text-align:center;padding:60px"><div class="spinner"></div></div>`;
+
+        const albums = await this._loadAlbums();
+
+        const ctrl = `<div class="pic-controls-panel" style="padding:16px 24px 16px">
+            <div class="page-header" style="margin-bottom:0">
+                <h1>${this.t('page.pictures')}</h1>
+                <span style="font-size:13px;color:var(--text-secondary);margin-left:10px;align-self:center">&rsaquo; ${this.t('pictures.albums')}</span>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+                    <button class="btn-secondary" style="font-size:12px;padding:5px 12px" onclick="App.openCreateAlbumModal(event)">
+                        <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2.5;margin-right:4px"><use href="#icon-plus"/></svg>${this.t('pictures.createAlbum')}
+                    </button>
+                    ${this._picViewTabsHtml()}
+                </div>
+            </div>
+        </div>`;
+
+        let grid = `<div class="pic-grid-panel" id="pic-grid-panel">`;
+        if (!albums || albums.length === 0) {
+            grid += `<div style="text-align:center;padding:60px 20px;color:var(--text-secondary)">
+                <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;opacity:.3;margin-bottom:12px"><use href="#icon-folder"/></svg>
+                <div style="font-size:15px;font-weight:500;margin-bottom:6px">${this.t('pictures.noAlbums')}</div>
+                <div style="font-size:13px;opacity:.7">${this.t('pictures.createAlbum')}</div>
+            </div>`;
+        } else {
+            grid += `<div class="pic-albums-card-grid">`;
+            albums.forEach(a => {
+                const thumbSrc = a.coverThumbnail
+                    ? (a.coverMediaType === 'video' ? `/pvthumb/${a.coverThumbnail}` : `/picthumb/${a.coverThumbnail}`)
+                    : null;
+                grid += `<div class="pic-album-card" onclick="App.openAlbumView(${a.id})"
+                    ondragover="event.preventDefault();this.classList.add('drag-over')"
+                    ondragleave="this.classList.remove('drag-over')"
+                    ondrop="App._dropOnAlbum(event,${a.id})">
+                    <div class="pic-album-card-thumb">
+                        ${thumbSrc
+                            ? `<img src="${thumbSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">`
+                            : ''}
+                        <span class="pic-album-card-placeholder" style="${thumbSrc?'display:none':''}">&#128247;</span>
+                    </div>
+                    <div class="pic-album-card-info">
+                        <div class="pic-album-card-name">${this.esc(a.name)}</div>
+                        <div class="pic-album-card-count">${a.itemCount} item${a.itemCount===1?'':'s'}</div>
+                    </div>
+                    <button class="pic-album-card-rename" title="${this.t('pictures.renameAlbum')}" onclick="event.stopPropagation();App._openRenameAlbumPopover(${a.id},'${this.esc(a.name)}',event)">&#9998;</button>
+                </div>`;
+            });
+            grid += `</div>`;
+        }
+        grid += `</div>`;
+
+        target.innerHTML = ctrl + grid;
+    },
+
+    openCreateAlbumModal(evt) {
+        const existing = document.getElementById('pic-create-album-popover');
+        if (existing) { existing.remove(); return; }
+
+        const popover = document.createElement('div');
+        popover.id = 'pic-create-album-popover';
+        popover.className = 'pic-create-album-popover';
+        popover.onclick = (e) => e.stopPropagation();
+        popover.innerHTML = `
+            <div style="font-size:14px;font-weight:600;color:var(--text-primary);margin-bottom:12px">${this.t('pictures.createAlbum')}</div>
+            <input id="pic-album-name-input" type="text" placeholder="${this.t('pictures.albumName')}…" maxlength="80"
+                style="width:100%;box-sizing:border-box;padding:8px 12px;background:var(--bg-active);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-size:13px;outline:none;margin-bottom:12px"
+                onkeydown="if(event.key==='Enter')App.createAlbum();else if(event.key==='Escape')document.getElementById('pic-create-album-popover')?.remove()">
+            <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px">
+                <button style="padding:6px 14px;font-size:13px;background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer" onclick="document.getElementById('pic-create-album-popover').remove()">${this.t('btn.cancel')}</button>
+                <button style="padding:6px 14px;font-size:13px;margin:0;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-weight:500" onclick="App.createAlbum()">${this.t('pictures.createAlbum')}</button>
+            </div>`;
+
+        document.body.appendChild(popover);
+
+        // Position below the button that was clicked
+        const btn = evt?.currentTarget || document.querySelector('.pic-create-album-btn');
+        if (btn) {
+            const r = btn.getBoundingClientRect();
+            const pw = 280;
+            let left = r.left;
+            if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+            popover.style.left = left + 'px';
+            popover.style.top = (r.bottom + 6) + 'px';
+            popover.style.width = pw + 'px';
+        }
+
+        popover.querySelector('#pic-album-name-input').focus();
+
+        const closeOnOutside = (e) => {
+            if (!popover.contains(e.target)) {
+                popover.remove();
+                document.removeEventListener('mousedown', closeOnOutside);
+            }
+        };
+        setTimeout(() => document.addEventListener('mousedown', closeOnOutside), 0);
+    },
+
+    async createAlbum() {
+        const input = document.getElementById('pic-album-name-input');
+        if (!input) return;
+        const name = input.value.trim();
+        if (!name) { input.focus(); return; }
+        const result = await this.apiPost('picture-albums', { name });
+        if (!result) return;
+        document.getElementById('pic-create-album-popover')?.remove();
+        await this._loadAlbums();
+        this.picturesView = 'albums';
+        this._renderAlbumsPage();
+    },
+
+    async deleteAlbum(albumId) {
+        if (!confirm(this.t('pictures.deleteAlbum') + '?')) return;
+        await this.apiDelete(`picture-albums/${albumId}`);
+        this._currentAlbumId = null;
+        await this._loadAlbums();
+        this.picturesView = 'albums';
+        this._renderAlbumsPage();
+    },
+
+    async openAlbumView(albumId) {
+        this._currentAlbumId = albumId;
+        const mc = document.getElementById('main-content');
+        await this._renderAlbumView(mc, albumId);
+    },
+
+    async _renderAlbumView(target, albumId) {
+        // Apply two-panel layout (same as main pictures page)
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
+        target.innerHTML = `<div style="text-align:center;padding:60px"><div class="spinner"></div></div>`;
+        const data = await this.api(`picture-albums/${albumId}/items`);
+        if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load album.'); return; }
+        const items = data.items || [];
+
+        // ── Controls panel ────────────────────────────────────────────
+        let ctrl = `<div class="pic-controls-panel" style="padding:16px 24px">`;
+        ctrl += `<div class="page-header" style="margin-bottom:0">
+            <button class="pic-album-back-btn" onclick="App._exitAlbumView()">
+                <svg><use href="#icon-chevron-left"/></svg> ${this.t('pictures.albums')}
+            </button>
+            <h1 style="margin:0 0 0 10px;font-size:18px;font-weight:600">${this.esc(data.name)}</h1>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+                <span style="font-size:12px;color:var(--text-secondary)">${items.length} item${items.length===1?'':'s'}</span>
+                <button class="btn-secondary" style="font-size:12px;padding:5px 10px;color:var(--text-secondary)" onclick="App.deleteAlbum(${albumId})">
+                    <svg style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;margin-right:3px"><use href="#icon-x"/></svg>${this.t('pictures.deleteAlbum')}
+                </button>
+                ${this._picViewTabsHtml()}
+            </div>
+        </div>`;
+        ctrl += `</div>`; // end controls panel
+
+        // ── Grid panel ────────────────────────────────────────────────
+        let grid = `<div class="pic-grid-panel">`;
+        if (items.length === 0) {
+            grid += `<div class="pic-album-empty">
+                <svg><use href="#icon-image"/></svg>
+                <div>${this.t('pictures.noAlbumItems')}</div>
+                <div style="font-size:12px;margin-top:6px;opacity:.6">${this.t('pictures.dragToAlbum')}</div>
+            </div>`;
+        } else {
+            grid += '<div class="pictures-grid">';
+            items.forEach(item => {
+                if (item.mediaType === 'video') {
+                    grid += this._renderVideoCard(item, true, item.id);
+                } else {
+                    const thumbSrc = item.thumbnailPath ? `/picthumb/${item.thumbnailPath}` : `/api/picthumb/${item.mediaId}`;
+                    grid += `<div class="picture-card" style="position:relative"
+                        draggable="true"
+                        data-pic-id="${item.mediaId}" data-pic-type="picture"
+                        ondragstart="App._picDragStart(event,${item.mediaId},'picture')"
+                        onclick="App.openPictureViewer(${item.mediaId})">
+                        <div class="picture-card-thumb">
+                            <img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
+                            <span class="picture-card-placeholder" style="display:none">&#128247;</span>
+                        </div>
+                        <div class="picture-card-info">
+                            <div class="picture-card-name">${this.esc(item.fileName)}</div>
+                            <div class="picture-card-meta">${item.width}x${item.height} &middot; ${this.formatSize(item.sizeBytes)}</div>
+                        </div>
+                        <button class="pic-album-item-remove" title="${this.t('pictures.removeFromAlbum')}" onclick="event.stopPropagation();App._removeAlbumItem(${albumId},${item.id})">&times;</button>
+                    </div>`;
+                }
+            });
+            grid += '</div>';
+        }
+        grid += `</div>`; // end grid panel
+
+        target.innerHTML = ctrl + grid;
+    },
+
+    _exitAlbumView() {
+        this._currentAlbumId = null;
+        this.picturesView = 'albums';
+        this._renderAlbumsPage();
+    },
+
+    async _removeAlbumItem(albumId, itemId) {
+        await this.apiDelete(`picture-albums/${albumId}/items/${itemId}`);
+        await this._renderAlbumView(document.getElementById('main-content'), albumId);
+    },
+
+    _picDragStart(event, mediaId, mediaType) {
+        event.dataTransfer.setData('text/plain', JSON.stringify({ mediaId, mediaType }));
+        event.currentTarget.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'copy';
+    },
+
+    async _dropOnAlbum(event, albumId) {
+        event.preventDefault();
+        event.currentTarget.classList.remove('drag-over');
+        let data;
+        try { data = JSON.parse(event.dataTransfer.getData('text/plain')); } catch { return; }
+        if (!data || data.mediaId == null) return;
+        const result = await this.apiPost(`picture-albums/${albumId}/items`, { mediaId: data.mediaId, mediaType: data.mediaType });
+        if (!result) return;
+        // Refresh album count chip
+        await this._loadAlbums();
+        const chip = document.getElementById(`pic-album-chip-${albumId}`);
+        if (chip) {
+            const album = this._pictureAlbums.find(a => a.id === albumId);
+            if (album) chip.querySelector('.pic-album-count').textContent = album.itemCount;
+        }
+    },
+
+    _renderVideoCard(vid, inAlbum = false, albumItemId = null) {
+        const thumbSrc = vid.thumbnailPath ? `/pvthumb/${vid.thumbnailPath}` : '';
+        const dur = this._formatVideoDuration(vid.durationSeconds);
+        const vid_id = vid.id || vid.mediaId;
+        const removeBtn = inAlbum
+            ? `<button class="pic-album-item-remove" title="${this.t('pictures.removeFromAlbum')}" onclick="event.stopPropagation();App._removeAlbumItem(${this._currentAlbumId},${albumItemId})">&times;</button>`
+            : '';
+        const menuBtn = `<button class="pic-card-menu-btn" onclick="event.stopPropagation();App._showPicCardMenu(${vid_id},'video',event)" title="More options">&#8942;</button>`;
+        return `<div class="picture-card pic-video-card" style="position:relative"
+            draggable="true"
+            data-pic-id="${vid_id}" data-pic-type="video"
+            ondragstart="App._picDragStart(event,${vid_id},'video')"
+            ondragend="this.classList.remove('dragging')"
+            onclick="App.openPicVideoViewer(${vid_id})">
+            <div class="picture-card-thumb">
+                ${thumbSrc
+                    ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none'" alt="">`
+                    : `<span class="picture-card-placeholder" style="display:flex">&#127916;</span>`}
+                <div class="pic-video-overlay">
+                    <div class="pic-video-play-icon">
+                        <svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg>
+                    </div>
+                </div>
+                ${dur ? `<span class="pic-video-duration">${dur}</span>` : ''}
+            </div>
+            <div class="picture-card-info">
+                <div class="picture-card-name">${this.esc(vid.fileName)}</div>
+                <div class="picture-card-meta">${vid.width && vid.height ? vid.width+'x'+vid.height+' &middot; ' : ''}${this.formatSize(vid.sizeBytes)}</div>
+            </div>
+            ${removeBtn}${menuBtn}
+        </div>`;
+    },
+
+    _formatVideoDuration(secs) {
+        if (!secs) return '';
+        const h = Math.floor(secs / 3600);
+        const m = Math.floor((secs % 3600) / 60);
+        const s = secs % 60;
+        if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+        return `${m}:${String(s).padStart(2,'0')}`;
+    },
+
+    _renderPictureCard(pic, inAlbum = false, albumItemId = null) {
+        const thumbSrc = pic.thumbnailPath ? `/picthumb/${pic.thumbnailPath}` : `/api/picthumb/${pic.id || pic.mediaId}`;
+        const removeBtn = inAlbum
+            ? `<button class="pic-album-item-remove" title="${this.t('pictures.removeFromAlbum')}" onclick="event.stopPropagation();App._removeAlbumItem(${this._currentAlbumId},${albumItemId})">&times;</button>`
+            : '';
+        const mediaId = pic.id || pic.mediaId;
+        return `<div class="picture-card"
+            style="position:relative"
+            draggable="true"
+            data-pic-id="${mediaId}" data-pic-type="picture"
+            ondragstart="App._picDragStart(event,${mediaId},'picture')"
+            ondragend="this.classList.remove('dragging')"
+            onclick="App.openPictureViewer(${mediaId})">
+            <div class="picture-card-thumb">
+                <img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
+                <span class="picture-card-placeholder" style="display:none">&#128247;</span>
+            </div>
+            <div class="picture-card-info">
+                <div class="picture-card-name">${this.esc(pic.fileName)}</div>
+                <div class="picture-card-meta">${pic.width && pic.height ? pic.width+'x'+pic.height+' &middot; ' : ''}${this.formatSize(pic.sizeBytes)}</div>
+            </div>
+            <button class="pic-card-menu-btn" onclick="event.stopPropagation();App._showPicCardMenu(${mediaId},'picture',event)" title="More options">&#8942;</button>
+            ${removeBtn}
+        </div>`;
+    },
+
+    // ─── Album inline expand panel ───────────────────────────────────
+
+    _picToggleInlineAlbum(albumId) {
+        if (this._expandedAlbumId === albumId) {
+            this._expandedAlbumId = null;
+            const panel = document.getElementById('pic-album-inline-panel');
+            if (panel) { panel.style.display = 'none'; panel.innerHTML = ''; }
+            // Remove active state from chip
+            document.querySelectorAll('.pic-album-chip').forEach(c => c.classList.remove('active'));
+        } else {
+            this._expandedAlbumId = albumId;
+            this._picRenderInlineAlbumPanel(albumId);
+            // Update chip active state
+            document.querySelectorAll('.pic-album-chip').forEach(c =>
+                c.classList.toggle('active', parseInt(c.dataset.albumId) === albumId));
+        }
+    },
+
+    async _picRenderInlineAlbumPanel(albumId) {
+        const panel = document.getElementById('pic-album-inline-panel');
+        if (!panel) return;
+        panel.style.display = 'block';
+        panel.innerHTML = `<div class="pic-inline-loading"><span class="spinner" style="width:16px;height:16px;border-width:2px"></span></div>`;
+
+        const data = await this.api(`picture-albums/${albumId}/items`);
+        if (!data) { panel.style.display = 'none'; return; }
+
+        const items = data.items || [];
+        const album = this._pictureAlbums.find(a => a.id === albumId);
+
+        let html = `<div class="pic-inline-panel-header">
+            <span class="pic-inline-panel-title">${this.esc(data.name)}</span>
+            <span class="pic-inline-panel-count">${items.length} item${items.length===1?'':'s'}</span>
+            <button class="pic-inline-view-all" onclick="App._exitInlineAndOpenAlbum(${albumId})">${this.t('pictures.viewAll')} &rarr;</button>
+            <button class="pic-inline-close-btn" onclick="App._picToggleInlineAlbum(${albumId})">&times;</button>
+        </div>`;
+
+        html += `<div class="pic-inline-scroll"
+            ondragover="event.preventDefault();this.classList.add('drag-over')"
+            ondragleave="this.classList.remove('drag-over')"
+            ondrop="App._dropOnAlbum(event,${albumId})">`;
+
+        if (items.length === 0) {
+            html += `<div class="pic-inline-empty">${this.t('pictures.dragToAlbum')}</div>`;
+        } else {
+            items.forEach(item => {
+                const isVideo = item.mediaType === 'video';
+                const thumbSrc = item.thumbnailPath
+                    ? (isVideo ? `/pvthumb/${item.thumbnailPath}` : `/picthumb/${item.thumbnailPath}`)
+                    : '';
+                const dur = isVideo ? this._formatVideoDuration(item.durationSeconds) : '';
+                html += `<div class="pic-inline-card"
+                    draggable="true"
+                    data-pic-id="${item.mediaId}" data-pic-type="${item.mediaType}"
+                    ondragstart="App._picDragStart(event,${item.mediaId},'${item.mediaType}')"
+                    ondragend="this.classList.remove('dragging')"
+                    onclick="${isVideo ? `App.openPicVideoViewer(${item.mediaId})` : `App.openPictureViewer(${item.mediaId})`}">
+                    <div class="pic-inline-card-thumb">
+                        ${thumbSrc
+                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none'" alt="">`
+                            : `<span style="font-size:24px">${isVideo?'🎬':'📷'}</span>`}
+                        ${isVideo ? `<div class="pic-video-overlay" style="pointer-events:none"><div class="pic-video-play-icon" style="width:24px;height:24px"><svg viewBox="0 0 24 24"><polygon points="5,3 19,12 5,21"/></svg></div></div>` : ''}
+                        ${dur ? `<span class="pic-video-duration">${dur}</span>` : ''}
+                    </div>
+                    <button class="pic-inline-remove-btn" title="${this.t('pictures.removeFromAlbum')}"
+                        onclick="event.stopPropagation();App._removeInlineAlbumItem(${albumId},${item.id})">&times;</button>
+                </div>`;
+            });
+        }
+        html += `</div>`;
+        panel.innerHTML = html;
+    },
+
+    async _removeInlineAlbumItem(albumId, itemId) {
+        await this.apiDelete(`picture-albums/${albumId}/items/${itemId}`);
+        await this._loadAlbums();
+        // Refresh inline panel
+        await this._picRenderInlineAlbumPanel(albumId);
+        // Update chip count
+        const chip = document.getElementById(`pic-album-chip-${albumId}`);
+        if (chip) {
+            const a = this._pictureAlbums.find(x => x.id === albumId);
+            if (a) chip.querySelector('.pic-album-count').textContent = a.itemCount;
+        }
+    },
+
+    _exitInlineAndOpenAlbum(albumId) {
+        this._expandedAlbumId = null;
+        this.openAlbumView(albumId);
+    },
+
+    // ─── Picture card 3-dot context menu ─────────────────────────────
+
+    _picCardMenuOpen: null,
+
+    _showPicCardMenu(mediaId, mediaType, event) {
+        // Close existing
+        document.getElementById('picCardContextMenu')?.remove();
+        if (this._picCardMenuOpen === mediaId) { this._picCardMenuOpen = null; return; }
+        this._picCardMenuOpen = mediaId;
+
+        const albums = this._pictureAlbums || [];
+        const svgA = 'xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+
+        let albumItems = albums.length === 0
+            ? `<div class="video-menu-item" style="opacity:.5;pointer-events:none;font-size:12px">${this.t('pictures.noAlbums')}</div>`
+            : albums.map(a =>
+                `<div class="video-menu-item" onclick="App._picAddToAlbumFromMenu(${a.id},${mediaId},'${mediaType}')">
+                    <span class="video-menu-icon">&#128247;</span>${this.esc(a.name)}
+                    <span style="margin-left:auto;font-size:11px;opacity:.5">${a.itemCount}</span>
+                </div>`).join('');
+
+        let menuHtml = `
+            <div class="video-menu-item pic-menu-submenu-trigger" onclick="App._picToggleAddToAlbumSubmenu(event)">
+                <span class="video-menu-icon"><svg ${svgA}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+                ${this.t('pictures.addToAlbum')}
+                <span style="margin-left:auto;opacity:.5">&#9654;</span>
+            </div>
+            <div class="pic-add-to-album-submenu" id="pic-ata-submenu" style="display:none">
+                <div style="padding:4px 12px 6px;font-size:11px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em">${this.t('pictures.albums')}</div>
+                ${albumItems}
+            </div>
+            <div class="video-menu-divider"></div>`;
+
+        if (mediaType === 'video') {
+            menuHtml += `<div class="video-menu-item" onclick="App.picDownloadById(${mediaId},'video')">
+                <span class="video-menu-icon"><svg ${svgA}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>
+                ${this.t('btn.download')}
+            </div>`;
+        }
+
+        const menu = document.createElement('div');
+        menu.id = 'picCardContextMenu';
+        menu.className = 'video-context-menu';
+        menu.innerHTML = menuHtml;
+        document.body.appendChild(menu);
+
+        // Position near click
+        const rect = event.currentTarget.getBoundingClientRect();
+        const mw = 210, mh = 160;
+        let left = rect.right + 4;
+        let top = rect.top;
+        if (left + mw > window.innerWidth) left = rect.left - mw - 4;
+        if (top + mh > window.innerHeight) top = window.innerHeight - mh - 8;
+        menu.style.left = left + 'px';
+        menu.style.top = Math.max(8, top) + 'px';
+        menu.style.minWidth = mw + 'px';
+
+        const closeHandler = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                this._picCardMenuOpen = null;
+                document.removeEventListener('mousedown', closeHandler);
+            }
+        };
+        setTimeout(() => document.addEventListener('mousedown', closeHandler), 0);
+    },
+
+    _picToggleAddToAlbumSubmenu(event) {
+        event.stopPropagation();
+        const sub = document.getElementById('pic-ata-submenu');
+        if (sub) sub.style.display = sub.style.display === 'none' ? 'block' : 'none';
+    },
+
+    async _picAddToAlbumFromMenu(albumId, mediaId, mediaType) {
+        document.getElementById('picCardContextMenu')?.remove();
+        this._picCardMenuOpen = null;
+        const result = await this.apiPost(`picture-albums/${albumId}/items`, { mediaId, mediaType });
+        if (!result) return;
+        await this._loadAlbums();
+        // Refresh inline panel if that album is open
+        if (this._expandedAlbumId === albumId) {
+            await this._picRenderInlineAlbumPanel(albumId);
+        }
+        // Update chip count
+        const chip = document.getElementById(`pic-album-chip-${albumId}`);
+        if (chip) {
+            const a = this._pictureAlbums.find(x => x.id === albumId);
+            if (a) chip.querySelector('.pic-album-count').textContent = a.itemCount;
+        }
+    },
+
+    picDownloadById(mediaId, mediaType = 'video') {
+        const url = mediaType === 'picture' ? `/api/image/${mediaId}` : `/api/picture-video/${mediaId}`;
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
     },
 
     async loadPicturesPage(el) {
         const target = el || document.getElementById('main-content');
-        let url = `pictures?limit=${this.picturesPerPage}&page=${this.picturesPage}&sort=${this.picturesSort}`;
-        if (this.picturesCategory) url += `&category=${encodeURIComponent(this.picturesCategory)}`;
 
+        // "Name" sort → letter browser view (fetch all, group by first letter)
+        if (this.picturesSort === 'name' && this.picturesMediaType !== 'videos') {
+            await this._renderPicturesByName(target);
+            return;
+        }
+
+        // Fetch pictures, videos, and albums in parallel
+        // null = no filter, "" = uncategorized sentinel (__none__), string = exact match
+        const _catParamVal = this.picturesCategory === '' ? '__none__' : this.picturesCategory;
+        const _catParam = this.picturesCategory !== null ? `&category=${encodeURIComponent(_catParamVal)}` : '';
+        const picUrl = `pictures?limit=${this.picturesPerPage}&page=${this.picturesPage}&sort=${this.picturesSort}` + _catParam;
+        const vidUrl = `picture-videos?limit=${this.picturesPerPage}&page=${this.picturesPage}&sort=${this.picturesSort}` + _catParam;
+
+        const mt = this.picturesMediaType;
+        const [picData, vidData, picCats, vidCats] = await Promise.all([
+            mt !== 'videos'   ? this.api(picUrl)                       : Promise.resolve({ pictures: [], total: 0 }),
+            mt !== 'pictures' ? this.api(vidUrl)                       : Promise.resolve({ videos: [],   total: 0 }),
+            mt !== 'videos'   ? this.api('pictures/categories')        : Promise.resolve([]),
+            mt !== 'pictures' ? this.api('picture-videos/categories')  : Promise.resolve([]),
+        ]);
+
+        if (!picData && !vidData) { target.innerHTML = this.emptyState('Error', 'Could not load media.'); return; }
+
+        // Merge categories — normalise null → "" so null-category pics and empty-category vids merge into one chip
+        const catMap = new Map();
+        (picCats || []).forEach(c => { const k = c.name ?? ''; catMap.set(k, (catMap.get(k) || 0) + c.count); });
+        (vidCats || []).forEach(c => { const k = c.name ?? ''; catMap.set(k, (catMap.get(k) || 0) + c.count); });
+        // Sort: empty-string (Uncategorized) last, rest alphabetical
+        const categories = [...catMap.entries()]
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => { if (a.name === '') return 1; if (b.name === '') return -1; return a.name.localeCompare(b.name); });
+
+        const pics = (picData?.pictures || []);
+        const vids = (vidData?.videos || []);
+        const totalPics = picData?.total || 0;
+        const totalVids = vidData?.total || 0;
+        const grandTotal = totalPics + totalVids;
+        const totalPages = Math.ceil(grandTotal / this.picturesPerPage) || 1;
+        this.picturesTotal = grandTotal;
+
+        // Switch main-content to two-panel flex so the grid never scrolls behind controls
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
+
+        // ── Controls panel (never scrolls) ────────────────────────────
+        let ctrl = `<div class="pic-controls-panel">`;
+        ctrl += `<div class="page-header" style="margin-bottom:10px"><h1>${this.t('page.pictures')}</h1>
+            <div style="display:flex;align-items:center;gap:6px;margin-left:auto">`;
+        ctrl += this._picMediaTypeChipsHtml();
+        ctrl += `<span style="width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`;
+        ctrl += this._picSortIconsHtml(categories.length > 0);
+        ctrl += `<span style="width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`;
+        ctrl += this._picViewTabsHtml();
+        ctrl += `</div></div>`;
+
+        // Folder panel (hidden by default, toggled by folder icon button)
+        if (categories.length > 0) {
+            const open = this._picFolderBarOpen;
+            ctrl += `<div class="vid-folder-panel${open ? '' : ' hidden'}" id="pic-folder-panel">`;
+            ctrl += `<div class="vid-folder-list">`;
+            ctrl += `<div class="vid-folder-list-item${this.picturesCategory === null ? ' active' : ''}" onclick="App.filterPictureCategory(null)">
+                <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+                <span>${this.t('filter.allPictures')}</span>
+            </div>`;
+            categories.forEach(c => {
+                const isActive = this.picturesCategory === c.name;
+                const _cname = c.name ?? '';
+                const safe = this.esc(_cname).replace(/'/g, "\\'");
+                ctrl += `<div class="vid-folder-list-item${isActive ? ' active' : ''}" onclick="App.filterPictureCategory('${safe}')">
+                    <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+                    <span>${this.esc(_cname || this.t('pictures.uncategorized'))}</span>
+                    <span class="vid-folder-count">${c.count}</span>
+                </div>`;
+            });
+            ctrl += `</div></div>`;
+        }
+        ctrl += `</div>`; // end controls panel
+
+        // ── Grid panel (scrolls independently) ───────────────────────
+        let grid = `<div class="pic-grid-panel">`;
+        const hasPics = pics.length > 0;
+        const hasVids = vids.length > 0;
+        if (hasPics || hasVids) {
+            grid += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:var(--text-secondary);font-size:13px">
+                <span>${grandTotal} item${grandTotal===1?'':'s'}${this.picturesCategory ? ' in ' + this.esc(this.picturesCategory || 'Uncategorized') : ''}</span>
+                <span>Page ${this.picturesPage} of ${totalPages}</span>
+            </div>`;
+
+            grid += '<div class="pictures-grid">';
+            pics.forEach(pic => { grid += this._renderPictureCard(pic); });
+            vids.forEach(vid => { grid += this._renderVideoCard(vid); });
+            grid += '</div>';
+            grid += this.renderPicturesPagination(this.picturesPage, totalPages);
+        } else {
+            grid += this.emptyState(this.t('empty.noPictures.title'), this.t('empty.noPictures.desc'));
+        }
+        grid += `</div>`; // end grid panel
+
+        target.innerHTML = ctrl + grid;
+        // Restore inline album panel if one was expanded
+        if (this._expandedAlbumId != null) {
+            this._picRenderInlineAlbumPanel(this._expandedAlbumId);
+        }
+    },
+
+    async _renderPicturesByName(target) {
+        target.innerHTML = `<div style="text-align:center;padding:60px"><div class="spinner"></div></div>`;
+
+        let url = `pictures?limit=5000&page=1&sort=name`;
+        if (this.picturesCategory) url += `&category=${encodeURIComponent(this.picturesCategory)}`;
         const [data, categories] = await Promise.all([
             this.api(url),
             this.api('pictures/categories')
         ]);
-
         if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load pictures.'); return; }
-        this.picturesTotal = data.total;
-        const totalPages = Math.ceil(data.total / this.picturesPerPage);
 
-        let html = `<div class="page-header"><h1>${this.t('page.pictures')}</h1>
-            <div class="filter-bar">`;
-        const sortLabels = { recent: this.t('sort.recent'), name: this.t('sort.name'), date: this.t('sort.dateTaken'), size: this.t('sort.size') };
-        for (const [key, label] of Object.entries(sortLabels)) {
-            html += `<button class="filter-chip${this.picturesSort === key ? ' active' : ''}" onclick="App.changePicturesSort('${key}')">${label}</button>`;
-        }
-        html += `</div></div>`;
+        // Two-panel layout — same as grid view
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
 
-        // Category filter chips
+        // Build controls panel
+        let ctrl = `<div class="pic-controls-panel">`;
+        ctrl += `<div class="page-header" style="margin-bottom:10px"><h1>${this.t('page.pictures')}</h1>
+            <div style="display:flex;align-items:center;gap:6px;margin-left:auto">`;
+        ctrl += this._picSortIconsHtml(categories && categories.length > 0);
+        ctrl += `<span style="width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`;
+        ctrl += this._picViewTabsHtml();
+        ctrl += `</div></div>`;
+
+        // Folder panel (hidden by default, toggled by folder icon button)
         if (categories && categories.length > 0) {
-            html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">';
-            html += `<button class="filter-chip${!this.picturesCategory ? ' active' : ''}" onclick="App.filterPictureCategory(null)">${this.t('filter.allPictures')}</button>`;
+            const open = this._picFolderBarOpen;
+            ctrl += `<div class="vid-folder-panel${open ? '' : ' hidden'}" id="pic-folder-panel">`;
+            ctrl += `<div class="vid-folder-list">`;
+            ctrl += `<div class="vid-folder-list-item${this.picturesCategory === null ? ' active' : ''}" onclick="App.filterPictureCategory(null)">
+                <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+                <span>${this.t('filter.allPictures')}</span>
+            </div>`;
             categories.forEach(c => {
                 const isActive = this.picturesCategory === c.name;
-                const displayName = c.name || 'Uncategorized';
-                html += `<button class="filter-chip${isActive ? ' active' : ''}" onclick="App.filterPictureCategory('${this.esc(c.name)}')">${this.esc(displayName)} <span style="opacity:.6">${c.count}</span></button>`;
+                const _cname = c.name ?? '';
+                const safe = this.esc(_cname).replace(/'/g, "\\'");
+                ctrl += `<div class="vid-folder-list-item${isActive ? ' active' : ''}" onclick="App.filterPictureCategory('${safe}')">
+                    <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+                    <span>${this.esc(_cname || this.t('pictures.uncategorized'))}</span>
+                    <span class="vid-folder-count">${c.count}</span>
+                </div>`;
             });
-            html += '</div>';
+            ctrl += `</div></div>`;
         }
+        ctrl += `</div>`; // end controls panel
 
-        if (data.pictures && data.pictures.length > 0) {
-            html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;color:var(--text-secondary);font-size:13px">
-                <span>${data.total} pictures${this.picturesCategory ? ' in ' + this.esc(this.picturesCategory || 'Uncategorized') : ''}</span>
-                <span>Page ${this.picturesPage} of ${totalPages}</span>
-            </div>`;
+        let html = '';
 
-            html += '<div class="pictures-grid">';
-            data.pictures.forEach(pic => {
+        const ALL_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
+        const groups = new Map();
+        (data.pictures || []).forEach(pic => {
+            const letter = this._actorFirstLetter(pic.fileName);
+            if (!groups.has(letter)) groups.set(letter, []);
+            groups.get(letter).push(pic);
+        });
+        const activeLetters = new Set(groups.keys());
+
+        // Scrubber
+        let scrubHtml = `<div class="vid-scrubber" id="vid-scrubber">`;
+        ALL_LETTERS.forEach(l => {
+            scrubHtml += `<div class="vid-scrubber-item${activeLetters.has(l) ? '' : ' empty'}" data-key="${l}" onclick="App._vidScrollToAnchor('vid-letter-${l}')">${l}</div>`;
+        });
+        scrubHtml += `</div>`;
+
+        // Content grouped by letter
+        html += `<div class="vid-timeline-wrapper">`;
+        ALL_LETTERS.forEach(l => {
+            if (!groups.has(l)) return;
+            const items = groups.get(l);
+            html += `<div class="vid-letter-anchor" id="vid-letter-${l}" data-key="${l}"></div>`;
+            html += `<div class="vid-letter-header">${l} <span class="vid-year-count">${items.length}</span></div>`;
+            html += `<div class="pictures-grid" style="margin-bottom:28px">`;
+            items.forEach(pic => {
                 const thumbSrc = pic.thumbnailPath ? `/picthumb/${pic.thumbnailPath}` : `/api/picthumb/${pic.id}`;
-                html += `<div class="picture-card" onclick="App.openPictureViewer(${pic.id})" data-pic-id="${pic.id}">
+                html += `<div class="picture-card"
+                    draggable="true"
+                    data-pic-id="${pic.id}" data-pic-type="picture"
+                    ondragstart="App._picDragStart(event,${pic.id},'picture')"
+                    ondragend="this.classList.remove('dragging')"
+                    onclick="App.openPictureViewer(${pic.id})">
                     <div class="picture-card-thumb">
                         <img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
                         <span class="picture-card-placeholder" style="display:none">&#128247;</span>
@@ -11152,25 +12992,98 @@ const App = {
                     </div>
                 </div>`;
             });
-            html += '</div>';
-            html += this.renderPicturesPagination(this.picturesPage, totalPages);
-        } else {
-            html += this.emptyState(this.t('empty.noPictures.title'), this.t('empty.noPictures.desc'));
-        }
+            html += `</div>`;
+        });
+        html += `</div>`;
 
-        target.innerHTML = html;
+        const gridPanel = `<div class="pic-grid-panel" id="pic-grid-panel" style="position:relative">${html}</div>`;
+        target.innerHTML = ctrl + gridPanel + scrubHtml;
+        const activeKeys = ALL_LETTERS.filter(l => activeLetters.has(l));
+        this._setupVidScrubber(activeKeys, 'vid-letter-', document.getElementById('pic-grid-panel'));
     },
 
     changePicturesSort(sort) {
+        if (this._videoScrollHandler) {
+            const mc = document.getElementById('main-content');
+            if (mc) mc.removeEventListener('scroll', this._videoScrollHandler);
+            this._videoScrollHandler = null;
+        }
         this.picturesSort = sort;
         this.picturesPage = 1;
+        this._picFolderBarOpen = false;
         this.loadPicturesPage();
     },
 
     filterPictureCategory(category) {
         this.picturesCategory = category;
         this.picturesPage = 1;
+        this._picFolderBarOpen = true;   // keep folder panel open when navigating folders
+        if (this.picturesView === 'timeline') {
+            this._renderPicturesTimeline(document.getElementById('main-content'));
+        } else {
+            this.loadPicturesPage();
+        }
+    },
+
+
+    async _submitRenameCategory(oldName) {
+        const input = document.getElementById('pic-rename-input');
+        if (!input) return;
+        const newName = input.value.trim();
+        if (!newName) { input.focus(); return; }
+        if (newName === oldName) { document.getElementById('pic-rename-popover')?.remove(); return; }
+        await this.apiPost('pictures/categories/rename', { oldName, newName });
+        document.getElementById('pic-rename-popover')?.remove();
+        if (this.picturesCategory === oldName) this.picturesCategory = newName;
         this.loadPicturesPage();
+    },
+
+    _openRenameAlbumPopover(albumId, currentName, evt) {
+        document.getElementById('pic-rename-popover')?.remove();
+        const popover = document.createElement('div');
+        popover.id = 'pic-rename-popover';
+        popover.className = 'pic-create-album-popover';
+        popover.onclick = e => e.stopPropagation();
+        popover.innerHTML = `
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:10px">${this.t('pictures.renameAlbum')}</div>
+            <input id="pic-rename-input" type="text" value="${this.esc(currentName)}" maxlength="80"
+                style="width:100%;box-sizing:border-box;padding:7px 10px;background:var(--bg-active);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-primary);font-size:13px;outline:none;margin-bottom:10px"
+                onkeydown="if(event.key==='Enter')App._submitRenameAlbum(${albumId});else if(event.key==='Escape')document.getElementById('pic-rename-popover')?.remove()">
+            <div style="display:flex;justify-content:flex-end;align-items:center;gap:8px">
+                <button style="padding:5px 12px;font-size:12px;background:var(--bg-hover);color:var(--text-secondary);border:1px solid var(--border);border-radius:var(--radius);cursor:pointer" onclick="document.getElementById('pic-rename-popover').remove()">${this.t('btn.cancel')}</button>
+                <button style="padding:5px 12px;font-size:12px;margin:0;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);cursor:pointer" onclick="App._submitRenameAlbum(${albumId})">${this.t('btn.rename')}</button>
+            </div>`;
+        document.body.appendChild(popover);
+        const btn = evt?.currentTarget;
+        if (btn) {
+            const r = btn.getBoundingClientRect();
+            const pw = 240;
+            let left = r.left;
+            if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+            popover.style.left = left + 'px';
+            popover.style.top = (r.bottom + 4) + 'px';
+            popover.style.width = pw + 'px';
+        }
+        const input = popover.querySelector('#pic-rename-input');
+        input.focus(); input.select();
+        const closeOnOutside = e => { if (!popover.contains(e.target)) { popover.remove(); document.removeEventListener('mousedown', closeOnOutside); } };
+        setTimeout(() => document.addEventListener('mousedown', closeOnOutside), 0);
+    },
+
+    async _submitRenameAlbum(albumId) {
+        const input = document.getElementById('pic-rename-input');
+        if (!input) return;
+        const newName = input.value.trim();
+        if (!newName) { input.focus(); return; }
+        await this.apiPatch(`picture-albums/${albumId}/rename`, { name: newName });
+        document.getElementById('pic-rename-popover')?.remove();
+        await this._loadAlbums();
+        // If we're in album detail, stay there; otherwise re-render albums page
+        if (this._currentAlbumId != null) {
+            this._renderAlbumView(document.getElementById('main-content'), this._currentAlbumId);
+        } else {
+            this._renderAlbumsPage();
+        }
     },
 
     goPicturesPage(page) {
@@ -11202,6 +13115,245 @@ const App = {
         return html;
     },
 
+    // ─── Pictures: Timeline View ─────────────────────────
+    async _renderPicturesTimeline(target) {
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
+        const [categories] = await Promise.all([this.api('pictures/categories')]);
+
+        // Controls panel
+        let ctrl = `<div class="pic-controls-panel">`;
+        ctrl += `<div class="page-header" style="margin-bottom:0"><h1>${this.t('page.pictures')}</h1><div style="margin-left:auto;display:flex;align-items:center;gap:4px">${this._picSortIconsHtml(categories && categories.length > 0)}<span style="width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>${this._picViewTabsHtml()}</div></div>`;
+        if (categories && categories.length > 0) {
+            const open = this._picFolderBarOpen;
+            ctrl += `<div class="vid-folder-panel${open ? '' : ' hidden'}" id="pic-folder-panel">`;
+            ctrl += `<div class="vid-folder-list">`;
+            ctrl += `<div class="vid-folder-list-item${this.picturesCategory === null ? ' active' : ''}" onclick="App.filterPictureCategory(null)">
+                <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+                <span>${this.t('filter.allPictures')}</span>
+            </div>`;
+            categories.forEach(c => {
+                const isActive = this.picturesCategory === c.name;
+                const _cname = c.name ?? '';
+                const safe = this.esc(_cname).replace(/'/g, "\\'");
+                ctrl += `<div class="vid-folder-list-item${isActive ? ' active' : ''}" onclick="App.filterPictureCategory('${safe}')">
+                    <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0"><use href="#icon-folder"/></svg>
+                    <span>${this.esc(_cname || this.t('pictures.uncategorized'))}</span>
+                    <span class="vid-folder-count">${c.count}</span>
+                </div>`;
+            });
+            ctrl += `</div></div>`;
+        }
+        ctrl += `</div>`;
+
+        target.innerHTML = ctrl + `<div class="pic-grid-panel" id="pic-grid-panel"><div style="display:flex;align-items:center;gap:10px;padding:32px 0;color:var(--text-secondary);font-size:13px">
+            <span class="spinner" style="width:18px;height:18px;border-width:2px"></span> Loading timeline&hellip;</div></div>`;
+
+        let url = 'pictures/timeline';
+        if (this.picturesCategory !== null) url += `?category=${encodeURIComponent(this.picturesCategory === '' ? '__none__' : this.picturesCategory)}`;
+        const data = await this.api(url);
+
+        if (!data || data.length === 0) {
+            target.innerHTML = ctrl + `<div class="pic-grid-panel" id="pic-grid-panel">${this.emptyState(this.t('empty.noPictures.title'), this.t('empty.noPictures.desc'))}</div>`;
+            return;
+        }
+
+        // Group by day key "YYYY-MM-DD"
+        const dayGroups = new Map();
+        const yearFirstDay = new Map();
+
+        data.forEach(pic => {
+            const dt = pic.dateTaken ? new Date(pic.dateTaken) : null;
+            let dayKey;
+            if (dt && dt.getFullYear() > 1980) {
+                dayKey = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+                const yr = dt.getFullYear();
+                if (!yearFirstDay.has(yr)) yearFirstDay.set(yr, dayKey);
+            } else {
+                dayKey = 'undated';
+            }
+            if (!dayGroups.has(dayKey)) dayGroups.set(dayKey, []);
+            dayGroups.get(dayKey).push(pic);
+        });
+
+        // Sort days descending; undated goes last
+        const sortedDays = [...dayGroups.keys()]
+            .filter(k => k !== 'undated')
+            .sort((a, b) => b.localeCompare(a));
+        if (dayGroups.has('undated')) sortedDays.push('undated');
+
+        const years = [...yearFirstDay.keys()].sort((a, b) => b - a);
+
+        // Build scrubber (rendered outside grid panel, positioned absolute)
+        let scrubHtml = `<div class="pic-timeline-scrubber" id="pic-timeline-scrubber">`;
+        years.forEach((yr, i) => {
+            scrubHtml += `<div class="pic-year-label${i===0?' active':''}" data-year="${yr}" onclick="App._picScrollToYear(${yr})">${yr}</div>`;
+        });
+        scrubHtml += `</div>`;
+
+        // Build content inside grid panel
+        let contentHtml = `<div class="pic-grid-panel" id="pic-grid-panel"><div class="pic-timeline-wrapper">`;
+        let lastYear = null;
+        sortedDays.forEach(dayKey => {
+            const pics = dayGroups.get(dayKey);
+            let dateLabel;
+            if (dayKey === 'undated') {
+                dateLabel = 'Undated';
+            } else {
+                const yr = parseInt(dayKey.split('-')[0]);
+                if (yr !== lastYear) {
+                    contentHtml += `<div class="pic-year-anchor" id="pic-year-${yr}" data-year="${yr}"></div>`;
+                    lastYear = yr;
+                }
+                const [y, m, d] = dayKey.split('-').map(Number);
+                const dt = new Date(y, m-1, d, 12);
+                dateLabel = dt.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+            }
+            contentHtml += `<div class="pic-date-group" id="pic-date-${dayKey}">
+                <div class="pic-date-header">${dateLabel}</div>
+                <div class="pic-timeline-grid">`;
+            pics.forEach(pic => {
+                const thumbSrc = pic.thumbnailPath ? `/picthumb/${pic.thumbnailPath}` : `/api/picthumb/${pic.id}`;
+                contentHtml += `<div class="picture-card pic-timeline-card" onclick="App.openPictureViewer(${pic.id})" data-pic-id="${pic.id}">
+                    <div class="picture-card-thumb">
+                        <img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
+                        <span class="picture-card-placeholder" style="display:none">&#128247;</span>
+                    </div>
+                </div>`;
+            });
+            contentHtml += `</div></div>`;
+        });
+        contentHtml += `</div></div>`;
+
+        target.innerHTML = ctrl + contentHtml + scrubHtml;
+
+        // Pre-build _picIds for nav (ordered by timeline = date desc)
+        this._picIds = sortedDays.flatMap(d => dayGroups.get(d).map(p => p.id));
+
+        this._picSetupScrubber(years);
+    },
+
+    _picScrollToYear(year) {
+        const anchor = document.getElementById(`pic-year-${year}`);
+        if (!anchor) return;
+        document.querySelectorAll('.pic-year-label').forEach(l =>
+            l.classList.toggle('active', parseInt(l.dataset.year) === year)
+        );
+        const mc = document.getElementById('pic-grid-panel') || document.getElementById('main-content');
+        if (mc) {
+            const top = anchor.getBoundingClientRect().top - mc.getBoundingClientRect().top + mc.scrollTop - 16;
+            mc.scrollTo({ top, behavior: 'smooth' });
+        } else {
+            anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    },
+
+    _picSetupScrubber(years) {
+        const mc = document.getElementById('pic-grid-panel') || document.getElementById('main-content');
+        if (!mc) return;
+        if (this._picScrollHandler) mc.removeEventListener('scroll', this._picScrollHandler);
+        this._picScrollHandler = () => {
+            const labels = document.querySelectorAll('.pic-year-label');
+            if (!labels.length) return;
+            // Default to the most recent year (years[0] in descending order) so that
+            // being at the very top of the page never falls back to the oldest year.
+            let activeYear = years[0];
+            let closestTop = -Infinity;
+            for (const yr of years) {
+                const anchor = document.getElementById(`pic-year-${yr}`);
+                if (!anchor) continue;
+                const top = anchor.getBoundingClientRect().top;
+                // Pick the anchor that has scrolled into view (top <= threshold) and
+                // is closest to the top of the viewport (highest top still in range).
+                if (top <= 150 && top > closestTop) {
+                    closestTop = top;
+                    activeYear = yr;
+                }
+            }
+            labels.forEach(l => l.classList.toggle('active', parseInt(l.dataset.year) === activeYear));
+        };
+        mc.addEventListener('scroll', this._picScrollHandler, { passive: true });
+    },
+
+    // ─── Pictures: Map View ───────────────────────────────
+    async _renderPicturesMap(target) {
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
+        const ctrl = `<div class="pic-controls-panel" style="padding:16px 24px">
+            <div class="page-header" style="margin-bottom:0"><h1>${this.t('page.pictures')}</h1><div style="margin-left:auto">${this._picViewTabsHtml()}</div></div>
+        </div>`;
+        target.innerHTML = ctrl + `<div class="pic-grid-panel" id="pic-grid-panel" style="padding:0"><div class="pic-map-container" id="pic-map-wrap" style="height:100%">
+            <div id="pic-leaflet-map" style="width:100%;height:100%;min-height:420px"></div>
+        </div></div>`;
+
+        let geoData;
+        try {
+            await this._loadLeafletScripts();
+            geoData = await this.api('pictures/geomap');
+        } catch(e) {
+            document.getElementById('pic-map-wrap').innerHTML =
+                `<div class="pic-map-no-gps"><svg><use href="#icon-map-pin"/></svg><br>Could not load map library. Check internet connection.</div>`;
+            return;
+        }
+
+        if (!geoData || geoData.length === 0) {
+            document.getElementById('pic-map-wrap').innerHTML =
+                `<div class="pic-map-no-gps"><svg><use href="#icon-map-pin"/></svg><br>
+                No geotagged photos found.<br><span style="font-size:12px;opacity:.6">Photos need GPS coordinates in their EXIF data. Re-scan your library after adding geotagged photos.</span></div>`;
+            return;
+        }
+
+        if (this._picMapInstance) { this._picMapInstance.remove(); this._picMapInstance = null; }
+
+        const map = window.L.map('pic-leaflet-map', { center: [30, 10], zoom: 2 });
+        this._picMapInstance = map;
+
+        window.L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+            subdomains: 'abcd', maxZoom: 19
+        }).addTo(map);
+
+        const cluster = window.L.markerClusterGroup({
+            showCoverageOnHover: false,
+            iconCreateFunction(c) {
+                return window.L.divIcon({ html: `<div class="pic-cluster-icon">${c.getChildCount()}</div>`, className: '', iconSize: [38, 38] });
+            }
+        });
+
+        geoData.forEach(pic => {
+            const thumbSrc = pic.thumbnailPath ? `/picthumb/${pic.thumbnailPath}` : `/api/picthumb/${pic.id}`;
+            const icon = window.L.divIcon({
+                html: `<div class="pic-map-marker"><img src="${thumbSrc}" loading="lazy" onerror="this.src='/api/picthumb/${pic.id}'"></div>`,
+                className: '', iconSize: [42, 42], iconAnchor: [21, 21]
+            });
+            const m = window.L.marker([pic.lat, pic.lon], { icon, title: this.esc(pic.fileName) });
+            m.on('click', () => this.openPictureViewer(pic.id));
+            cluster.addLayer(m);
+        });
+
+        map.addLayer(cluster);
+        try { map.fitBounds(cluster.getBounds().pad(0.1)); } catch(e) {}
+    },
+
+    async _loadLeafletScripts() {
+        if (window.L && window.L.markerClusterGroup) return;
+        const addCSS = href => {
+            if (!document.querySelector(`link[href="${href}"]`)) {
+                const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = href;
+                document.head.appendChild(l);
+            }
+        };
+        const loadJS = src => new Promise((res, rej) => {
+            const s = document.createElement('script'); s.src = src;
+            s.onload = res; s.onerror = () => rej(new Error('Failed to load ' + src));
+            document.head.appendChild(s);
+        });
+        // All Leaflet files are bundled locally in wwwroot — no internet required
+        addCSS('/css/leaflet.css');
+        addCSS('/css/MarkerCluster.css');
+        addCSS('/css/MarkerCluster.Default.css');
+        if (!window.L) await loadJS('/js/leaflet.js');
+        if (!window.L.markerClusterGroup) await loadJS('/js/leaflet.markercluster.js');
+    },
+
     // ─── Picture Viewer Modal ────────────────────────────
     _picAutoplayTimer: null,
     _picAutoplay: false,
@@ -11218,7 +13370,7 @@ const App = {
             metadata.category ? `<div class="setting-row"><span class="setting-label">Category</span><span class="setting-value">${this.esc(metadata.category)}</span></div>` : '',
             metadata.dateTaken ? `<div class="setting-row"><span class="setting-label">Date Taken</span><span class="setting-value">${new Date(metadata.dateTaken).toLocaleString()}</span></div>` : '',
             metadata.cameraMake ? `<div class="setting-row"><span class="setting-label">Camera</span><span class="setting-value">${this.esc(metadata.cameraMake)}${metadata.cameraModel ? ' ' + this.esc(metadata.cameraModel) : ''}</span></div>` : '',
-            metadata.lensModel ? `<div class="setting-row"><span class="setting-label">Lens</span><span class="setting-value">${this.esc(metadata.lensModel)}</span></div>` : '',
+            metadata.lensModel ? `<div class="setting-row setting-row-col"><span class="setting-label">Lens</span><span class="setting-value" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4">${this.esc(metadata.lensModel)}</span></div>` : '',
             metadata.focalLength ? `<div class="setting-row"><span class="setting-label">Focal Length</span><span class="setting-value">${metadata.focalLength}</span></div>` : '',
             metadata.fNumber ? `<div class="setting-row"><span class="setting-label">Aperture</span><span class="setting-value">${metadata.fNumber}</span></div>` : '',
             metadata.exposureTime ? `<div class="setting-row"><span class="setting-label">Exposure</span><span class="setting-value">${metadata.exposureTime}</span></div>` : '',
@@ -11226,6 +13378,7 @@ const App = {
             metadata.flash ? `<div class="setting-row"><span class="setting-label">Flash</span><span class="setting-value">${metadata.flash}</span></div>` : '',
             metadata.software ? `<div class="setting-row"><span class="setting-label">Software</span><span class="setting-value">${this.esc(metadata.software)}</span></div>` : '',
             metadata.dpiX ? `<div class="setting-row"><span class="setting-label">DPI</span><span class="setting-value">${metadata.dpiX} x ${metadata.dpiY}</span></div>` : '',
+            (metadata.gpsLat != null && metadata.gpsLon != null) ? `<div class="setting-row"><span class="setting-label">Location</span><span class="setting-value" style="display:flex;align-items:center;gap:6px">${metadata.gpsLat.toFixed(5)}, ${metadata.gpsLon.toFixed(5)} <a href="https://www.openstreetmap.org/?mlat=${metadata.gpsLat}&mlon=${metadata.gpsLon}#map=15/${metadata.gpsLat}/${metadata.gpsLon}" target="_blank" rel="noopener" style="color:var(--accent);font-size:11px;text-decoration:none;flex-shrink:0">&nearr; OSM</a></span></div>` : '',
             `<div class="setting-row"><span class="setting-label">Added</span><span class="setting-value">${new Date(metadata.dateAdded).toLocaleString()}</span></div>`
         ].filter(Boolean).join('');
     },
@@ -11429,6 +13582,95 @@ const App = {
         }
     },
 
+    // ─── Personal Video Viewer ───────────────────────────────
+
+    _picVidIds: [],
+    _picVidCurrentIndex: -1,
+
+    async openPicVideoViewer(videoId) {
+        const meta = await this.api(`picture-videos/${videoId}/metadata`);
+        if (!meta) return;
+
+        // Build list from current grid cards
+        const existingModal = document.querySelector('.picvid-modal-overlay');
+        if (!existingModal) {
+            const cards = document.querySelectorAll('.picture-card.pic-video-card');
+            this._picVidIds = Array.from(cards).map(c => parseInt(c.dataset.picId));
+        }
+        this._picVidCurrentIndex = this._picVidIds.indexOf(videoId);
+        const idx = this._picVidCurrentIndex;
+
+        if (existingModal) {
+            const vid = existingModal.querySelector('.picvid-video');
+            if (vid) { vid.src = `/api/picture-video/${videoId}`; vid.load(); vid.play().catch(()=>{}); }
+            const title = existingModal.querySelector('.picvid-modal-title');
+            if (title) title.textContent = meta.fileName;
+            existingModal.querySelector('.picvid-nav-prev').style.display = idx > 0 ? '' : 'none';
+            existingModal.querySelector('.picvid-nav-next').style.display = idx < this._picVidIds.length-1 ? '' : 'none';
+            this._picVidUpdateKey(existingModal, videoId);
+            return;
+        }
+
+        const dur = this._formatVideoDuration(meta.durationSeconds);
+        const html = `<div class="picvid-modal-overlay" onclick="App.closePicVideoViewer(event)">
+            <div class="picvid-modal" onclick="event.stopPropagation()">
+                <div class="picvid-modal-header">
+                    <span class="picvid-modal-title">${this.esc(meta.fileName)}</span>
+                    ${dur ? `<span style="font-size:11px;color:var(--text-muted);flex-shrink:0">${dur}</span>` : ''}
+                    <button class="picvid-modal-close" onclick="App.closePicVideoViewer()">&times;</button>
+                </div>
+                <div class="picvid-modal-body">
+                    <button class="picvid-nav-btn picvid-nav-prev" onclick="event.stopPropagation();App.picVidGoPrev()" style="${idx>0?'':'display:none'}">&lsaquo;</button>
+                    <video class="picvid-video" controls autoplay src="/api/picture-video/${videoId}" preload="metadata"></video>
+                    <button class="picvid-nav-btn picvid-nav-next" onclick="event.stopPropagation();App.picVidGoNext()" style="${idx<this._picVidIds.length-1?'':'display:none'}">&rsaquo;</button>
+                </div>
+            </div>
+        </div>`;
+        document.body.insertAdjacentHTML('beforeend', html);
+
+        if (this._picVidKeyHandler) document.removeEventListener('keydown', this._picVidKeyHandler);
+        this._picVidKeyHandler = (e) => {
+            if (e.key === 'Escape') this.closePicVideoViewer();
+            if (e.key === 'ArrowLeft') this.picVidGoPrev();
+            if (e.key === 'ArrowRight') this.picVidGoNext();
+        };
+        document.addEventListener('keydown', this._picVidKeyHandler);
+    },
+
+    _picVidUpdateKey(modal, videoId) {
+        if (this._picVidKeyHandler) document.removeEventListener('keydown', this._picVidKeyHandler);
+        this._picVidKeyHandler = (e) => {
+            if (e.key === 'Escape') this.closePicVideoViewer();
+            if (e.key === 'ArrowLeft') this.picVidGoPrev();
+            if (e.key === 'ArrowRight') this.picVidGoNext();
+        };
+        document.addEventListener('keydown', this._picVidKeyHandler);
+    },
+
+    picVidGoPrev() {
+        if (this._picVidCurrentIndex > 0)
+            this.openPicVideoViewer(this._picVidIds[this._picVidCurrentIndex - 1]);
+    },
+
+    picVidGoNext() {
+        if (this._picVidCurrentIndex < this._picVidIds.length - 1)
+            this.openPicVideoViewer(this._picVidIds[this._picVidCurrentIndex + 1]);
+    },
+
+    closePicVideoViewer(event) {
+        if (event && event.target !== event.currentTarget) return;
+        const modal = document.querySelector('.picvid-modal-overlay');
+        if (modal) {
+            const vid = modal.querySelector('.picvid-video');
+            if (vid) { vid.pause(); vid.src = ''; }
+            modal.remove();
+        }
+        if (this._picVidKeyHandler) {
+            document.removeEventListener('keydown', this._picVidKeyHandler);
+            this._picVidKeyHandler = null;
+        }
+    },
+
     // ─── Track Table Renderer ────────────────────────────────
     renderTrackTable(tracks, showTrackNum = false) {
         return `<table class="track-list"><thead><tr>
@@ -11509,6 +13751,8 @@ const App = {
             if (!audio.duration) return;
             const pct = ((audio.currentTime / audio.duration) * 100) + '%';
             document.getElementById('progress-fill').style.width = pct;
+            const cursor = document.getElementById('progress-cursor');
+            if (cursor) cursor.style.left = pct;
             const mobileFill = document.getElementById('mobile-progress-fill');
             if (mobileFill) mobileFill.style.width = pct;
             document.getElementById('time-current').textContent = this.formatDuration(audio.currentTime);
@@ -12004,6 +14248,42 @@ const App = {
         return `${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
     },
 
+    // Shared song-card HTML builder used by all music track list contexts.
+    // opts: { playFn (string), showDots (bool), showAddPl (bool), favActive (bool) }
+    _songCardHtml(t, i, opts = {}) {
+        const artSrc  = this.getArtUrl(t);
+        const dur     = this.formatDuration(t.duration);
+        const favClass = opts.favActive ? 'active' : (t.isFavourite ? 'active' : '');
+        const fmt     = this.trackFormat(t);
+        const play    = opts.playFn;
+        const dots    = opts.showDots
+            ? `<button class="song-card-dots" onclick="event.stopPropagation(); App.showTrackMenu(${t.id}, event)" title="More options">&#8942;</button>`
+            : '';
+        const addPl   = opts.showAddPl
+            ? `<button class="song-card-add-pl" onclick="App.showAddToPlaylistPopup(${t.id}, this)" title="Add to playlist">+</button>`
+            : '';
+        return `<div class="song-card" onclick="App.${play}(${i})" data-track-id="${t.id}">
+                    <div class="song-card-art">
+                        ${artSrc
+                            ? `<img src="${artSrc}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="song-card-placeholder" style="display:none">&#9835;</span>`
+                            : `<span class="song-card-placeholder">&#9835;</span>`
+                        }
+                        <button class="song-card-play" onclick="event.stopPropagation(); App.${play}(${i})">&#9654;</button>
+                        ${dots}${addPl}
+                    </div>
+                    <div class="song-card-info">
+                        <div class="song-card-title">${this.esc(t.title)}</div>
+                        <div class="song-card-artist">${this.esc(t.artist)}</div>
+                        <div class="song-card-meta">
+                            <span>${this.esc(t.album)}</span>
+                            <span>${dur}</span>
+                            ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
+                        </div>
+                    </div>
+                    <button class="song-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
+                </div>`;
+    },
+
     formatSize(bytes) {
         if (!bytes) return '0 B';
         const units = ['B','KB','MB','GB','TB'];
@@ -12309,6 +14589,10 @@ const App = {
                 <span class="video-menu-icon">&#9733;</span><span>${this.t('videomenu.rate')}</span>
             </div>
             <div class="video-menu-divider"></div>
+            <div class="video-menu-item" onclick="App.downloadVideo(${videoId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span>${this.t('videomenu.download')}</span>
+            </div>
+            <div class="video-menu-divider"></div>
             <div class="video-menu-item video-menu-item-danger" onclick="App.deleteVideoFromDb(${videoId})">
                 <span class="video-menu-icon"><svg ${svgAttr}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg></span><span>${this.t('videomenu.removeFromDb')}</span>
             </div>`;
@@ -12337,6 +14621,265 @@ const App = {
     closeVideoMenu() {
         const m = document.getElementById('videoContextMenu');
         if (m) m.remove();
+    },
+
+    showMvMenu(mvId, event) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeVideoMenu();
+
+        const menu = document.createElement('div');
+        menu.id = 'videoContextMenu';
+        menu.className = 'video-context-menu';
+        const svgAttr = 'xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+        menu.innerHTML = `
+            <div class="video-menu-item" onclick="App.openMvEditModal(${mvId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span><span>${this.t('videomenu.editMetadata')}</span>
+            </div>`;
+
+        const rect = event.target.getBoundingClientRect();
+        menu.style.position = 'fixed';
+        menu.style.top = (rect.bottom + 4) + 'px';
+        menu.style.left = (rect.left - 140) + 'px';
+        document.body.appendChild(menu);
+
+        const menuRect = menu.getBoundingClientRect();
+        if (menuRect.right > window.innerWidth) menu.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
+        if (menuRect.left < 0) menu.style.left = '8px';
+        if (menuRect.bottom > window.innerHeight) menu.style.top = (rect.top - menuRect.height - 4) + 'px';
+
+        setTimeout(() => {
+            const close = (e) => {
+                if (!menu.contains(e.target)) { this.closeVideoMenu(); document.removeEventListener('click', close); }
+            };
+            document.addEventListener('click', close);
+        }, 0);
+    },
+
+    async openMvEditModal(mvId) {
+        this.closeVideoMenu();
+        const mv = await this.api(`musicvideos/${mvId}`);
+        if (!mv) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'mvEditOverlay';
+        overlay.className = 'video-edit-overlay';
+        overlay.innerHTML = `
+        <div class="video-edit-modal" style="max-width:420px">
+            <button class="video-edit-close" onclick="document.getElementById('mvEditOverlay').remove()">&times;</button>
+            <h2>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px">
+                    <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                </svg>
+                Edit Music Video
+            </h2>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">Title</label>
+                <input type="text" id="mvEditTitle" class="video-edit-input" value="${this.esc(mv.title || '')}">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">Artist</label>
+                <input type="text" id="mvEditArtist" class="video-edit-input" value="${this.esc(mv.artist || '')}">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('videoEdit.videoLocation')}</label>
+                <div style="display:flex;align-items:center;gap:6px">
+                    <input type="text" class="video-edit-input video-edit-location" value="${this.esc(mv.filePath || '')}" readonly>
+                    <button type="button" class="video-edit-copy-btn" data-path="${this.esc(mv.filePath || '')}" onclick="App._copyPath(this)" title="${this.t('videoEdit.copyPath')}">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="video-edit-actions">
+                <button class="video-edit-btn video-edit-btn-secondary" onclick="document.getElementById('mvEditOverlay').remove()">Cancel</button>
+                <button class="video-edit-btn video-edit-btn-primary" onclick="App.saveMvMetadata(${mvId})">Save</button>
+            </div>
+        </div>`;
+        overlay.addEventListener('mousedown', e => { overlay._mousedownOnBackdrop = (e.target === overlay); });
+        overlay.addEventListener('click', e => { if (e.target === overlay && overlay._mousedownOnBackdrop) overlay.remove(); });
+        document.body.appendChild(overlay);
+    },
+
+    async saveMvMetadata(mvId) {
+        const title = document.getElementById('mvEditTitle')?.value?.trim();
+        const artist = document.getElementById('mvEditArtist')?.value?.trim();
+        if (title === undefined || artist === undefined) return;
+        const res = await this.apiPut(`musicvideos/${mvId}`, { title, artist });
+        if (res) {
+            document.getElementById('mvEditOverlay')?.remove();
+            const card = document.querySelector(`.mv-card[data-mv-id="${mvId}"]`);
+            if (card) {
+                const t = card.querySelector('.mv-card-title');
+                const a = card.querySelector('.mv-card-artist');
+                if (t) t.textContent = title;
+                if (a) a.textContent = artist;
+            }
+        }
+    },
+
+    showSeriesMenu(seriesName, mediaType, videoId, event) {
+        event.preventDefault();
+        event.stopPropagation();
+        this.closeVideoMenu();
+
+        const menu = document.createElement('div');
+        menu.id = 'videoContextMenu';
+        menu.className = 'video-context-menu';
+
+        const check = (type) => mediaType === type ? '<span class="video-menu-check">&#10003;</span>' : '';
+        const svgAttr = 'xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+        const escapedName = seriesName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+        menu.innerHTML = `
+            <div class="video-menu-item" onclick="App.openSeriesDetail('${escapedName}'${mediaType === 'anime' ? ", 'anime'" : ''})">
+                <span class="video-menu-icon"><svg ${svgAttr}><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg></span><span>${this.t('videomenu.viewSeries', 'View Series')}</span>
+            </div>
+            <div class="video-menu-divider"></div>
+            <div class="video-menu-item" onclick="App.openVideoEditModal(${videoId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span><span>${this.t('videomenu.editMetadata')}</span>
+            </div>
+            ${mediaType === 'anime'
+                ? `<div class="video-menu-item" onclick="App.refetchAnimeMetadata(${videoId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></span><span>${this.t('videomenu.refetchJikan')}</span>
+            </div>`
+                : `<div class="video-menu-item" onclick="App.refetchVideoMetadata(${videoId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></span><span>${this.t('videomenu.refetchTmdb')}</span>
+            </div>`
+            }
+            <div class="video-menu-item" onclick="App.watchVideoTrailer(${videoId}, '${mediaType}', this)">
+                <span class="video-menu-icon"><svg ${svgAttr}><polygon points="5 3 19 12 5 21 5 3"/></svg></span><span>${this.t('newreleases.trailer')}</span>
+            </div>
+            <div class="video-menu-divider"></div>
+            <div class="video-menu-item" onclick="App.setVideoMediaType(${videoId}, 'movie')">
+                <span class="video-menu-icon"><svg ${svgAttr}><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg></span><span>${this.t('videomenu.setAsMovie')}</span>
+                ${check('movie')}
+            </div>
+            <div class="video-menu-item" onclick="App.setSeriesMediaType('${escapedName}', 'tv')">
+                <span class="video-menu-icon"><svg ${svgAttr}><rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/></svg></span><span>${this.t('videomenu.setAsTv')}</span>
+                ${check('tv')}
+            </div>
+            <div class="video-menu-item" onclick="App.setSeriesMediaType('${escapedName}', 'anime')">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></span><span>${this.t('videomenu.setAsAnime')}</span>
+                ${check('anime')}
+            </div>
+            <div class="video-menu-divider"></div>
+            <div class="video-menu-item" onclick="App.toggleVideoWatched(${videoId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><polyline points="20 6 9 17 4 12"/></svg></span><span>${this._isVideoWatched(videoId) ? this.t('videomenu.markUnwatched') : this.t('videomenu.markWatched')}</span>
+                ${this._isVideoWatched(videoId) ? '<span class="video-menu-check">&#10003;</span>' : ''}
+            </div>
+            <div class="video-menu-item" onclick="App.toggleVideoWatchlist(${videoId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></span><span>${this._watchlistIds.has(videoId) ? this.t('watchlist.remove') : this.t('watchlist.add')}</span>
+                ${this._watchlistIds.has(videoId) ? '<span class="video-menu-check">&#10003;</span>' : ''}
+            </div>
+            <div class="video-menu-divider"></div>
+            <div class="video-menu-item" onclick="App.openRatingPopup('video', ${videoId}, event)">
+                <span class="video-menu-icon">&#9733;</span><span>${this.t('videomenu.rate')}</span>
+            </div>
+            <div class="video-menu-divider"></div>
+            <div class="video-menu-item" onclick="App.downloadSeasonPicker('${escapedName}', '${mediaType}'); App.closeVideoMenu()">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span>${this.t('videomenu.downloadSeason', 'Download Season\u2026')}</span>
+            </div>
+            <div class="video-menu-divider"></div>
+            <div class="video-menu-item video-menu-item-danger" onclick="App.deleteVideoFromDb(${videoId})">
+                <span class="video-menu-icon"><svg ${svgAttr}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg></span><span>${this.t('videomenu.removeFromDb')}</span>
+            </div>`;
+
+        const rect = event.target.getBoundingClientRect();
+        menu.style.position = 'fixed';
+        menu.style.top = (rect.bottom + 4) + 'px';
+        menu.style.left = (rect.left - 140) + 'px';
+
+        document.body.appendChild(menu);
+
+        const menuRect = menu.getBoundingClientRect();
+        if (menuRect.right > window.innerWidth) menu.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
+        if (menuRect.left < 0) menu.style.left = '8px';
+        if (menuRect.bottom > window.innerHeight) menu.style.top = (rect.top - menuRect.height - 4) + 'px';
+
+        setTimeout(() => {
+            const close = (e) => {
+                if (!menu.contains(e.target)) { this.closeVideoMenu(); document.removeEventListener('click', close); }
+            };
+            document.addEventListener('click', close);
+        }, 0);
+    },
+
+    async downloadSeasonPicker(seriesName, mediaType) {
+        const mtParam = mediaType ? `&mediaType=${mediaType}` : '';
+        let data;
+        try {
+            data = await this.api(`videos?series=${encodeURIComponent(seriesName)}${mtParam}&sort=series&limit=500`);
+        } catch(e) { return; }
+        if (!data || !data.videos || data.videos.length === 0) return;
+
+        const episodes = data.videos;
+        const seasons = {};
+        episodes.forEach(ep => {
+            const s = ep.season || 0;
+            if (!seasons[s]) seasons[s] = [];
+            seasons[s].push(ep);
+        });
+        const seasonNums = Object.keys(seasons).map(Number).sort((a, b) => a - b);
+
+        const doDownload = (seasonNum) => {
+            const eps = seasons[seasonNum];
+            eps.forEach((ep, i) => {
+                setTimeout(() => this.downloadVideo(ep.id), i * 300);
+            });
+        };
+
+        if (seasonNums.length === 1) {
+            doDownload(seasonNums[0]);
+            return;
+        }
+
+        // Multiple seasons — show a small picker modal
+        const existing = document.getElementById('seasonPickerModal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'seasonPickerModal';
+        modal.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7)';
+
+        const seasonBtns = seasonNums.map(s => {
+            const label = s === 0 ? 'Specials' : `Season ${s}`;
+            const count = seasons[s].length;
+            return `<button onclick="App._downloadSeasonAndClose(${JSON.stringify(seasons[s].map(e=>e.id))})" style="display:block;width:100%;padding:10px 16px;margin-bottom:6px;background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;color:var(--text-primary);cursor:pointer;text-align:left;font-size:14px" onmouseenter="this.style.background='var(--bg-hover)'" onmouseleave="this.style.background='var(--bg-surface)'">${label} <span style="color:var(--text-secondary);font-size:12px">(${count} episode${count !== 1 ? 's' : ''})</span></button>`;
+        }).join('');
+
+        modal.innerHTML = `<div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:12px;padding:24px;width:300px;max-width:90vw">
+            <h3 style="margin:0 0 16px;font-size:16px">${this.t('videomenu.downloadSeason', 'Download Season\u2026')}</h3>
+            <p style="margin:0 0 14px;font-size:13px;color:var(--text-secondary)">${this.esc(seriesName)}</p>
+            ${seasonBtns}
+            <button onclick="document.getElementById('seasonPickerModal').remove()" style="width:100%;padding:8px;margin-top:4px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--text-secondary);cursor:pointer;font-size:13px">${this.t('btn.cancel', 'Cancel')}</button>
+        </div>`;
+
+        modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+        document.body.appendChild(modal);
+    },
+
+    _downloadSeasonAndClose(ids) {
+        const modal = document.getElementById('seasonPickerModal');
+        if (modal) modal.remove();
+        ids.forEach((id, i) => setTimeout(() => this.downloadVideo(id), i * 300));
+    },
+
+    downloadVideo(videoId) {
+        const a = document.createElement('a');
+        a.href = `/api/download/video/${videoId}`;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    },
+
+    downloadTrack(trackId) {
+        const a = document.createElement('a');
+        a.href = `/api/download/track/${trackId}`;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
     },
 
     async watchVideoTrailer(videoId, mediaType, el) {
@@ -12601,7 +15144,11 @@ const App = {
         menu.className = 'video-context-menu';
         menu.innerHTML = `
             <div class="video-menu-item" id="trMenuEdit">
-                <span class="video-menu-icon"><svg ${svgAttr}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span><span>Edit Track Metadata</span>
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span><span>${this.t('videomenu.editMetadata')}</span>
+            </div>
+            <div class="video-menu-divider"></div>
+            <div class="video-menu-item" id="trMenuDownload">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span>${this.t('videomenu.download')}</span>
             </div>`;
 
         const rect = event.target.getBoundingClientRect();
@@ -12613,6 +15160,10 @@ const App = {
         menu.querySelector('#trMenuEdit').addEventListener('click', () => {
             menu.remove();
             this.openTrackEditModal(trackId);
+        });
+        menu.querySelector('#trMenuDownload').addEventListener('click', () => {
+            menu.remove();
+            this.downloadTrack(trackId);
         });
 
         const menuRect = menu.getBoundingClientRect();
@@ -13062,16 +15613,29 @@ const App = {
         const res = await fetch(`/api/videos/${videoId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mediaType: newType })
+            // documentaries are always standalone — explicitly tell the backend not to propagate
+            body: JSON.stringify({ mediaType: newType, propagateToSeries: newType !== 'documentary' })
         });
         if (!res.ok) return;
-        // When marking as anime, kick off Jikan enrichment and navigate to anime page
         if (newType === 'anime') {
             fetch(`/api/videos/${videoId}/fetch-anime`, { method: 'POST' }).catch(() => {});
             this.navigate('anime');
         } else {
             this.loadVideosPage();
         }
+    },
+
+    // Change MediaType for all episodes of an entire series at once (used by series card 3-dot menu)
+    async setSeriesMediaType(seriesName, newType) {
+        this.closeVideoMenu();
+        const res = await fetch('/api/videos/batch-by-series', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ seriesName, mediaType: newType })
+        });
+        if (!res.ok) return;
+        if (newType === 'anime') this.navigate('anime');
+        else this.loadVideosPage();
     },
 
     async deleteVideoFromDb(videoId) {
@@ -13247,6 +15811,16 @@ const App = {
             </div>
 
             <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('videoEdit.videoLocation')}</label>
+                <div style="display:flex;align-items:center;gap:6px">
+                    <input type="text" class="video-edit-input video-edit-location" value="${this.esc(v.filePath || '')}" readonly>
+                    <button type="button" class="video-edit-copy-btn" data-path="${this.esc(v.filePath || '')}" onclick="App._copyPath(this)" title="${this.t('videoEdit.copyPath')}">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="video-edit-form-group">
                 <label class="video-edit-label">Poster Image</label>
                 <input type="file" id="videoEditPosterFile" class="video-edit-input" accept="image/jpeg,image/jpg,image/png" onchange="App.handleVideoEditPoster(event)">
                 <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">Min 300x450px &bull; Resized to 500x750px &bull; JPG/PNG only</div>
@@ -13278,6 +15852,15 @@ const App = {
         const el = document.getElementById('videoEditOverlay');
         if (el) el.remove();
         this._videoEditPosterData = null;
+    },
+
+    _copyPath(btn) {
+        const path = btn.dataset.path;
+        navigator.clipboard.writeText(path).then(() => {
+            const svg = btn.innerHTML;
+            btn.textContent = '✓';
+            setTimeout(() => { btn.innerHTML = svg; }, 1500);
+        });
     },
 
     handleVideoEditPoster(event) {
@@ -14033,6 +16616,20 @@ const App = {
                     </div>
                     <div id="gbm-title"></div>
                     <div id="gbm-meta"></div>
+                    <div id="gbm-track-actions">
+                        <button id="gbm-fav-btn" class="gbm-action-btn" onclick="App._gbMusicToggleFav()" title="Favorite">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+                        </button>
+                        <div style="position:relative">
+                            <button id="gbm-playlist-btn" class="gbm-action-btn" onclick="App._gbMusicTogglePlaylist()" title="Add to Playlist">
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            </button>
+                            <div id="gbm-playlist-dropdown"></div>
+                        </div>
+                        <button id="gbm-lyrics-btn" class="gbm-action-btn" onclick="App._gbMusicShowLyrics()" title="Lyrics">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                        </button>
+                    </div>
                     <div id="gbm-progress-wrap">
                         <div id="gbm-bar" onclick="App._gbMusicPlayerSeek(event)">
                             <div id="gbm-track"></div>
@@ -14890,10 +17487,6 @@ const App = {
         this._gbRemoteCheckTimer = setInterval(() => this._gbCheckGoBigStatus(), 1500);
     },
 
-    _gbStopRemoteCheck() {
-        if (this._gbRemoteCheckTimer) { clearInterval(this._gbRemoteCheckTimer); this._gbRemoteCheckTimer = null; }
-    },
-
     async _gbCheckGoBigStatus() {
         try {
             const data = await this.api('gobig/status');
@@ -14932,7 +17525,7 @@ const App = {
     // ─── Mobile: "Start Go Big" floating button ────────────────────────────
 
     _gbShowMobileStartBtn() {
-        if (this._gbMobileStartBtn) return;
+        if (this._gbMobileStartBtn) return; // already created — don't interfere with hide timer
         const btn = document.createElement('button');
         btn.id = 'gb-mobile-start';
         btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0">
@@ -14942,13 +17535,29 @@ const App = {
             btn.disabled = true;
             btn.querySelector('svg').outerHTML = '';
             btn.textContent = 'Starting…';
+            clearTimeout(this._gbMobileStartBtnTimer);
             await fetch('/api/gobig/request', { method: 'POST' }).catch(() => {});
         };
         document.body.appendChild(btn);
         this._gbMobileStartBtn = btn;
+        this._gbScheduleMobileStartBtnHide();
+    },
+
+    _gbScheduleMobileStartBtnHide() {
+        clearTimeout(this._gbMobileStartBtnTimer);
+        this._gbMobileStartBtnTimer = setTimeout(() => {
+            if (this._gbMobileStartBtn) this._gbMobileStartBtn.classList.add('gb-btn-hidden');
+        }, 10000);
+    },
+
+    _gbResetMobileStartBtnTimer() {
+        if (!this._gbMobileStartBtn || this._gbRemoteActive) return;
+        this._gbMobileStartBtn.classList.remove('gb-btn-hidden');
+        this._gbScheduleMobileStartBtnHide();
     },
 
     _gbHideMobileStartBtn() {
+        clearTimeout(this._gbMobileStartBtnTimer);
         if (this._gbMobileStartBtn) { this._gbMobileStartBtn.remove(); this._gbMobileStartBtn = null; }
     },
 
@@ -15313,10 +17922,12 @@ const App = {
                         const items = cast.map(c => {
                             const photo = c.photo ? `/videometa/${c.photo}` : '';
                             const click = c.actorId ? `onclick="App.openActorDetail(${c.actorId})"` : '';
+                            const epLine = c.episodeCount ? `<div class="gbd-cast-eps">${c.episodeCount} ep.</div>` : '';
                             return `<div class="gbd-cast-item" ${click} style="${c.actorId ? 'cursor:pointer' : ''}">
                                 <div class="gbd-cast-photo">${photo ? `<img src="${photo}" loading="lazy" alt="" onerror="this.style.display='none'">` : `<div class="gbd-cast-ph"></div>`}</div>
                                 <div class="gbd-cast-name">${this.esc(c.name)}</div>
                                 <div class="gbd-cast-char">${this.esc(c.character || '')}</div>
+                                ${epLine}
                             </div>`;
                         }).join('');
                         castHtml = `<div class="gbd-cast-section">
@@ -15409,7 +18020,10 @@ const App = {
             playBtn.innerHTML = `<svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" opacity=".25"/><path d="M12 2a10 10 0 0 1 10 10"/></svg> Loading…`;
         }
         try {
-            const streamInfo = await this.api(`stream-info/${videoId}`);
+            const _gbHevcOk = typeof MediaSource !== 'undefined' && (
+                MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L123.B0"') ||
+                MediaSource.isTypeSupported('video/mp4; codecs="hev1.1.6.L123.B0"'));
+            const streamInfo = await this.api(`stream-info/${videoId}${_gbHevcOk ? '' : '?forceTranscode=true'}`);
             if (!this._gbOverlay) return;
 
             if (streamInfo?.transcodeId) this._gbTranscodeId = streamInfo.transcodeId;
@@ -15532,10 +18146,12 @@ const App = {
                         const items = cast.map(c => {
                             const photo = c.photo ? `/videometa/${c.photo}` : '';
                             const click = c.actorId ? `onclick="App.openActorDetail(${c.actorId})"` : '';
+                            const epLine = c.episodeCount ? `<div class="gbd-cast-eps">${c.episodeCount} ep.</div>` : '';
                             return `<div class="gbd-cast-item" ${click} style="${c.actorId ? 'cursor:pointer' : ''}">
                                 <div class="gbd-cast-photo">${photo ? `<img src="${photo}" loading="lazy" alt="" onerror="this.style.display='none'">` : `<div class="gbd-cast-ph"></div>`}</div>
                                 <div class="gbd-cast-name">${this.esc(c.name)}</div>
                                 <div class="gbd-cast-char">${this.esc(c.character || '')}</div>
+                                ${epLine}
                             </div>`;
                         }).join('');
                         castHtml = `<div class="gbd-cast-section">
@@ -16010,6 +18626,14 @@ const App = {
         const metaParts = [track.artist, track.album].filter(Boolean);
         if (metaEl) metaEl.textContent = metaParts.join(' · ');
 
+        // Sync fav button state
+        const favBtn = ol.querySelector('#gbm-fav-btn');
+        if (favBtn) favBtn.classList.toggle('gbm-btn-active', !!track.isFavourite);
+
+        // Close playlist dropdown if open from previous track
+        const plDd = ol.querySelector('#gbm-playlist-dropdown');
+        if (plDd) { plDd.innerHTML = ''; plDd.classList.remove('open'); }
+
         // Next track label
         let nextEl_text = '';
         if (this._gbMusicRepeat === 'one') {
@@ -16123,7 +18747,95 @@ const App = {
         if (gbTopExit)  gbTopExit.style.display  = '';
         this._gbMusicTracks = [];
         this._gbMusicIdx = -1;
+        // If Go Big was launched just for the Android player, exit it fully
+        if (this._androidPlayerFromClassic) {
+            this._androidPlayerFromClassic = false;
+            // Restore hidden elements before teardown (stopGoBigMode removes the DOM anyway)
+            const scroll  = ol.querySelector('#gb-scroll');
+            const topbar  = ol.querySelector('#gb-topbar');
+            if (scroll)  scroll.style.display  = '';
+            if (topbar)  topbar.style.display  = '';
+            this.stopGoBigMode();
+            return;
+        }
         setTimeout(() => this._gbApplyFocus(), 50);
+    },
+
+    async _gbMusicToggleFav() {
+        const track = this._gbMusicTracks?.[this._gbMusicIdx];
+        if (!track) return;
+        const result = await this.apiPost(`tracks/${track.id}/favourite`);
+        if (result) {
+            track.isFavourite = result.isFavourite;
+            const btn = this._gbOverlay?.querySelector('#gbm-fav-btn');
+            if (btn) btn.classList.toggle('gbm-btn-active', result.isFavourite);
+            // Sync classic player fav button if same track
+            if (this.currentTrack?.id === track.id) {
+                document.getElementById('btn-player-fav')?.classList.toggle('active', result.isFavourite);
+            }
+        }
+    },
+
+    async _gbMusicTogglePlaylist() {
+        const track = this._gbMusicTracks?.[this._gbMusicIdx];
+        if (!track) return;
+        const dd = this._gbOverlay?.querySelector('#gbm-playlist-dropdown');
+        if (!dd) return;
+        if (dd.classList.contains('open')) { dd.innerHTML = ''; dd.classList.remove('open'); return; }
+        dd.innerHTML = '<div class="pl-dropdown-title">Add to playlist</div><div class="pl-dropdown-empty">Loading…</div>';
+        dd.classList.add('open');
+        const playlists = await this.api('playlists');
+        let inner = '<div class="pl-dropdown-title">Add to playlist</div>';
+        if (playlists && playlists.length > 0) {
+            playlists.forEach(p => {
+                inner += `<div class="pl-dropdown-item" onclick="event.stopPropagation();App._gbMusicAddToPlaylist(${p.id},${track.id},this)">${this.esc(p.name)} <span style="opacity:.5;font-size:11px">(${p.trackCount})</span></div>`;
+            });
+        } else {
+            inner += '<div class="pl-dropdown-empty">No playlists yet</div>';
+        }
+        dd.innerHTML = inner;
+    },
+
+    async _gbMusicAddToPlaylist(playlistId, trackId, el) {
+        if (el) { el.style.pointerEvents = 'none'; el.textContent = 'Adding…'; }
+        const result = await this.apiPost(`playlists/${playlistId}/tracks`, { trackId });
+        if (result && el) {
+            el.classList.add('pl-added');
+            el.innerHTML = '\u2714 Added!';
+            setTimeout(() => {
+                const dd = this._gbOverlay?.querySelector('#gbm-playlist-dropdown');
+                if (dd) { dd.innerHTML = ''; dd.classList.remove('open'); }
+            }, 1200);
+        }
+    },
+
+    async _gbMusicShowLyrics() {
+        const track = this._gbMusicTracks?.[this._gbMusicIdx];
+        if (!track) return;
+        const gbmBtn = this._gbOverlay?.querySelector('#gbm-lyrics-btn');
+
+        // If already open, close it
+        const existing = document.getElementById('lyrics-overlay');
+        if (existing && existing.style.display === 'flex') {
+            existing.style.display = 'none';
+            if (gbmBtn) gbmBtn.classList.remove('gbm-btn-active');
+            return;
+        }
+
+        if (gbmBtn) gbmBtn.classList.add('gbm-btn-active');
+
+        // Temporarily set currentTrack so toggleLyrics can fetch correctly
+        const saved = this.currentTrack;
+        this.currentTrack = track;
+        await this.toggleLyrics();
+        this.currentTrack = saved;
+
+        // Move lyrics overlay inside #gb-overlay so it sits above z-index:4000
+        const overlay = document.getElementById('lyrics-overlay');
+        if (overlay && this._gbOverlay && !this._gbOverlay.contains(overlay)) {
+            this._gbOverlay.appendChild(overlay);
+            overlay.style.zIndex = '4100';
+        }
     },
 
     _gbMusicToggleShuffle() {

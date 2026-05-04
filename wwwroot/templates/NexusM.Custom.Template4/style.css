@@ -1,0 +1,398 @@
+/* -------------------------------------------------------------------
+   NexusM Custom Template 4 - "PearTV"
+   Inspired by Jellyfin's AppleTV theme — soft light layout,
+   pastel blue-grey tones, gradient topbar, topbar navigation.
+   ------------------------------------------------------------------- */
+
+/* ── 1. CSS variable overrides ─────────────────────────────────── */
+html:root,
+body.theme-blue, body.theme-purple, body.theme-emerald,
+body.theme-sky-grey, body.theme-sky-blue {
+  --accent:            #00a4dc;
+  --accent-hover:      #0cb0e8;
+  --accent-dim:        rgba(0,164,220,0.16);
+  --bg-primary:        #d5e9f2;
+  --bg-secondary:      #c2daea;
+  --bg-surface:        #eaf4f8;
+  --bg-hover:          rgba(0,164,220,0.10);
+  --bg-active:         rgba(0,164,220,0.18);
+  --border:            rgba(0,0,0,0.10);
+  --text-primary:      rgba(0,0,0,0.87);
+  --text-secondary:    rgba(0,0,0,0.55);
+  --text-muted:        rgba(0,0,0,0.36);
+  --radius:            8px;
+  --radius-sm:         6px;
+  --radius-lg:         14px;
+  /* Hide sidebar — PearTV uses topbar navigation */
+  --sidebar-width:     0px;
+  --sidebar-collapsed: 0px;
+  /* Single-row topbar */
+  --topbar-height:     56px;
+}
+
+/* ── 2. Grid: no sidebar, topbar full-width ─────────────────────── */
+.app-container {
+  grid-template-columns: 0 1fr !important;
+  grid-template-areas:
+    "topbar topbar"
+    "content content"
+    "player player" !important;
+}
+#sidebar { display: none !important; }
+
+/* ── 3. Body / content background ─────────────────────────────── */
+body, #app, .app-container {
+  background: #d5e9f2 !important;
+}
+#main-content {
+  background: #d5e9f2 !important;
+}
+
+/* ── 4. Topbar — AppleTV gradient header ──────────────────────── */
+header.topbar {
+  background: linear-gradient(90deg,
+    #bcbcbc 0%, #a7b4b7 25%, #beb5a5 50%, #adbec2 75%, #b9c7cb 100%
+  ) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-bottom: 1px solid rgba(0,0,0,0.12) !important;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.18) !important;
+  display: flex !important;
+  align-items: stretch !important;
+  padding: 0 !important;
+  height: var(--topbar-height) !important;
+  min-height: var(--topbar-height) !important;
+}
+header.topbar .topbar-btn {
+  color: rgba(0,0,0,0.65) !important;
+  border-radius: var(--radius-sm) !important;
+}
+header.topbar .topbar-btn:hover {
+  color: rgba(0,0,0,0.87) !important;
+  background: rgba(0,0,0,0.08) !important;
+}
+
+/* ── 5. PearTV nav bar ─────────────────────────────────────────── */
+#peartv-bar {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0 18px;
+  gap: 6px;
+}
+
+/* ── 6. Logo ───────────────────────────────────────────────────── */
+#peartv-logo {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: rgba(0,0,0,0.80);
+  text-decoration: none;
+  flex-shrink: 0;
+  margin-right: 12px;
+  white-space: nowrap;
+}
+#peartv-logo .ptv-dot { color: #00a4dc; }
+
+/* ── 7. Nav links ──────────────────────────────────────────────── */
+#peartv-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#peartv-nav::-webkit-scrollbar { display: none; }
+
+a[data-peartv-link] {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 13px;
+  border-radius: 20px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: rgba(0,0,0,0.60);
+  text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+  cursor: pointer;
+}
+a[data-peartv-link]:hover {
+  color: rgba(0,0,0,0.87);
+  background: rgba(255,255,255,0.30);
+}
+a[data-peartv-link].active {
+  color: rgba(0,0,0,0.87);
+  background: rgba(255,255,255,0.50);
+  font-weight: 600;
+}
+a[data-peartv-link] svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* ── 8. Right slot (search + actions) ─────────────────────────── */
+#peartv-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+#peartv-right .search-box,
+#peartv-right .topbar-actions { margin: 0 !important; }
+
+/* Hide breadcrumb / sidebar toggle */
+header.topbar #sidebar-expand-btn,
+header.topbar .breadcrumb,
+header.topbar #page-title { display: none !important; }
+
+/* ── 9. Player bar ─────────────────────────────────────────────── */
+#player-bar {
+  background: linear-gradient(90deg,
+    #bcbcbc 0%, #a7b4b7 25%, #beb5a5 50%, #adbec2 75%, #b9c7cb 100%
+  ) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border-top: 1px solid rgba(0,0,0,0.12) !important;
+  box-shadow: 0 -1px 6px rgba(0,0,0,0.15) !important;
+}
+#player-bar * { color: rgba(0,0,0,0.80) !important; }
+#player-bar .player-title,
+#player-bar #player-title { color: rgba(0,0,0,0.87) !important; font-weight: 600 !important; }
+#player-bar #player-artist { color: rgba(0,0,0,0.55) !important; }
+.seek-track, .progress-track {
+  background: rgba(0,0,0,0.14) !important;
+}
+.seek-fill, .progress-fill {
+  background: #00a4dc !important;
+}
+#player-bar .topbar-btn,
+#player-bar button {
+  color: rgba(0,0,0,0.65) !important;
+}
+#player-bar .topbar-btn:hover,
+#player-bar button:hover {
+  color: rgba(0,0,0,0.87) !important;
+  background: rgba(0,0,0,0.08) !important;
+}
+
+/* ── 10. Cards ─────────────────────────────────────────────────── */
+.video-card, .track-card, .album-card, .movie-card, .media-card {
+  background: rgba(255,255,255,0.72) !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.10) !important;
+  transition: transform 0.18s, box-shadow 0.18s, border-color 0.18s !important;
+}
+.video-card:hover, .track-card:hover, .album-card:hover,
+.movie-card:hover, .media-card:hover {
+  transform: translateY(-2px) scale(1.01) !important;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.14) !important;
+  border-color: rgba(0,164,220,0.35) !important;
+}
+.video-card .card-title, .track-card .card-title,
+.album-card .card-title, .movie-card .card-title {
+  color: rgba(0,0,0,0.87) !important;
+}
+.video-card .card-meta, .track-card .card-meta,
+.album-card .card-meta, .movie-card .card-meta {
+  color: rgba(0,0,0,0.55) !important;
+}
+
+/* ── 11. Buttons ───────────────────────────────────────────────── */
+.btn-primary, button.btn-primary {
+  background: #00a4dc !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+  border-radius: 20px !important;
+  border: none !important;
+}
+.btn-primary:hover { background: #0cb0e8 !important; }
+
+.btn-secondary, button.btn-secondary {
+  border: 1.5px solid rgba(0,164,220,0.45) !important;
+  color: #00a4dc !important;
+  border-radius: 20px !important;
+  background: rgba(255,255,255,0.50) !important;
+}
+.btn-secondary:hover { background: rgba(0,164,220,0.12) !important; }
+
+/* ── 12. Inputs ────────────────────────────────────────────────── */
+input[type="text"], input[type="password"], input[type="search"],
+input[type="email"], select, textarea {
+  background: rgba(255,255,255,0.80) !important;
+  border: 1px solid rgba(0,0,0,0.14) !important;
+  color: rgba(0,0,0,0.87) !important;
+  border-radius: var(--radius-sm) !important;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: #00a4dc !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(0,164,220,0.20) !important;
+}
+
+/* ── 13. Settings sections ─────────────────────────────────────── */
+.settings-section {
+  background: rgba(255,255,255,0.65) !important;
+  border: 1px solid rgba(0,0,0,0.08) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08) !important;
+}
+.settings-section h3 {
+  color: #00a4dc !important;
+  border-bottom: 1px solid rgba(0,164,220,0.18) !important;
+}
+
+/* ── 14. Dialogs / modals ──────────────────────────────────────── */
+/* Use specific selectors only — [class*="modal"] would match nexus-modal-* children */
+.modal-box, .dialog-box {
+  background: rgba(255,255,255,0.97) !important;
+  border: 1px solid rgba(0,0,0,0.10) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.20) !important;
+}
+/* Settings Saved modal */
+.nexus-modal-overlay {
+  background: rgba(0,0,0,0.45) !important;
+}
+.nexus-modal {
+  background: rgba(255,255,255,0.97) !important;
+  border: 1px solid rgba(0,0,0,0.10) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: 0 12px 48px rgba(0,0,0,0.22) !important;
+}
+.nexus-modal-icon svg { stroke: #00a4dc !important; }
+.nexus-modal-title {
+  color: rgba(0,0,0,0.87) !important;
+  font-weight: 700 !important;
+}
+.nexus-modal-body {
+  color: rgba(0,0,0,0.58) !important;
+}
+.nexus-modal-btn {
+  background: #00a4dc !important;
+  color: #ffffff !important;
+  border-radius: 20px !important;
+  padding: 9px 36px !important;
+  font-weight: 600 !important;
+  border: none !important;
+}
+.nexus-modal-btn:hover {
+  background: #0cb0e8 !important;
+  opacity: 1 !important;
+}
+
+/* ── 15. Scrollbars ────────────────────────────────────────────── */
+* { scrollbar-color: rgba(0,0,0,0.22) rgba(0,0,0,0.05); scrollbar-width: thin; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: rgba(0,0,0,0.05); }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.22); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.35); }
+
+/* ── 16. Progress / watched ────────────────────────────────────── */
+.progress-bar-fill, .watch-progress-fill {
+  background: #00a4dc !important;
+}
+
+/* ── 17. Selection ─────────────────────────────────────────────── */
+::selection {
+  background: rgba(0,164,220,0.28);
+  color: rgba(0,0,0,0.87);
+}
+
+/* ── 18. Section headings / row titles ─────────────────────────── */
+.section-title, .row-title, h2, h3 {
+  color: rgba(0,0,0,0.80) !important;
+}
+
+/* ── 19. Home page action buttons — override transparent dark-bg defaults ── */
+/* "What's New Online?" */
+.nr-home-btn {
+  background: rgba(5,150,105,0.15) !important;
+  border-color: rgba(5,150,105,0.55) !important;
+  color: #065f46 !important;
+}
+.nr-home-btn:hover {
+  background: rgba(5,150,105,0.28) !important;
+  border-color: rgba(5,150,105,0.80) !important;
+}
+.nr-home-btn .insights-btn-icon { stroke: #065f46 !important; }
+
+/* "How to Watch?" (wtw-home-btn reuses insights-btn base) */
+.wtw-home-btn {
+  background: rgba(0,164,220,0.14) !important;
+  border-color: rgba(0,164,220,0.50) !important;
+  color: #0369a1 !important;
+}
+.wtw-home-btn:hover {
+  background: rgba(0,164,220,0.26) !important;
+  border-color: rgba(0,164,220,0.75) !important;
+}
+.wtw-home-btn .insights-btn-icon { stroke: #0369a1 !important; }
+
+/* "Smart Insights" */
+.insights-btn:not(.nr-home-btn):not(.wtw-home-btn) {
+  background: rgba(109,40,217,0.12) !important;
+  border-color: rgba(109,40,217,0.40) !important;
+  color: #5b21b6 !important;
+}
+.insights-btn:not(.nr-home-btn):not(.wtw-home-btn):hover {
+  background: rgba(109,40,217,0.22) !important;
+  border-color: rgba(109,40,217,0.65) !important;
+}
+.insights-btn:not(.nr-home-btn):not(.wtw-home-btn) .insights-btn-icon {
+  stroke: #5b21b6 !important;
+}
+
+/* ── 21. Responsive ────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  a[data-peartv-link] span { display: none; }
+  a[data-peartv-link] { padding: 6px 8px; }
+  #peartv-logo { margin-right: 6px; }
+}
+
+/* ── 22. 3-dot card menu button — keep dark bg so white dots stay visible ── */
+/* Default hover in app.css uses rgba(255,255,255,.2) — transparent on light cards */
+.mv-card-menu-btn {
+  background: rgba(0,0,0,0.72) !important;
+  color: #fff !important;
+}
+.mv-card-menu-btn:hover,
+.mv-card-menu-btn:active,
+.mv-card-menu-btn:focus {
+  background: rgba(0,0,0,0.88) !important;
+  color: #fff !important;
+}
+
+/* ── 23. Context menu popup — light theme override ─────────────── */
+/* Default app.css uses dark #1e1e1e bg with white text rules */
+.video-context-menu {
+  background: #ffffff !important;
+  border: 1px solid rgba(0,0,0,0.12) !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.16) !important;
+}
+.video-menu-item {
+  color: rgba(0,0,0,0.80) !important;
+}
+.video-menu-item:hover {
+  background: rgba(0,164,220,0.10) !important;
+}
+.video-menu-divider {
+  background: rgba(0,0,0,0.08) !important;
+}
+.video-menu-check {
+  color: #00a4dc !important;
+}
+
+/* ── 24. Android player button — keep green in light player bar ─── */
+/* #player-bar * { color: !important } ties on specificity — use double-ID to win */
+#player-bar #btn-android-player,
+#player-bar #btn-android-player svg {
+  color: #22c55e !important;
+  stroke: #22c55e !important;
+}
