@@ -22,6 +22,7 @@ public class TvChannelsDbContext : DbContext
             entity.HasIndex(e => e.Name);
             entity.HasIndex(e => e.Country);
             entity.HasIndex(e => e.Genre);
+            entity.HasIndex(e => e.Language);
             entity.HasIndex(e => e.StreamUrl).IsUnique();
             entity.HasIndex(e => e.DateAdded);
         });
