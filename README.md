@@ -154,6 +154,18 @@ NexusM uses open-source libraries under their respective licenses (MIT, Apache-2
 
 ---
 
+<img width="1655" height="693" alt="Image" src="https://github.com/user-attachments/assets/991bd589-c5de-4801-a0ce-c99425f65993" />
+
+<img width="1877" height="1386" alt="Image" src="https://github.com/user-attachments/assets/3617d976-121b-494b-aa50-daab4c7976e3" />
+
+<img width="2506" height="1331" alt="Image" src="https://github.com/user-attachments/assets/e17367ac-7046-406b-a357-e0fc9aa65d73" />
+
+<img width="1877" height="1031" alt="Image" src="https://github.com/user-attachments/assets/d9a22d4d-7681-4d85-86ee-b55744bc6c2b" />
+
+<img width="1877" height="1024" alt="Image" src="https://github.com/user-attachments/assets/304a6148-7648-4115-aa30-9ba5727365c1" />
+
+<img width="2500" height="1367" alt="Image" src="https://github.com/user-attachments/assets/32f94ee8-e281-425a-9c76-70504c0cdb83" />
+
 ![Image](https://github.com/user-attachments/assets/3c4d404c-8993-480e-8713-b378d5cc13ad)
 ![Image](https://github.com/user-attachments/assets/159ff5df-2309-4c91-a75e-7eec8ee0038e)
 ![Image](https://github.com/user-attachments/assets/273f2f67-4d2e-49b2-8928-3e3da2b8cb7d)
