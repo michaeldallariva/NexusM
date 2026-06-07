@@ -32,7 +32,11 @@ NexusM bundles or depends on the following open-source libraries:
   VersOne.Epub 3.3.x                             MIT           vers one
   PDFtoImage 5.2.x                               MIT           David Sungaila
   SkiaSharp (transitive, via PDFtoImage)         MIT           Microsoft / Xamarin
+  QRCoder 1.4.x                                  MIT           Raffael Herrmann / QRCoder contributors
+  Sdcb.LibRaw 0.21.x (C# wrapper)                MIT           Zhang Jinyao / Sdcb contributors
   JSZip 3.10.x  [frontend]                       MIT           Stuart Knightley, David Duponchel et al.
+  Leaflet.MarkerCluster 1.5.x  [frontend]        MIT           Dave Leaver and contributors
+  Pannellum 2.5.6  [frontend]                    MIT           Matthew Petroff
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   MetadataExtractor 2.8.x                        Apache-2.0    Drew Noakes and contributors
   XmpCore (transitive, via MetadataExtractor)    Apache-2.0    Adobe Systems / XmpCore contributors
@@ -46,8 +50,10 @@ NexusM bundles or depends on the following open-source libraries:
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   TagLib# (TagLibSharp) 2.3.x                    LGPL-2.1      Novell, Inc.; Scott Peterson; Brian Nickel
                                                                Gabriel Burt; Lluis Sanchez Gual et al.
+  LibRaw 0.21.x (native, via Sdcb.LibRaw)        LGPL-2.1+     LibRaw Project contributors
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   epub.js  [frontend]                            BSD-2-Clause  Frederick Giasson and contributors
+  Leaflet.js 1.9.4  [frontend]                   BSD-2-Clause  Vladimir Agafonkin, CloudMade
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   ini-parser-netstandard 2.5.x                   Unlicense     Ricardo Amores Hernández and contributors
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
