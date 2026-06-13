@@ -58,7 +58,7 @@ NexusM bundles or depends on the following open-source libraries:
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   ini-parser-netstandard 2.5.x                   Unlicense     Ricardo Amores Hernández and contributors
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
-  FFmpeg (external binary, optional)             LGPL-2.1 or   FFmpeg Contributors
+  FFmpeg (external binary, optional)             LGPL-2.1 or   Fabrice Bellard & FFmpeg Contributors
                                                  GPL-2.0+      https://ffmpeg.org/legal.html
   PDFium (native, via PDFtoImage)                BSD-3-Clause  The Chromium Authors / PDFium Authors
 
