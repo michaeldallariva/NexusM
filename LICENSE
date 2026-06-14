@@ -1,6 +1,6 @@
 NexusM — Media Library Manager
 Copyright (c) 2025–2026 NexusM.org
-Updated : 07-June-2026
+Updated : 14-June-2026
 
 ================================================================================
 NEXUSM LICENSE
@@ -66,6 +66,26 @@ NexusM bundles or depends on the following open-source libraries:
   For non-commercial / open-source use the Apache 2.0 terms apply.
   Commercial use requires a separate license: https://sixlabors.com/pricing
 
+================================================================================
+EXTERNAL DATA & CONTENT SOURCES
+================================================================================
+
+NexusM can optionally retrieve metadata and artwork from third-party online
+services. This content is owned by its respective providers and is subject to
+their terms; NexusM does not redistribute it and only fetches it on the user's
+behalf when an API key is configured.
+
+  Service          Content                       Attribution / Terms
+  ───────────────  ────────────────────────────  ──────────────────────────────────────
+  fanart.tv        Movie / TV posters, backdrops  Images licensed CC BY 3.0 — attribution
+                                                  required. © fanart.tv contributors.
+                                                  https://fanart.tv
+  TMDB             Movie / TV metadata, images    This product uses the TMDB API but is
+                                                  not endorsed or certified by TMDB.
+                                                  https://www.themoviedb.org
+  TVmaze           TV metadata                    Data under CC BY-SA 4.0 (licensing terms
+                                                  per TVmaze API). https://www.tvmaze.com
+
 --------------------------------------------------------------------------------
 License texts:
   MIT           https://opensource.org/licenses/MIT
@@ -75,4 +95,5 @@ License texts:
   BSD-3-Clause  https://opensource.org/licenses/BSD-3-Clause
   Unlicense     https://unlicense.org
   GPL-2.0+      https://www.gnu.org/licenses/gpl-2.0.html
+  CC BY 3.0     https://creativecommons.org/licenses/by/3.0/
 ================================================================================
