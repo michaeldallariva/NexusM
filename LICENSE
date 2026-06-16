@@ -1,6 +1,6 @@
 NexusM — Media Library Manager
 Copyright (c) 2025–2026 NexusM.org
-Updated : 14-June-2026
+Updated : 16-June-2026
 
 ================================================================================
 NEXUSM LICENSE
@@ -35,6 +35,8 @@ NexusM bundles or depends on the following open-source libraries:
   SkiaSharp (transitive, via PDFtoImage)         MIT           Microsoft / Xamarin
   QRCoder 1.4.x                                  MIT           Raffael Herrmann / QRCoder contributors
   Sdcb.LibRaw 0.21.x (C# wrapper)                MIT           Zhang Jinyao / Sdcb contributors
+  Sharpcaster 3.0.0                              MIT           Teemu Tapanila (Tapanila/SharpCaster)
+  Zeroconf 3.7.16 (transitive, via Sharpcaster)  MIT           Claire Novotny and contributors
   JSZip 3.10.x  [frontend]                       MIT           Stuart Knightley, David Duponchel et al.
   Leaflet.MarkerCluster 1.5.x  [frontend]        MIT           Dave Leaver and contributors
   Pannellum 2.5.6  [frontend]                    MIT           Matthew Petroff
@@ -55,6 +57,7 @@ NexusM bundles or depends on the following open-source libraries:
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   epub.js  [frontend]                            BSD-2-Clause  Frederick Giasson and contributors
   Leaflet.js 1.9.4  [frontend]                   BSD-2-Clause  Vladimir Agafonkin, CloudMade
+  Google.Protobuf 3.32.0 (transitive)            BSD-3-Clause  Google Inc.
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   ini-parser-netstandard 2.5.x                   Unlicense     Ricardo Amores Hernández and contributors
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
