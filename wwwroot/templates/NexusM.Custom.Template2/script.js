@@ -432,7 +432,15 @@
         }
       } else {
         var renderedRows = 0;
-        if (genres.length > 0) {
+        if (mediaType === 'documentary') {
+          /* Documentaries: skip genre sub-shelving (the genres API buckets them all
+             under "Documentary" but videos carry their own genre tags — only a few
+             match, leaving the rest invisible). Show one flat shelf instead. */
+          if (allVideos.length > 0) {
+            html += buildGenreRow('All Documentaries', allVideos.slice(0, 100), mediaType);
+            renderedRows++;
+          }
+        } else if (genres.length > 0) {
           var byGenre = groupByGenre(allVideos);
           genres.forEach(function (g) {
             var vids = byGenre[g] || [];

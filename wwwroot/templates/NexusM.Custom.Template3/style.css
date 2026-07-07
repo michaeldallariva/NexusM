@@ -217,6 +217,13 @@ hr, .divider {
   color: #00a4dc !important;
   border-radius: 2px !important;
 }
+.nav-badge {
+  color: #00a4dc !important;
+}
+#sidebar .sidebar-nav li a.active .nav-badge {
+  background: rgba(255,255,255,0.22) !important;
+  color: #fff !important;
+}
 
 /* ── 16. Responsive ─────────────────────────────────────────────── */
 @media (max-width: 768px) {

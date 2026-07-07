@@ -349,11 +349,148 @@ input:focus, select:focus, textarea:focus {
   stroke: #5b21b6 !important;
 }
 
+/* ── 20b. 9-dot more-menu button + panel ───────────────────────── */
+#ptv-more-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: rgba(0,0,0,0.60);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: color 0.15s, background 0.15s;
+}
+#ptv-more-btn:hover {
+  color: rgba(0,0,0,0.87);
+  background: rgba(255,255,255,0.35);
+}
+
+#ptv-more-panel {
+  position: fixed;
+  z-index: 9000;
+  background: rgba(255,255,255,0.97);
+  border: 1px solid rgba(0,0,0,0.12);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.16);
+  padding: 10px 8px 12px;
+  min-width: 190px;
+}
+
+.ptv-more-group-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(0,0,0,0.38);
+  padding: 6px 10px 4px;
+}
+.ptv-more-group-label:not(:first-child) {
+  margin-top: 6px;
+  border-top: 1px solid rgba(0,0,0,0.08);
+  padding-top: 10px;
+}
+
+.ptv-more-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: rgba(0,0,0,0.75);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, color 0.12s;
+}
+.ptv-more-item:hover {
+  background: rgba(0,164,220,0.10);
+  color: #0369a1;
+}
+.ptv-more-item svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  opacity: 0.70;
+}
+
+/* ── 20c. Collapsed search (icon-only by default, expands on click) ── */
+#peartv-right .search-box {
+  margin: 0 !important;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+#peartv-right .search-box input {
+  width: 0 !important;
+  padding: 7px 0 !important;
+  border: none !important;
+  background: transparent !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: width .25s ease, opacity .2s ease, padding .25s ease !important;
+}
+#peartv-right .search-box.ptv-search-open input {
+  width: 200px !important;
+  padding: 7px 15px 7px 32px !important;
+  border: 1px solid rgba(0,0,0,0.18) !important;
+  background: rgba(255,255,255,0.75) !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+#peartv-right .search-box .search-icon {
+  position: relative !important;
+  left: auto !important;
+  top: auto !important;
+  transform: none !important;
+  cursor: pointer;
+  color: rgba(0,0,0,0.65) !important;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  transition: color .15s, background .15s !important;
+  flex-shrink: 0;
+}
+#peartv-right .search-box .search-icon svg {
+  stroke: rgba(0,0,0,0.65) !important;
+  transition: stroke .15s !important;
+}
+#peartv-right .search-box .search-icon:hover {
+  color: rgba(0,0,0,0.87) !important;
+  background: rgba(255,255,255,0.35) !important;
+}
+#peartv-right .search-box .search-icon:hover svg {
+  stroke: rgba(0,0,0,0.87) !important;
+}
+#peartv-right .search-box.ptv-search-open .search-icon {
+  position: absolute !important;
+  left: 8px !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  padding: 0 !important;
+  background: none !important;
+}
+
 /* ── 21. Responsive ────────────────────────────────────────────── */
-@media (max-width: 768px) {
+/* Medium screens: tighten nav link size so more items fit */
+@media (max-width: 1400px) {
+  a[data-peartv-link] { padding: 5px 10px; font-size: 13px; }
+}
+@media (max-width: 1150px) {
+  a[data-peartv-link] { padding: 4px 7px; font-size: 12px; }
+  #peartv-logo { font-size: 15px; margin-right: 8px; }
+}
+@media (max-width: 900px) {
   a[data-peartv-link] span { display: none; }
   a[data-peartv-link] { padding: 6px 8px; }
-  #peartv-logo { margin-right: 6px; }
+  #peartv-logo { margin-right: 6px; font-size: 14px; }
 }
 
 /* ── 22. 3-dot card menu button — keep dark bg so white dots stay visible ── */

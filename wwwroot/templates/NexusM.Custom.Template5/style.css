@@ -257,6 +257,9 @@ input:focus, select:focus, textarea:focus {
   color: #e5a00d !important;
   border-radius: 2px !important;
 }
+.nav-badge {
+  color: #e5a00d !important;
+}
 
 /* ── 15. Selection ──────────────────────────────────────────────── */
 ::selection {

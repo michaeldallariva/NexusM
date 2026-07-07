@@ -19,6 +19,7 @@ const App = {
     musicPerPage: 100,
     musicSubView: 'all',
     musicFormat: '',
+    musicGenreFilter: '',
     _musicFormats: null,
     picturesPage: 1,
     picturesSort: 'recent',
@@ -34,6 +35,7 @@ const App = {
     _picMapInstance: null,
     _picScrollHandler: null,
     _videoScrollHandler: null,
+    _picturesPlace: null,
     ebooksPage: 1,
     ebooksSort: 'recent',
     ebooksCategory: null,
@@ -96,6 +98,14 @@ const App = {
     podcastEpisodes: [],
     podcastSearchFilter: '',
 
+    // Google Cast state (server-side — NexusM controls the device via /api/cast/*)
+    _castActive: false,         // true while a cast session is running
+    _castMediaType: null,       // 'audio' | 'video'
+    _castDeviceId: null,        // id of the device currently cast to
+    _castDeviceName: null,      // friendly name of that device
+    _castPaused: false,         // last sent play/pause state (for the player-bar toggle)
+    _castVideoMeta: null,       // { title, posterPath } for the open video/MV detail
+
     // Equalizer state
     _audioCtx: null,
     _eqSource: null,
@@ -105,6 +115,19 @@ const App = {
     _eqBands: [0, 0, 0, 0, 0, 0, 0, 0],
     _eqPreset: 'Flat',
     _eqPanelOpen: false,
+    // Streaming quality
+    _streamQuality: 'original',
+    _QUALITY_LEVELS: [
+        { id: 'original', label: 'ORIG', tip: 'Streaming Quality: Original (raw file)' },
+        { id: 'hq',  label: 'HQ',  tip: 'Streaming Quality: High (Opus 256 kbps)' },
+        { id: 'mq',  label: 'MQ',  tip: 'Streaming Quality: Medium (Opus 128 kbps)' },
+        { id: 'lq',  label: 'LQ',  tip: 'Streaming Quality: Low (Opus 96 kbps)' },
+    ],
+    // ReplayGain
+    _rgEnabled: false,
+    _rgMode: 'track',    // 'track' | 'album' | 'auto' (auto = album if present, else track)
+    _rgPreamp: 0,        // dB offset added on top of tag value
+    _rgGainNode: null,   // Web Audio GainNode inserted before EQ chain
     _eqFreqs: [60, 170, 310, 600, 1000, 3000, 6000, 12000],
     _eqTypes: ['lowshelf', 'peaking', 'peaking', 'peaking', 'peaking', 'peaking', 'peaking', 'highshelf'],
     _eqPresets: {
@@ -184,14 +207,21 @@ const App = {
 
     // ─── Init ────────────────────────────────────────────────
     async init() {
+        // Safety valve: if auth check stalls or throws, never leave the page permanently blank
+        const _revealBody = () => { document.body.style.visibility = ''; };
+        const _authGuardTimer = setTimeout(_revealBody, 5000);
+
         // Check authentication before loading app
+        // Capture language from session — returned even for unauthenticated users,
+        // so language loads immediately and never depends on /api/config/info succeeding.
+        let _sessionLang = 'en';
         try {
             const res = await fetch('/api/auth/session');
             if (res.ok) {
                 const session = await res.json();
                 if (session.securityByPin && !session.authenticated) {
                     window.location.href = '/login.html';
-                    return;
+                    return; // body stays hidden; redirect handles the transition
                 }
                 if (session.authenticated) {
                     this.userRole = session.role || 'guest';
@@ -200,16 +230,32 @@ const App = {
                     if (session.childSettings) {
                         try { this.childSettings = JSON.parse(session.childSettings); } catch(e) {}
                     }
+                } else if (!session.securityByPin) {
+                    // Server has PIN security disabled — no login required, all users are admin.
+                    // Set role here so applyRoleVisibility() doesn't hide Settings when the
+                    // server-side auto-login middleware couldn't authenticate the request
+                    // (e.g. Docker behind Tailscale or other reverse-proxy networking changes).
+                    this.userRole = 'admin';
                 }
                 this.securityByPin = !!session.securityByPin;
+                _sessionLang = session.language || 'en';
             } else if (res.status === 401) {
                 window.location.href = '/login.html';
+                return; // body stays hidden; redirect handles the transition
+            } else if (res.status === 403 && res.headers.get('X-Gate-Blocked') === '1') {
+                window.location.reload();
                 return;
             }
-        } catch (e) { /* continue loading */ }
+        } catch (e) { /* network error — reveal and continue loading */ }
+
+        // Auth passed (or unenforced) — reveal the app
+        clearTimeout(_authGuardTimer);
+        _revealBody();
 
         this.audioPlayer = document.getElementById('audio-player');
         this.loadEQState();
+        this.loadRGState();
+        this.loadStreamQualityState();
         this.bindNavigation();
         this.bindPlayer();
         this.bindSearch();
@@ -225,7 +271,13 @@ const App = {
         }
         this.loadBadgeCounts();
 
-        // Load saved language + Go Big autorun setting
+        // Load language from session immediately — works even when config/info is
+        // unavailable (proxy, gate, or auth issues). Falls back to English.
+        await this.loadLanguage(_sessionLang);
+
+        // Load full config (theme, template, additional settings). If this fails
+        // for any reason the language is already loaded above; only re-load lang
+        // when the authenticated config says a different language is preferred.
         let _initCfg = null;
         try {
             const cfgRes = await fetch('/api/config/info');
@@ -234,9 +286,16 @@ const App = {
                 this._initCfg = _initCfg;
                 this.applyTheme(_initCfg.theme || 'dark');
                 this.applyTemplate(_initCfg.uiTemplate || '');
-                await this.loadLanguage(_initCfg.language || 'en');
+                const cfgLang = _initCfg.language || 'en';
+                if (cfgLang !== this._langCode) await this.loadLanguage(cfgLang);
             }
-        } catch (e) { /* default to en */ }
+        } catch (e) { /* language already loaded from session */ }
+
+        // Show Cast buttons (server-side casting works over HTTP — no secure context needed)
+        this._castUpdateButtons();
+
+        // Local audio-output device picker (HTTPS/localhost only — browser setSinkId)
+        this._audioOutInit();
 
         // Stop any active transcode when the browser tab is closed or refreshed
         window.addEventListener('beforeunload', () => {
@@ -247,6 +306,19 @@ const App = {
 
         this.navigate('home');
         this.checkWelcomeModal();
+
+        // Handle Last.fm OAuth callback redirect (?lastfm=ok or ?lastfm=error message)
+        const _urlParams = new URLSearchParams(window.location.search);
+        const _lfmParam = _urlParams.get('lastfm');
+        if (_lfmParam !== null) {
+            history.replaceState(null, '', window.location.pathname);
+            if (_lfmParam === 'ok') {
+                setTimeout(() => this.showToast(this.t('settings.scrobblingConnectedToast') || 'Last.fm connected!', 'success'), 500);
+            } else {
+                setTimeout(() => this.showToast('Last.fm: ' + decodeURIComponent(_lfmParam), 'error'), 500);
+            }
+        }
+
         if (sessionStorage.getItem('nexusm-gobig') || _initCfg?.goBigDefault) this.startGoBigMode();
         else if (this._gbIsMobile()) this._gbStartRemoteCheck();
         else this._gbStartRequestCheck();
@@ -258,7 +330,7 @@ const App = {
     },
 
     async loadLanguage(code) {
-        const v = '?v=3';
+        const v = '?v=4';
         try {
             const res = await fetch(`/lang/${code}.json${v}`, { cache: 'no-store' });
             if (res.ok) {
@@ -341,12 +413,12 @@ const App = {
 
     applyTemplate(templateId) {
         const cssLink = document.getElementById('tpl-css');
-        if (cssLink) cssLink.href = templateId ? `/templates/${templateId}/style.css?v=10` : '';
+        if (cssLink) cssLink.href = templateId ? `/templates/${templateId}/style.css?v=15` : '';
         // Remove any previously injected template script
         document.querySelectorAll('script[data-tpl-script]').forEach(s => s.remove());
         if (templateId) {
             const s = document.createElement('script');
-            s.src = `/templates/${templateId}/script.js?v=9`;
+            s.src = `/templates/${templateId}/script.js?v=17`;
             s.setAttribute('data-tpl-script', templateId);
             document.body.appendChild(s);
         }
@@ -754,6 +826,7 @@ const App = {
         try {
             const res = await fetch(`/api/${endpoint}`);
             if (res.status === 401) { window.location.href = '/login.html'; return null; }
+            if (res.status === 403 && res.headers.get('X-Gate-Blocked') === '1') { window.location.reload(); return null; }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
@@ -770,6 +843,7 @@ const App = {
                 body: JSON.stringify(body)
             });
             if (res.status === 401) { window.location.href = '/login.html'; return null; }
+            if (res.status === 403 && res.headers.get('X-Gate-Blocked') === '1') { window.location.reload(); return null; }
             return await res.json();
         } catch (err) {
             console.error(`API POST error [${endpoint}]:`, err);
@@ -785,6 +859,7 @@ const App = {
                 body: JSON.stringify(body)
             });
             if (res.status === 401) { window.location.href = '/login.html'; return null; }
+            if (res.status === 403 && res.headers.get('X-Gate-Blocked') === '1') { window.location.reload(); return null; }
             return await res.json();
         } catch (err) {
             console.error(`API PUT error [${endpoint}]:`, err);
@@ -796,6 +871,7 @@ const App = {
         try {
             const res = await fetch(`/api/${endpoint}`, { method: 'DELETE' });
             if (res.status === 401) { window.location.href = '/login.html'; return null; }
+            if (res.status === 403 && res.headers.get('X-Gate-Blocked') === '1') { window.location.reload(); return null; }
             return await res.json();
         } catch (err) {
             console.error(`API DELETE error [${endpoint}]:`, err);
@@ -811,6 +887,7 @@ const App = {
                 body: JSON.stringify(body)
             });
             if (res.status === 401) { window.location.href = '/login.html'; return null; }
+            if (res.status === 403 && res.headers.get('X-Gate-Blocked') === '1') { window.location.reload(); return null; }
             return await res.json();
         } catch (err) {
             console.error(`API PATCH error [${endpoint}]:`, err);
@@ -928,11 +1005,15 @@ const App = {
         // Stop any video elements, music player, TV player, lyrics overlay
         this.closeTvPlayer();
         this._teardownVideoThumbnailPreview();
+        this._teardownCustomControls();
         const lyricsOv = document.getElementById('lyrics-overlay');
         if (lyricsOv) { lyricsOv.style.display = 'none'; document.getElementById('btn-player-lyrics').style.color = ''; }
         document.querySelectorAll('video').forEach(v => this.stopVideoStream(v));
         this.stopCurrentTranscode();
         this.stopPlayer();
+        // Navigating tears down local playback — stop the Cast device too so the TV doesn't
+        // keep playing the media to the end after the user has moved on to browse something else.
+        if (this._castActive) this._castServerStop();
         document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
         const activeLink = document.querySelector(`a[data-page="${page}"]`);
         if (activeLink) activeLink.classList.add('active');
@@ -1104,6 +1185,7 @@ const App = {
         document.getElementById('btn-play').innerHTML = `<svg style="${svgStyle}"><use href="#icon-pause"/></svg>`;
         document.getElementById('player-title').textContent = station.name;
         document.getElementById('player-artist').innerHTML = `<span class="radio-live-indicator">&#9679; LIVE</span> ${this.esc(station.genre)} &middot; ${this.esc(station.country)}`;
+        this._clearPlayerMeta();
 
         // Set cover to station logo
         const coverDiv = document.getElementById('player-cover');
@@ -1153,6 +1235,22 @@ const App = {
             this._radioMetaInterval = null;
         }
         this._radioLastStreamTitle = null;
+    },
+
+    _fireScrobble(track, durationOverride) {
+        this.apiPost('scrobble', {
+            trackId:   track.id,
+            timestamp: this._scrobbleTimestamp || Math.floor(Date.now() / 1000),
+            duration:  Math.round(durationOverride ?? this.audioPlayer.duration ?? 0),
+        }).catch(() => {});
+    },
+
+    _scrobbleNowPlaying(track) {
+        this.apiPost('scrobble/now-playing', {
+            trackId:   track.id,
+            timestamp: Math.floor(Date.now() / 1000),
+            duration:  Math.round(track.duration || 0),
+        }).catch(() => {});
     },
 
     async fetchRadioMetadata(streamUrl) {
@@ -1453,10 +1551,23 @@ const App = {
     },
 
     // ─── Internet TV ──────────────────────────────────────────
+    _epgNowNext: {},
+    _epgChannelIds: new Set(),
+    _epgNameMap: {},        // normalizedName → tvgId (from XMLTV display-names)
+    _epgGuideOpen: false,
+    _epgSelectedTvgId: null,
+    _epgSelectedDay: 0,
+    _epgWithGuideOnly: true,
+
     async renderInternetTv(el) {
-        const data = await this.api('tvchannels');
+        const [data, epgNow] = await Promise.all([
+            this.api('tvchannels'),
+            this.api('epg/now').catch(() => ({}))
+        ]);
         const channels = data?.channels || [];
         this.tvChannels = channels;
+        this._epgNowNext = epgNow || {};
+        this._epgGuideOpen = false;
         this.tvCountryFilter = '';
         this.tvGenreFilter = '';
         this.tvLanguageFilter = '';
@@ -1471,6 +1582,9 @@ const App = {
                 </label>
                 <button class="btn-fetch-logos" id="btn-fetch-tv-logos" onclick="App.fetchTvLogos()">
                     <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;margin-right:6px"><use href="#icon-refresh"/></svg>${this.t('btn.fetchLogos')}
+                </button>
+                <button class="epg-toolbar-btn${Object.keys(this._epgNowNext).length > 0 ? ' active' : ''}" onclick="App.openEpgGuide()" title="${this.t('epg.guide')}">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2"><use href="#icon-list"/></svg>${this.t('epg.guide')}
                 </button>
             </div>
             <div id="fetch-tv-logos-status" class="fetch-logos-status" style="display:none"></div>`;
@@ -1515,7 +1629,7 @@ const App = {
 
     buildTvCards(channels) {
         if (!channels || channels.length === 0)
-            return `<div class="empty-state"><div class="empty-icon">&#128250;</div><h2>${this.t('empty.noTv.title')}</h2><p>${this.t('empty.noTv.desc')}</p></div>`;
+            return this.emptyState(this.t('empty.noTv.title'), this.t('empty.noTv.desc'));
 
         return channels.map(c => {
             const logoSrc = c.logo ? `/tvlogo/${c.logo}` : '';
@@ -1531,11 +1645,733 @@ const App = {
                     <div class="radio-card-name">${this.esc(c.name)} ${res}</div>
                     <div class="radio-card-desc">${this.esc(c.description || c.genre || '')}</div>
                     <div class="radio-card-meta">${[c.country, c.genre, c.language].filter(Boolean).map(s => this.esc(s)).join(' &middot; ')}</div>
+                    ${this._epgCardBadge(c.tvgId)}
                 </div>
                 <button class="radio-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleTvFav(${c.id}, this)" title="Favourite">&#10084;</button>
                 <div class="radio-card-play"><svg style="width:16px;height:16px;fill:white;stroke:none"><polygon points="5,3 15,10 5,17"/></svg></div>
             </div>`;
         }).join('');
+    },
+
+    // ─── EPG Guide ────────────────────────────────────────────────────
+
+    _epgNormName(s) {
+        return (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    },
+
+    // Returns the EPG tvgId to use for a channel — tries exact match first, then name fallback
+    _epgEffectiveTvgId(channel) {
+        if (!channel) return null;
+        const rawId = (channel.tvgId || '').toLowerCase();
+        if (rawId && this._epgChannelIds.has(rawId)) return channel.tvgId;
+        // Name-based fallback: match channel name against XMLTV display-name
+        const normName = this._epgNormName(channel.name);
+        if (normName && this._epgNameMap[normName]) return this._epgNameMap[normName];
+        // Also try tvgName if different from channel name
+        if (channel.tvgName) {
+            const normTvgName = this._epgNormName(channel.tvgName);
+            if (normTvgName && this._epgNameMap[normTvgName]) return this._epgNameMap[normTvgName];
+        }
+        return null;
+    },
+
+    _epgNowNextLookup(tvgId) {
+        if (!tvgId) return null;
+        return this._epgNowNext[(tvgId || '').toLowerCase()] || null;
+    },
+
+    _epgCardBadge(tvgId) {
+        const e = this._epgNowNextLookup(tvgId);
+        if (!e?.nowTitle) return '';
+        return `<div class="tv-card-epg"><span class="tv-card-epg-now">${this.t('epg.now')}</span> ${this.esc(e.nowTitle)}</div>`;
+    },
+
+    async openEpgGuide() {
+        const el = document.getElementById('main-content');
+        el.innerHTML = `<div style="padding:20px;color:var(--text-secondary)">${this.t('epg.loading')}</div>`;
+        this._epgGuideOpen = true;
+        this._epgSelectedTvgId = null;
+        this._epgSelectedDay = 0;
+
+        const [status, nowNext, channelIds, nameMap] = await Promise.all([
+            this.api('epg/status'),
+            this.api('epg/now').catch(() => ({})),
+            this.api('epg/channel-ids').catch(() => []),
+            this.api('epg/name-map').catch(() => ({}))
+        ]);
+        this._epgNowNext  = nowNext || {};
+        this._epgChannelIds = new Set((channelIds || []).map(id => id.toLowerCase()));
+        this._epgNameMap  = nameMap || {};
+
+        if (!status?.hasData) {
+            const sources = Array.isArray(status?.sources) ? status.sources : [];
+            const hasSources = sources.length > 0;
+            const sourceRows = sources.map(s => {
+                const statusCls = `epg-status-${s.status || 'pending'}`;
+                const statusLabel = this.t(`epg.status${(s.status||'pending').charAt(0).toUpperCase()+(s.status||'pending').slice(1)}`) || s.status;
+                return `<div class="epg-source-row">
+                    <div class="epg-source-info">
+                        <div class="epg-source-url">${this.esc(s.url)}</div>
+                        <div class="epg-source-meta">
+                            <span class="${statusCls}">${statusLabel}</span>
+                            ${s.isAuto ? ` &nbsp;·&nbsp; <em>${this.t('epg.autoDetected')}</em>` : ''}
+                            ${s.errorMessage ? `<br><span style="color:#f87171">${this.esc(s.errorMessage)}</span>` : ''}
+                        </div>
+                    </div>
+                    <button class="btn-secondary" style="font-size:12px;padding:5px 10px;flex-shrink:0" onclick="App._epgDeleteSourceInline(${s.id})">${this.t('epg.removeSource')}</button>
+                </div>`;
+            }).join('');
+
+            el.innerHTML = `
+            <div class="page-header">
+                <h1>${this.t('epg.title')}</h1>
+                <button class="epg-toolbar-btn" onclick="App.renderInternetTv(document.getElementById('main-content'))">
+                    &#8592; ${this.t('epg.backToChannels')}
+                </button>
+            </div>
+            <div style="max-width:560px;margin:0 auto;padding:20px 0">
+                ${this.emptyState(this.t('epg.noData'), '')}
+                <div class="settings-section" style="margin-top:0">
+                    <h3>${this.t('epg.sources')}</h3>
+                    <p class="settings-section-hint">${this.t('epg.settingsHint')}</p>
+                    ${hasSources ? `<div style="margin-bottom:16px">${sourceRows}</div>` : ''}
+                    <div style="display:flex;flex-direction:column;gap:10px">
+                        <div>
+                            <label class="video-edit-label">${this.t('epg.sourceUrl')} <span style="color:var(--danger,#ef4444)">*</span></label>
+                            <input id="epg-inline-url" class="video-edit-input" placeholder="${this.t('epg.addSourcePlaceholder')}" style="margin-top:4px">
+                        </div>
+                        <div>
+                            <label class="video-edit-label">${this.t('epg.sourceName')}</label>
+                            <input id="epg-inline-name" class="video-edit-input" placeholder="${this.t('epg.sourceName')}" style="margin-top:4px">
+                        </div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap">
+                            <button class="btn-primary" onclick="App._epgAddSourceInline()">
+                                <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px;margin-right:6px"><use href="#icon-plus"/></svg>${this.t('epg.addSource')}
+                            </button>
+                            ${hasSources ? `<button class="btn-secondary" id="epg-inline-refresh-btn" onclick="App._epgRefreshInline()">${this.t('epg.refreshNow')}</button>` : ''}
+                        </div>
+                        <div class="settings-section-hint" style="margin-top:10px;line-height:1.75;font-size:12px">
+                            <strong>&#9733; Best match:</strong> Re-import your IPTV M3U — NexusM auto-detects the EPG URL your provider embedded in the playlist.<br>
+                            <strong>&#9733; Free option (iptv-org):</strong> Import channels from <code style="font-size:11px">iptv-org.github.io/iptv/countries/<em>fr</em>.m3u</code> then add EPG <code style="font-size:11px">epg.pw/xmltv/epg_FR.xml.gz</code> — same IDs, perfect match.<br>
+                            <strong>&#9888; Important:</strong> The IPTV channel list and EPG source <em>must come from the same provider</em> for IDs to match. Mixing sources = no match.
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+            return;
+        }
+
+        // Check if we have any TV channels at all
+        if (!this.tvChannels || this.tvChannels.length === 0) {
+            el.innerHTML = `
+            <div class="page-header">
+                <h1>${this.t('epg.title')}</h1>
+                <button class="epg-toolbar-btn" onclick="App.renderInternetTv(document.getElementById('main-content'))">
+                    &#8592; ${this.t('epg.backToChannels')}
+                </button>
+            </div>
+            <div class="empty-state">
+                ${this.emptyState(this.t('epg.noChannels') || 'No TV channels imported', '')}
+            </div>
+            <div style="max-width:560px;margin:-20px auto 0;padding:0 20px">
+                <div class="settings-section">
+                    <h3>&#9888; Import TV Channels First</h3>
+                    <p class="settings-section-hint" style="line-height:1.75">
+                        Your TV channel list is empty. Go back to <strong>Internet TV</strong> and import an M3U playlist before using the guide.<br><br>
+                        <strong>Recommended (iptv-org):</strong> Import from URL:<br>
+                        <code style="display:block;margin:6px 0;padding:6px 10px;background:var(--bg-primary);border-radius:5px;font-size:12px;user-select:all">https://iptv-org.github.io/iptv/countries/fr.m3u</code>
+                        (replace <code>fr</code> with your country code, e.g. <code>gb</code>, <code>us</code>, <code>de</code>, <code>es</code>)<br><br>
+                        Then add EPG source: <code style="font-size:12px">https://epg.pw/xmltv/epg_FR.xml.gz</code>
+                    </p>
+                    <button class="btn-primary" onclick="App.renderInternetTv(document.getElementById('main-content'))">
+                        &#8592; Go to Internet TV
+                    </button>
+                </div>
+            </div>`;
+            return;
+        }
+
+        if (!this._epgViewMode) this._epgViewMode = 'grid';
+        if (this._epgViewMode === 'list') {
+            el.innerHTML = this._renderEpgLayout(status);
+            this._epgBindChannelClick();
+            const first = (this.tvChannels || []).find(c => this._epgEffectiveTvgId(c));
+            if (first) this._epgSelectChannel(this._epgEffectiveTvgId(first), first.name);
+        } else {
+            await this._epgOpenGridView(el);
+        }
+    },
+
+    _renderEpgLayout(status) {
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const dateStr = now.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+
+        // Build channel list — channels with EPG data first (via tvgId OR name match), rest after
+        const hasGuide   = c => !!this._epgEffectiveTvgId(c);
+        const withEpg    = (this.tvChannels || []).filter(c => hasGuide(c));
+        const withoutEpg = (this.tvChannels || []).filter(c => !hasGuide(c));
+        const ordered    = this._epgWithGuideOnly ? withEpg : [...withEpg, ...withoutEpg];
+        const guideCount = withEpg.length;
+
+        let channelItems = ordered.map(c => {
+            const effectiveTvgId = this._epgEffectiveTvgId(c) || '';
+            const logo = c.logo ? `<img class="epg-channel-logo" src="/tvlogo/${c.logo}" onerror="this.style.display='none'" alt="">` :
+                `<div class="epg-channel-logo-ph"><svg style="width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-tv"/></svg></div>`;
+            const epg = this._epgNowNextLookup(effectiveTvgId);
+            const nowLine = epg?.nowTitle
+                ? `<div class="epg-channel-now">${this.esc(epg.nowTitle)}</div>`
+                : `<div class="epg-channel-now" style="opacity:.4">${this.t('epg.notAvailable')}</div>`;
+            return `<div class="epg-channel-item" data-tvgid="${this.esc(effectiveTvgId)}" data-name="${this.esc(c.name)}" onclick="App._epgSelectChannel('${this.esc(effectiveTvgId).replace(/'/g,"\\'")}','${this.esc(c.name).replace(/'/g,"\\'")}')">
+                ${logo}
+                <div style="flex:1;min-width:0">
+                    <div class="epg-channel-name">${this.esc(c.name)}</div>
+                    ${nowLine}
+                </div>
+            </div>`;
+        }).join('');
+
+        return `
+        <div class="page-header" style="margin-bottom:12px">
+            <h1>${this.t('epg.title')}</h1>
+            <div style="display:flex;align-items:center;gap:8px">
+                <span style="font-size:13px;color:var(--text-secondary)">${timeStr} &nbsp; ${dateStr}</span>
+                <button class="epg-toolbar-btn" onclick="App._epgSwitchView('grid')" title="Grid view">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px"><use href="#icon-grid"/></svg> Grid view
+                </button>
+                <button class="epg-toolbar-btn" onclick="App.renderInternetTv(document.getElementById('main-content'))">
+                    &#8592; ${this.t('epg.backToChannels')}
+                </button>
+            </div>
+        </div>
+        <div class="epg-guide">
+            <div class="epg-channel-panel">
+                <div class="epg-channel-search">
+                    <input type="text" placeholder="${this.t('epg.searchChannels')}" oninput="App._epgFilterChannels(this.value)" id="epg-ch-search">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:7px;gap:6px">
+                        <span style="font-size:11px;color:var(--text-secondary)">${guideCount.toLocaleString()} ${this.t('epg.channelCount')}</span>
+                        <button class="epg-day-tab${this._epgWithGuideOnly ? ' active' : ''}" style="font-size:11px;padding:3px 8px" onclick="App._epgToggleGuideFilter()">
+                            ${this._epgWithGuideOnly ? '&#10003; ' : ''}${this.t('epg.withGuideOnly')}
+                        </button>
+                    </div>
+                </div>
+                <div id="epg-channel-list">${channelItems}</div>
+            </div>
+            <div class="epg-schedule-panel">
+                <div class="epg-schedule-header">
+                    <div class="epg-schedule-title" id="epg-sched-title">${this.t('epg.selectChannel')}</div>
+                    <div class="epg-day-tabs" id="epg-day-tabs"></div>
+                </div>
+                <div class="epg-schedule-list" id="epg-schedule-list">
+                    <div class="epg-empty">${this.t('epg.selectChannel')}</div>
+                </div>
+            </div>
+        </div>`;
+    },
+
+    _epgBindChannelClick() { /* clicks already wired via onclick in HTML */ },
+
+    // ─── EPG Grid View (Plex-style horizontal timeline) ──────────────
+
+    async _epgOpenGridView(el) {
+        const today = new Date().toISOString().slice(0, 10);
+        if (!this._epgGridDate) this._epgGridDate = today;
+        if (this._epgGridGenre === undefined) this._epgGridGenre = '';
+
+        const channels = (this.tvChannels || []).filter(c => this._epgEffectiveTvgId(c));
+        const genres = [...new Set(channels.map(c => c.genre).filter(Boolean))].sort();
+        const genreTabs = ['', ...genres].map(g => {
+            const label = g || 'All';
+            return `<button class="epg-genre-tab${this._epgGridGenre === g ? ' active' : ''}" data-genre="${this.esc(g)}" onclick="App._epgGridSetGenre(this.dataset.genre)">${this.esc(label)}</button>`;
+        }).join('');
+
+        const showTodayBtn = this._epgGridDate !== today;
+        el.innerHTML = `
+        <div class="page-header" style="margin-bottom:8px">
+            <h1>${this.t('epg.title')}</h1>
+            <div style="display:flex;align-items:center;gap:8px">
+                <button class="epg-toolbar-btn" onclick="App._epgSwitchView('list')" title="Classic list view">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:-2px"><use href="#icon-list"/></svg> List view
+                </button>
+                <button class="epg-toolbar-btn" onclick="App.renderInternetTv(document.getElementById('main-content'))">
+                    &#8592; ${this.t('epg.backToChannels')}
+                </button>
+            </div>
+        </div>
+        <div class="epg-genre-bar" id="epg-genre-bar">${genreTabs}</div>
+        <div class="epg-grid-day-bar">
+            <button class="epg-grid-day-btn" onclick="App._epgGridShiftDay(-1)">&#8249;</button>
+            <span class="epg-grid-day-label" id="epg-grid-day-label">${this._epgGridDateLabel()}</span>
+            <button class="epg-grid-day-btn" onclick="App._epgGridShiftDay(1)">&#8250;</button>
+            ${showTodayBtn ? `<button class="epg-grid-today-btn" onclick="App._epgGridGoToday()">${this.t('epg.today')}</button>` : ''}
+        </div>
+        <div class="epg-grid-outer" id="epg-grid-outer">
+            <div style="padding:20px;color:var(--text-secondary)">${this.t('epg.loading')}</div>
+        </div>`;
+
+        await this._epgLoadGrid();
+    },
+
+    _epgGridDateLabel() {
+        const today = new Date().toISOString().slice(0, 10);
+        if (this._epgGridDate === today) return this.t('epg.today');
+        const d = new Date((this._epgGridDate || today) + 'T12:00:00');
+        return d.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+    },
+
+    async _epgSwitchView(mode) {
+        this._epgViewMode = mode;
+        await this.openEpgGuide();
+    },
+
+    async _epgGridShiftDay(delta) {
+        const base = (this._epgGridDate || new Date().toISOString().slice(0, 10));
+        const d = new Date(base + 'T12:00:00');
+        d.setDate(d.getDate() + delta);
+        const today = new Date(); today.setHours(12, 0, 0, 0);
+        const minDate = new Date(today); minDate.setDate(today.getDate() - 1);
+        const maxDate = new Date(today); maxDate.setDate(today.getDate() + 6);
+        if (d < minDate || d > maxDate) return;
+        this._epgGridDate = d.toISOString().slice(0, 10);
+        const lbl = document.getElementById('epg-grid-day-label');
+        if (lbl) lbl.textContent = this._epgGridDateLabel();
+        const el = document.getElementById('main-content');
+        if (el) await this._epgOpenGridView(el);
+    },
+
+    async _epgGridGoToday() {
+        this._epgGridDate = new Date().toISOString().slice(0, 10);
+        const el = document.getElementById('main-content');
+        if (el) await this._epgOpenGridView(el);
+    },
+
+    _epgGridSetGenre(genre) {
+        this._epgGridGenre = genre;
+        document.querySelectorAll('.epg-genre-tab').forEach(btn => {
+            btn.classList.toggle('active', (btn.dataset.genre || '') === genre);
+        });
+        this._epgGridApplyGenreFilter();
+    },
+
+    _epgGridApplyGenreFilter() {
+        const genre = this._epgGridGenre || '';
+        document.querySelectorAll('#epg-grid-body .epg-grid-tr').forEach(tr => {
+            tr.style.display = (!genre || (tr.dataset.genre || '') === genre) ? '' : 'none';
+        });
+    },
+
+    async _epgLoadGrid() {
+        const outer = document.getElementById('epg-grid-outer');
+        if (!outer) return;
+        outer.innerHTML = `<div style="padding:20px;color:var(--text-secondary)">${this.t('epg.loading')}</div>`;
+        const data = await this.api(`epg/grid?date=${this._epgGridDate}`).catch(() => ({}));
+        this._epgGridData = data || {};
+        this._epgBuildGridTable(outer);
+    },
+
+    _epgBuildGridTable(outerEl) {
+        const PX = 4;
+        const HOURS = 24;
+        const TOTAL = HOURS * 60 * PX;   // 5760px
+
+        const dayStart = new Date((this._epgGridDate || new Date().toISOString().slice(0, 10)) + 'T00:00:00').getTime();
+        const nowMs    = Date.now();
+        const isToday  = this._epgGridDate === new Date().toISOString().slice(0, 10);
+        const nowPx    = isToday ? Math.max(0, Math.min((nowMs - dayStart) / 60000 * PX, TOTAL)) : -1;
+
+        // Time header: label every 30 min
+        let timeHtml = '';
+        for (let m = 0; m < HOURS * 60; m += 30) {
+            const label = new Date(dayStart + m * 60000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            timeHtml += `<div class="epg-time-label" style="left:${m * PX}px">${label}</div>`;
+        }
+        if (nowPx >= 0) timeHtml += `<div class="epg-now-line-hdr" style="left:${nowPx}px"></div>`;
+
+        const channels = (this.tvChannels || []).filter(c => this._epgEffectiveTvgId(c));
+        const data = this._epgGridData || {};
+
+        let rowsHtml = '';
+        if (!channels.length) {
+            rowsHtml = `<tr><td colspan="2" style="padding:30px;text-align:center;color:var(--text-secondary)">${this.t('epg.noChannels') || 'No channels with guide data'}</td></tr>`;
+        } else {
+            rowsHtml = channels.map(ch => {
+                const tvgId = (this._epgEffectiveTvgId(ch) || '').toLowerCase();
+                const progs = data[tvgId] || [];
+
+                const logo = ch.logo
+                    ? `<img class="epg-grid-ch-img" src="/tvlogo/${this.esc(ch.logo)}" onerror="this.style.display='none'" alt="">`
+                    : `<div class="epg-grid-ch-ph"><svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-tv"/></svg></div>`;
+
+                let blocksHtml = progs.map(p => {
+                    const sMs = new Date(p.start).getTime();
+                    const eMs = new Date(p.stop).getTime();
+                    const lPx = Math.max(0, (sMs - dayStart) / 60000 * PX);
+                    const wPx = Math.max(4, Math.min((eMs - sMs) / 60000 * PX, TOTAL - lPx) - 2);
+                    const isNow  = sMs <= nowMs && eMs > nowMs;
+                    const isPast = eMs <= nowMs;
+                    const cls = `epg-grid-block${isNow ? ' now' : isPast ? ' past' : ''}`;
+                    const showTime = wPx >= 64;
+                    const pd = { title: p.title || '', description: p.description || '', category: p.category || '', start: p.start, stop: p.stop };
+                    return `<div class="${cls}" style="left:${lPx}px;width:${wPx}px"
+                        data-chid="${ch.id}" data-chname="${this.esc(ch.name)}" data-chlogo="${this.esc(ch.logo || '')}"
+                        data-prog="${this.esc(JSON.stringify(pd))}"
+                        onclick="App._epgGridClickBlock(this)">
+                        <div class="epg-block-title">${this.esc(p.title || '')}</div>
+                        ${showTime ? `<div class="epg-block-time">${new Date(sMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>` : ''}
+                    </div>`;
+                }).join('');
+
+                if (nowPx >= 0) blocksHtml += `<div class="epg-grid-now-marker" style="left:${nowPx}px"></div>`;
+                if (!progs.length) blocksHtml += `<div class="epg-block-noguide">${this.t('epg.notAvailable')}</div>`;
+
+                return `<tr class="epg-grid-tr" data-genre="${this.esc(ch.genre || '')}" data-chid="${ch.id}">
+                    <td class="epg-grid-td-ch">
+                        <div class="epg-grid-ch-wrap">${logo}<div class="epg-grid-ch-name">${this.esc(ch.name)}</div></div>
+                    </td>
+                    <td class="epg-grid-td-progs">
+                        <div class="epg-grid-progs" style="width:${TOTAL}px">${blocksHtml}</div>
+                    </td>
+                </tr>`;
+            }).join('');
+        }
+
+        outerEl.innerHTML = `<table class="epg-grid-table">
+            <thead><tr>
+                <th class="epg-grid-corner"></th>
+                <th class="epg-grid-timecell"><div class="epg-grid-timebar" style="width:${TOTAL}px">${timeHtml}</div></th>
+            </tr></thead>
+            <tbody id="epg-grid-body">${rowsHtml}</tbody>
+        </table>`;
+
+        this._epgGridNowPx = nowPx; // stored for popup watch-button positioning
+
+        this._epgGridApplyGenreFilter();
+
+        if (nowPx > 0) setTimeout(() => { outerEl.scrollLeft = Math.max(0, nowPx - 160); }, 50);
+    },
+
+    _epgGridClickBlock(blockEl) {
+        document.querySelectorAll('.epg-grid-popup-row').forEach(r => r.remove());
+
+        const chId   = parseInt(blockEl.dataset.chid, 10);
+        const chName = blockEl.dataset.chname || '';
+        const chLogo = blockEl.dataset.chlogo || '';
+        let prog = {};
+        try { prog = JSON.parse(blockEl.dataset.prog || '{}'); } catch(e) { prog = {}; }
+
+        const sMs = new Date(prog.start).getTime();
+        const eMs = new Date(prog.stop).getTime();
+        const durMin = Math.round((eMs - sMs) / 60000);
+        const h = Math.floor(durMin / 60), m = durMin % 60;
+        const durLabel = h > 0 ? `${h}h${m > 0 ? m + 'm' : ''}` : `${m}m`;
+        const startStr = new Date(sMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const stopStr  = new Date(eMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const catHtml  = prog.category ? ` &nbsp;·&nbsp; ${this.esc(prog.category)}` : '';
+        const logoHtml = chLogo ? `<img src="/tvlogo/${this.esc(chLogo)}" style="width:60px;height:60px;object-fit:contain;border-radius:6px" onerror="this.remove()">` : '';
+        const descHtml = prog.description ? `<div class="epg-gpopup-desc">${this.esc(prog.description)}</div>` : '';
+
+        // Position the Watch button near the current-time line in the viewport
+        const _gpOuter    = document.getElementById('epg-grid-outer');
+        const _gpScroll   = _gpOuter ? _gpOuter.scrollLeft : 0;
+        const _gpNowPx    = this._epgGridNowPx || -1;
+        const _gpChW      = 104; // channel column width (matches .epg-grid-td-ch)
+        const _gpWatchLeft = _gpNowPx >= 0
+            ? Math.max(_gpChW + 8, _gpChW + _gpNowPx - _gpScroll)
+            : _gpChW + 8;
+
+        const popupRow = document.createElement('tr');
+        popupRow.className = 'epg-grid-popup-row';
+        popupRow.innerHTML = `<td colspan="2" class="epg-gpopup-td"><div class="epg-gpopup">
+            <div class="epg-gpopup-actions" style="left:${_gpWatchLeft}px">
+                <button class="epg-watch-btn" onclick="App._epgWatchChannel(${chId})">&#9654; Watch Channel</button>
+            </div>
+            <div class="epg-gpopup-logo">${logoHtml}</div>
+            <div class="epg-gpopup-body">
+                <div class="epg-gpopup-chname">${this.esc(chName)}</div>
+                <div class="epg-gpopup-title">${this.esc(prog.title || '')}</div>
+                <div class="epg-gpopup-meta">${startStr} – ${stopStr} &nbsp;·&nbsp; ${durLabel}${catHtml}</div>
+                ${descHtml}
+            </div>
+            <button class="epg-gpopup-close" onclick="this.closest('.epg-grid-popup-row').remove()">&#10005;</button>
+        </div></td>`;
+
+        const parentRow = blockEl.closest('tr');
+        if (parentRow?.parentNode) parentRow.parentNode.insertBefore(popupRow, parentRow.nextSibling);
+        else document.getElementById('epg-grid-body')?.appendChild(popupRow);
+
+        popupRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    },
+
+    _epgWatchChannel(channelId) {
+        document.querySelectorAll('.epg-grid-popup-row').forEach(r => r.remove());
+        this.playTvChannel(channelId);
+    },
+
+    // ─── End EPG Grid View ────────────────────────────────────────────
+
+    _epgToggleGuideFilter() {
+        this._epgWithGuideOnly = !this._epgWithGuideOnly;
+        const el = document.getElementById('main-content');
+        if (el) el.innerHTML = this._renderEpgLayout(null);
+        this._epgBindChannelClick();
+        const first = (this.tvChannels || []).find(c => this._epgEffectiveTvgId(c));
+        if (first) this._epgSelectChannel(this._epgEffectiveTvgId(first), first.name);
+    },
+
+    _epgFilterChannels(q) {
+        const items = document.querySelectorAll('#epg-channel-list .epg-channel-item');
+        const lq = q.toLowerCase();
+        items.forEach(el => {
+            const name = (el.dataset.name || '').toLowerCase();
+            el.style.display = (!q || name.includes(lq)) ? '' : 'none';
+        });
+    },
+
+    async _epgSelectChannel(tvgId, name) {
+        this._epgSelectedTvgId = tvgId;
+        this._epgSelectedDay = 0;
+
+        // Highlight selected channel
+        document.querySelectorAll('.epg-channel-item').forEach(el => {
+            el.classList.toggle('active', el.dataset.tvgid === tvgId);
+        });
+
+        const title = document.getElementById('epg-sched-title');
+        if (title) title.textContent = name;
+
+        this._epgRenderDayTabs();
+        await this._epgLoadSchedule(tvgId, 0);
+    },
+
+    _epgRenderDayTabs() {
+        const tabs = document.getElementById('epg-day-tabs');
+        if (!tabs) return;
+        let html = '';
+        for (let i = 0; i < 7; i++) {
+            const d = new Date(); d.setDate(d.getDate() + i);
+            const label = i === 0 ? this.t('epg.today') : d.toLocaleDateString([], { weekday: 'short', day: 'numeric' });
+            html += `<button class="epg-day-tab${i === this._epgSelectedDay ? ' active' : ''}" onclick="App._epgChangeDay(${i})">${label}</button>`;
+        }
+        tabs.innerHTML = html;
+    },
+
+    async _epgChangeDay(dayOffset) {
+        this._epgSelectedDay = dayOffset;
+        this._epgRenderDayTabs();
+        if (this._epgSelectedTvgId)
+            await this._epgLoadSchedule(this._epgSelectedTvgId, dayOffset);
+    },
+
+    async _epgLoadSchedule(tvgId, dayOffset) {
+        const list = document.getElementById('epg-schedule-list');
+        if (!list) return;
+        if (!tvgId) { list.innerHTML = `<div class="epg-empty">${this.t('epg.notAvailable')}</div>`; return; }
+
+        list.innerHTML = `<div class="epg-empty">${this.t('epg.loading')}</div>`;
+        const date = new Date(); date.setDate(date.getDate() + dayOffset);
+        const dateStr = date.toISOString().slice(0, 10);
+
+        const progs = await this.api(`epg/schedule?tvgId=${encodeURIComponent(tvgId)}&date=${dateStr}`);
+        if (!progs || progs.length === 0) {
+            list.innerHTML = `<div class="epg-empty">${this.t('epg.noSchedule')}</div>`;
+            return;
+        }
+
+        const now = new Date();
+        let html = '';
+        let scrollToNow = null;
+
+        progs.forEach((p, i) => {
+            const start = new Date(p.start);
+            const stop  = new Date(p.stop);
+            const isNow = start <= now && stop > now;
+            const isPast = stop <= now && dayOffset === 0;
+            const timeStr = `${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – ${stop.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+            const nowBadge = isNow ? `<span class="epg-now-badge">${this.t('epg.now')}</span>` : '';
+            const cls = isNow ? 'epg-programme now' : isPast ? 'epg-programme past' : 'epg-programme';
+            const id = `epg-prog-${i}`;
+
+            html += `<div class="${cls}" id="${id}" onclick="App._epgShowDetail(${JSON.stringify(p).replace(/"/g, '&quot;')})">
+                <div class="epg-programme-time">${timeStr}</div>
+                <div class="epg-programme-info">
+                    <div class="epg-programme-title">${this.esc(p.title)}${nowBadge}</div>
+                    ${p.category ? `<div class="epg-programme-cat">${this.esc(p.category)}</div>` : ''}
+                </div>
+            </div>`;
+
+            if (isNow) scrollToNow = id;
+        });
+
+        list.innerHTML = html;
+
+        // Scroll "now" programme into view
+        if (scrollToNow) {
+            const el = document.getElementById(scrollToNow);
+            if (el) setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100);
+        }
+    },
+
+    _epgShowDetail(p) {
+        const start = new Date(p.start);
+        const stop  = new Date(p.stop);
+        const timeStr = `${start.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })} &nbsp; ${start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} – ${stop.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+
+        const overlay = document.createElement('div');
+        overlay.className = 'epg-popup-overlay';
+        overlay.innerHTML = `<div class="epg-popup">
+            <div class="epg-popup-title">${this.esc(p.title)}</div>
+            <div class="epg-popup-time">${timeStr}${p.category ? ' &nbsp;·&nbsp; ' + this.esc(p.category) : ''}</div>
+            ${p.description ? `<div class="epg-popup-desc">${this.esc(p.description)}</div>` : ''}
+            <button class="btn-primary epg-popup-close" onclick="this.closest('.epg-popup-overlay').remove()">Close</button>
+        </div>`;
+        overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+        document.body.appendChild(overlay);
+    },
+
+    // ─── EPG Settings (rendered inside Settings → Internet TV) ─────────────
+
+    async renderEpgSettings() {
+        const el = document.getElementById('epg-settings-section');
+        if (!el) return;
+        const status = await this.api('epg/status');
+        if (!status) return;
+
+        const sources = Array.isArray(status.sources) ? status.sources : [];
+        let html = `<h3 style="margin:0 0 6px">${this.t('epg.sources')}</h3>
+        <p class="settings-section-hint" style="margin-bottom:14px">${this.t('epg.settingsHint')}</p>`;
+
+        if (sources.length === 0) {
+            html += `<p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">${this.t('epg.noSources')}</p>`;
+        } else {
+            sources.forEach(s => {
+                const statusCls = `epg-status-${s.status || 'pending'}`;
+                const statusLabel = this.t(`epg.status${(s.status || 'pending').charAt(0).toUpperCase() + (s.status || 'pending').slice(1)}`) || s.status;
+                html += `<div class="epg-source-row">
+                    <div class="epg-source-info">
+                        <div class="epg-source-url">${this.esc(s.url)}</div>
+                        <div class="epg-source-meta">
+                            <span class="${statusCls}">${statusLabel}</span>
+                            ${s.lastFetched ? ` &nbsp;·&nbsp; ${this.t('epg.lastUpdated')}: ${s.lastFetched}` : ''}
+                            ${s.programmeCount > 0 ? ` &nbsp;·&nbsp; ${s.programmeCount.toLocaleString()} ${this.t('epg.programmes')}` : ''}
+                            ${s.isAuto ? ` &nbsp;·&nbsp; <em>${this.t('epg.autoDetected')}</em>` : ''}
+                        </div>
+                        ${s.errorMessage ? `<div style="font-size:11px;color:#f87171;margin-top:2px">${this.esc(s.errorMessage)}</div>` : ''}
+                    </div>
+                    <button class="btn-secondary" style="font-size:12px;padding:5px 10px" onclick="App._epgDeleteSource(${s.id})">${this.t('epg.removeSource')}</button>
+                </div>`;
+            });
+        }
+
+        html += `<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <div style="flex:1;min-width:200px">
+                <label class="video-edit-label" style="font-size:11px">${this.t('epg.sourceUrl')}</label>
+                <input id="epg-new-url" class="setting-input" placeholder="${this.t('epg.addSourcePlaceholder')}" style="margin-top:3px">
+            </div>
+            <div style="width:140px">
+                <label class="video-edit-label" style="font-size:11px">${this.t('epg.sourceName')}</label>
+                <input id="epg-new-name" class="setting-input" placeholder="${this.t('epg.sourceName')}" style="margin-top:3px">
+            </div>
+            <button class="btn-primary" style="padding:8px 14px;font-size:13px" onclick="App._epgAddSource()">${this.t('epg.addSource')}</button>
+            <button class="btn-secondary" style="padding:8px 14px;font-size:13px" onclick="App._epgRefresh()" id="epg-refresh-btn">${this.t('epg.refreshNow')}</button>
+        </div>`;
+
+        el.innerHTML = html;
+    },
+
+    async _epgAddSource() {
+        const url  = document.getElementById('epg-new-url')?.value.trim();
+        const name = document.getElementById('epg-new-name')?.value.trim();
+        if (!url) { alert(this.t('epg.urlRequired')); return; }
+        await this.apiPost('epg/sources', { url, name });
+        await this.renderEpgSettings();
+    },
+
+    async _epgDeleteSource(id) {
+        await this.apiDelete(`epg/sources/${id}`);
+        await this.renderEpgSettings();
+    },
+
+    async _epgRefresh() {
+        const btn = document.getElementById('epg-refresh-btn');
+        if (btn) { btn.disabled = true; btn.textContent = this.t('epg.refreshing'); }
+        await this.apiPost('epg/refresh', {});
+        setTimeout(() => this.renderEpgSettings(), 2000);
+    },
+
+    async _epgAddSourceInline() {
+        const url  = document.getElementById('epg-inline-url')?.value.trim();
+        const name = document.getElementById('epg-inline-name')?.value.trim();
+        if (!url) { alert(this.t('epg.urlRequired')); return; }
+        await this.apiPost('epg/sources', { url, name });
+        // Re-open guide to show fetching status, then auto-poll
+        await this.openEpgGuide();
+        this._epgStartAutoRefreshPoll();
+    },
+
+    async _epgDeleteSourceInline(id) {
+        await this.apiDelete(`epg/sources/${id}`);
+        await this.openEpgGuide();
+    },
+
+    async _epgRefreshInline() {
+        const btn = document.getElementById('epg-inline-refresh-btn');
+        if (btn) { btn.disabled = true; btn.textContent = this.t('epg.refreshing'); }
+        await this.apiPost('epg/refresh', {});
+        this._epgStartAutoRefreshPoll();
+    },
+
+    _epgAutoRefreshTimer: null,
+
+    _epgStartAutoRefreshPoll() {
+        if (this._epgAutoRefreshTimer) clearInterval(this._epgAutoRefreshTimer);
+        let tries = 0;
+        this._epgAutoRefreshTimer = setInterval(async () => {
+            tries++;
+            const s = await this.api('epg/status').catch(() => null);
+            if (!s) return;
+
+            // Update status badges on the current no-data page if still visible
+            const sources = Array.isArray(s.sources) ? s.sources : [];
+            const totalFetched = s.fetchProgress || 0;
+            sources.forEach(src => {
+                document.querySelectorAll('.epg-source-row').forEach(row => {
+                    const urlEl = row.querySelector('.epg-source-url');
+                    if (urlEl && urlEl.textContent.trim() === src.url) {
+                        const meta = row.querySelector('.epg-source-meta');
+                        if (meta) {
+                            const cls = `epg-status-${src.status}`;
+                            const statusLabel = this.t(`epg.status${(src.status||'pending').charAt(0).toUpperCase()+(src.status||'pending').slice(1)}`) || src.status;
+                            const progLine = src.status === 'fetching' && totalFetched > 0
+                                ? ` &nbsp;·&nbsp; <strong style="color:var(--accent)">${totalFetched.toLocaleString()} ${this.t('epg.programmes')}</strong>`
+                                : src.programmeCount > 0 ? ` &nbsp;·&nbsp; ${src.programmeCount.toLocaleString()} ${this.t('epg.programmes')}` : '';
+                            meta.innerHTML = `<span class="${cls}">${statusLabel}</span>${progLine}${src.errorMessage ? `<br><span style="color:#f87171">${this.esc(src.errorMessage)}</span>` : ''}`;
+                        }
+                    }
+                });
+            });
+            // Also show total counter visibly if fetching
+            if (s.isRefreshing && totalFetched > 0) {
+                let counter = document.getElementById('epg-live-counter');
+                if (!counter) {
+                    counter = document.createElement('div');
+                    counter.id = 'epg-live-counter';
+                    counter.style.cssText = 'text-align:center;margin-top:12px;font-size:13px;color:var(--accent);font-weight:600';
+                    const section = document.querySelector('.settings-section');
+                    if (section) section.appendChild(counter);
+                }
+                counter.textContent = `⬇ ${totalFetched.toLocaleString()} ${this.t('epg.programmes')} ${this.t('epg.totalLoaded')}`;
+            }
+
+            if (s.hasData) {
+                clearInterval(this._epgAutoRefreshTimer);
+                this._epgAutoRefreshTimer = null;
+                await this.openEpgGuide();
+            } else if (tries > 40) { // give up after ~2 min
+                clearInterval(this._epgAutoRefreshTimer);
+                this._epgAutoRefreshTimer = null;
+                await this.openEpgGuide(); // reload to show current state
+            }
+        }, 3000);
     },
 
     playTvChannel(id) {
@@ -2124,6 +2960,7 @@ const App = {
             if (bar) { bar.classList.remove('player-hidden'); bar.classList.add('podcast-mode'); }
             document.getElementById('player-title').textContent = ep.title;
             document.getElementById('player-artist').textContent = this.podcastCurrentFeed ? this.podcastCurrentFeed.title : 'Podcast';
+            this._clearPlayerMeta();
             // Show podcast artwork in bottom bar cover
             const cover = document.getElementById('player-cover');
             const art = this.podcastCurrentFeed?.artworkFile ? `/podcastart/${this.podcastCurrentFeed.artworkFile}` : '';
@@ -2501,6 +3338,57 @@ const App = {
         return map[fmt] ? `track-fmt-${map[fmt]}` : '';
     },
 
+    // Hz → "44.1 kHz" / "48 kHz" (drops the decimal when whole)
+    _fmtKHz(hz) {
+        if (!hz || hz <= 0) return '';
+        const k = hz / 1000;
+        return (Number.isInteger(k) ? k : k.toFixed(1)) + ' kHz';
+    },
+
+    // Quality + output line shown below the progress bar, e.g.
+    // "MP3 44.1 kHz 48 kHz — DELL U3425WE 320 kb/s" (source format/rate, output rate, device, bitrate).
+    _clearPlayerMeta() {
+        const el = document.getElementById('player-meta');
+        if (el) el.textContent = '';
+    },
+
+    // The track lists hand playTrack a minimal {id,title,artist,album} object (scraped from the
+    // DOM), so quality fields are missing. Fetch the full track once and refresh the meta line.
+    async _enrichTrackMeta(track) {
+        if (!track || !track.id) return;
+        if (track.sampleRate != null || track.bitrate != null) return;   // already detailed
+        try {
+            const full = await this.api(`tracks/${track.id}`);
+            if (!full) return;
+            Object.assign(track, full);
+            if (this.currentTrack && this.currentTrack.id === track.id) this._updatePlayerMeta();
+        } catch (e) {}
+    },
+
+    _updatePlayerMeta() {
+        const el = document.getElementById('player-meta');
+        if (!el) return;
+        const t = this.currentTrack;
+        if (!t) { el.textContent = ''; return; }
+
+        const left = [];
+        const fmt = this.trackFormat(t);
+        if (fmt) left.push(fmt);
+        if (t.sampleRate > 0) left.push(this._fmtKHz(t.sampleRate));            // source sample rate
+        const outRate = (this._audioCtx && this._audioCtx.sampleRate) ? this._audioCtx.sampleRate : 0;
+        if (outRate > 0) left.push(this._fmtKHz(outRate));                       // output (mix) rate
+
+        // Output device: the chosen sink, else the system default
+        const dev = this._audioSinkLabel || this.t('player.systemOutput', 'System default');
+        const right = [this.esc(dev)];
+        if (t.bitrate > 0) right.push(t.bitrate + ' kb/s');
+
+        const leftStr = left.join(' ');
+        el.innerHTML = leftStr
+            ? `${this.esc(leftStr)} &mdash; <span class="player-meta-dev">${right.join(' ')}</span>`
+            : `<span class="player-meta-dev">${right.join(' ')}</span>`;
+    },
+
     // ─── Home Page ───────────────────────────────────────────
     async renderHome(el) {
         // Respect the same visibility rules as the sidebar (child/guest settings + global config)
@@ -2513,14 +3401,15 @@ const App = {
         const showAudioBooks = pt.audiobooks  ?? true;
 
         // Only fetch APIs for sections the current user is allowed to see
-        const [recentTracks, recentMv, recentPics, recentEbooks, recentVideos, recentAudioBooks, continueWatching] = await Promise.all([
+        const [recentTracks, recentMv, recentPics, recentEbooks, recentVideos, recentAudioBooks, continueWatching, continueListening] = await Promise.all([
             showMusic      ? this.api('tracks/recent?limit=30')                    : Promise.resolve(null),
             showMv         ? this.api('musicvideos?sort=recent&limit=30')          : Promise.resolve(null),
             showPics       ? this.api('pictures?sort=recent&limit=30')             : Promise.resolve(null),
             showEbooks     ? this.api('ebooks?sort=recent&limit=30')               : Promise.resolve(null),
             showMovies     ? this.api('videos?sort=recent&limit=30&grouped=true')  : Promise.resolve(null),
             showAudioBooks ? this.api('audiobooks?sort=recent&limit=30')           : Promise.resolve(null),
-            showMovies     ? this.api('videos/continue-watching').catch(() => [])  : Promise.resolve([])
+            showMovies     ? this.api('videos/continue-watching').catch(() => [])  : Promise.resolve([]),
+            showAudioBooks ? this.api('audiobooks/continue-listening').catch(() => []) : Promise.resolve([])
         ]);
 
         const _hasTmdb      = !!(this._initCfg?.tmdbApiKey);
@@ -2554,7 +3443,7 @@ const App = {
 
         if (!hasAny) {
             html += `<div class="empty-state">
-                <div class="empty-icon">&#127925;</div>
+                <div class="empty-icon"><svg style="width:72px;height:72px" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-media-empty"/></svg></div>
                 <h2>${this.t('empty.welcome.title')}</h2>
                 <p>${this.t('empty.welcome.desc')}</p>
                 <button class="btn-primary" onclick="App.navigate('settings')">${this.t('btn.goToSettings')}</button>
@@ -2583,16 +3472,43 @@ const App = {
                     : '';
                 html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})" data-video-id="${v.id}">
                     <div class="mv-card-thumb${hasPoster ? ' mv-card-poster' : ''}">
-                        ${imgSrc
-                            ? `<img src="${imgSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                        ${this._videoThumbHtml(imgSrc)}
                         <div class="cw-progress-bar"><div class="cw-progress-fill" style="width:${pct}%"></div></div>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.openVideoDetail(${v.id})">&#9654;</button>
                     </div>
                     <div class="mv-card-info">
                         <div class="mv-card-title">${this.esc(title)}</div>
                         ${subtitle ? `<div class="mv-card-artist">${subtitle}</div>` : ''}
+                    </div>
+                </div>`;
+            });
+            html += '</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this, 1)">&#10095;</button></div></div>';
+        }
+
+        // ── Continue Listening (AudioBooks) — only when audiobooks enabled and there are in-progress books ──
+        if (showAudioBooks && continueListening && continueListening.length > 0) {
+            html += `<div class="home-section">
+                <div class="home-section-header">
+                    <h2 class="home-section-title"><svg class="home-section-icon" style="stroke-width:1.5" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg> ${this.t('section.continueListening','Continue Listening')}</h2>
+                    <button class="home-see-all" onclick="App.navigate('audiobooks')">${this.t('btn.seeAll')} &rarr;</button>
+                </div>
+                <div class="home-row">
+                    <button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this, -1)">&#10094;</button>
+                    <div class="home-row-scroll">`;
+            continueListening.forEach(b => {
+                const pct = Math.min(100, Math.max(0, b.percent || 0));
+                const remaining = b.duration > 0 ? this.formatDuration(Math.round(b.duration - b.position)) : '';
+                html += `<div class="mv-card home-card" onclick="App.openAudioBookDetail(${b.id})" style="cursor:pointer">
+                    <div class="mv-card-thumb">
+                        ${b.coverImage
+                            ? `<img src="/audiobookcover/${b.coverImage}" style="width:100%;height:100%;object-fit:cover" onerror="this.style.display='none'" loading="lazy">`
+                            : `<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;background:var(--bg-secondary)"><svg style="width:32px;height:32px;stroke:var(--text-muted);fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></div>`}
+                        <div class="cw-progress-bar"><div class="cw-progress-fill" style="width:${pct}%"></div></div>
+                        <button class="mv-card-play" onclick="event.stopPropagation(); App.playAudioBook(${b.id},'${this.esc(b.title)}','${this.esc(b.author||'')}',false,${b.coverImage?`'${b.coverImage}'`:'null'})">&#9654;</button>
+                    </div>
+                    <div class="mv-card-info">
+                        <div class="mv-card-title">${this.esc(b.title)}</div>
+                        <div class="mv-card-artist">${remaining ? remaining + ' left' : this.esc(b.author || '')}</div>
                     </div>
                 </div>`;
             });
@@ -2626,10 +3542,7 @@ const App = {
                 const homeWatchedBadge = v.isWatched ? `<span class="mv-watched-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>WATCHED</span>` : '';
                 html += `<div class="mv-card home-card" onclick="${clickAction}" data-video-id="${v.id}" data-watched="${v.isWatched ? '1' : '0'}">
                     <div class="mv-card-thumb${hasPoster ? ' mv-card-poster' : ''}">
-                        ${imgSrc
-                            ? `<img src="${imgSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                        ${this._videoThumbHtml(imgSrc)}
                         ${homeWatchedBadge}
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
@@ -2691,10 +3604,7 @@ const App = {
                 const dur = this.formatDuration(v.duration);
                 html += `<div class="mv-card home-card" onclick="App.openMvDetail(${v.id})" data-mv-id="${v.id}">
                     <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none">&#127909;</span>`
-                            : `<span class="mv-card-placeholder">&#127909;</span>`}
+                        ${this._videoThumbHtml(thumbSrc, '&#127909;')}
                         <span class="mv-duration-badge">${dur}</span>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.playMusicVideo(${v.id})">&#9654;</button>
                     </div>
@@ -2782,7 +3692,7 @@ const App = {
                     <div class="home-row-scroll">`;
             audioBookList.forEach(book => {
                 const fmt = (book.format || 'MP3').toUpperCase();
-                const fmtClass = fmt === 'M4B' ? 'm4b' : 'mp3';
+                const fmtClass = fmt.toLowerCase();
                 const author = book.author || 'Unknown Author';
                 const dur = book.duration > 0 ? this.formatDuration(Math.round(book.duration)) : fmt;
                 html += `<div class="ebook-card audiobook-card home-card" onclick="App.openAudioBookDetail(${book.id})" data-audiobook-id="${book.id}">
@@ -2875,16 +3785,7 @@ const App = {
                 <div class="home-row"><button class="home-nav-btn home-nav-left" onclick="App.homeRowScroll(this,-1)">&#10094;</button>
                 <div class="home-row-scroll home-row-wide">`;
             data.recentlyCompleted.forEach(v => {
-                const thumb = v.posterPath ? `/videometa/${v.posterPath}` : v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '';
-                const tl = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
-                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})">
-                    <div class="mv-card-thumb">${thumb
-                        ? `<img src="${thumb}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
-                        <span class="video-type-badge video-type-${v.mediaType}">${tl}</span>
-                    </div>
-                    <div class="mv-card-info"><div class="mv-card-title">${this.esc(v.title)}</div><div class="mv-card-artist">${v.year||''}</div></div>
-                </div>`;
+                html += this._insightsCard(v);
             });
             html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
         }
@@ -2987,16 +3888,8 @@ const App = {
                 <div class="home-row-scroll home-row-wide">`;
             gr.items.forEach(v => {
                 const img = v.posterPath ? `/videometa/${v.posterPath}` : '';
-                const tl = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
                 const rb = v.rating ? `<span class="insights-rating-badge">${v.rating.toFixed(1)}</span>` : '';
-                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})">
-                    <div class="mv-card-thumb mv-card-poster">${img
-                        ? `<img src="${img}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}${rb}
-                        <span class="video-type-badge video-type-${v.mediaType}">${tl}</span>
-                    </div>
-                    <div class="mv-card-info"><div class="mv-card-title">${this.esc(v.title)}</div><div class="mv-card-artist">${v.year||''}</div></div>
-                </div>`;
+                html += this._insightsCard(v, { imgSrc: img, thumbCls: 'mv-card-thumb mv-card-poster', ratingBadge: rb });
             });
             html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
         }
@@ -3012,18 +3905,11 @@ const App = {
                 const rep = s.representative;
                 const img = rep.posterPath ? `/videometa/${rep.posterPath}` : rep.thumbnailPath ? `/videothumb/${rep.thumbnailPath}` : '';
                 const pct = Math.round(s.watchedCount / s.totalCount * 100);
-                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${rep.id})">
-                    <div class="mv-card-thumb mv-card-poster">${img
-                        ? `<img src="${img}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-tv"/></svg></span>`
-                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-tv"/></svg></span>`}
-                        <span class="video-type-badge video-type-tv">${this.t('insights.tv')}</span>
-                    </div>
-                    <div class="mv-card-info">
-                        <div class="mv-card-title">${this.esc(s.seriesName)}</div>
-                        <div class="mv-card-artist">${s.watchedCount}/${s.totalCount} ep</div>
-                        <div class="ins-series-prog"><div class="ins-series-prog-fill" style="width:${pct}%"></div></div>
-                    </div>
-                </div>`;
+                html += this._insightsCard(rep, {
+                    imgSrc: img, thumbCls: 'mv-card-thumb mv-card-poster', thumbIcon: this._cardSvg('tv'),
+                    title: this.esc(s.seriesName), artist: `${s.watchedCount}/${s.totalCount} ep`,
+                    extraInfo: `<div class="ins-series-prog"><div class="ins-series-prog-fill" style="width:${pct}%"></div></div>`
+                });
             });
             html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
         }
@@ -3037,16 +3923,8 @@ const App = {
                 <div class="home-row-scroll home-row-wide">`;
             data.hiddenGems.forEach(v => {
                 const img = v.posterPath ? `/videometa/${v.posterPath}` : '';
-                const tl = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
                 const rb = v.rating ? `<span class="insights-rating-badge">${v.rating.toFixed(1)}</span>` : '';
-                html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})">
-                    <div class="mv-card-thumb mv-card-poster">${img
-                        ? `<img src="${img}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}${rb}
-                        <span class="video-type-badge video-type-${v.mediaType}">${tl}</span>
-                    </div>
-                    <div class="mv-card-info"><div class="mv-card-title">${this.esc(v.title)}</div><div class="mv-card-artist">${v.year||''}</div></div>
-                </div>`;
+                html += this._insightsCard(v, { imgSrc: img, thumbCls: 'mv-card-thumb mv-card-poster', ratingBadge: rb });
             });
             html += `</div><button class="home-nav-btn home-nav-right" onclick="App.homeRowScroll(this,1)">&#10095;</button></div></div>`;
         }
@@ -3106,23 +3984,12 @@ const App = {
 
         gridEl.innerHTML = data.recommendations.map(v => {
             const imgSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '');
-            const hasPoster = !!v.posterPath;
-            const typeLabel = v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie');
-            const ratingBadge = v.rating > 0 ? `<span class="insights-rating-badge">${v.rating.toFixed(1)}</span>` : '';
-            return `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})" style="min-width:160px">
-                <div class="mv-card-thumb${hasPoster ? ' mv-card-poster' : ''}">
-                    ${imgSrc
-                        ? `<img src="${imgSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                           <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
-                    ${ratingBadge}
-                    <span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
-                </div>
-                <div class="mv-card-info">
-                    <div class="mv-card-title">${this.esc(v.title)}</div>
-                    <div class="mv-card-artist">${v.year || ''} ${v.genre ? '&middot; ' + this.esc(v.genre.split(',')[0]) : ''}</div>
-                </div>
-            </div>`;
+            const rb = v.rating > 0 ? `<span class="insights-rating-badge">${v.rating.toFixed(1)}</span>` : '';
+            const gen = v.genre ? ' &middot; ' + this.esc(v.genre.split(',')[0]) : '';
+            return this._insightsCard(v, {
+                imgSrc, thumbCls: `mv-card-thumb${v.posterPath ? ' mv-card-poster' : ''}`,
+                ratingBadge: rb, artist: `${v.year || ''}${gen}`, extraStyle: 'min-width:160px'
+            });
         }).join('');
 
         // Scroll mood results into view
@@ -3243,7 +4110,7 @@ const App = {
     },
 
     _actorFirstLetter(name) {
-        const c = (name || '').charAt(0).toUpperCase();
+        const c = (name || '').normalize('NFD').replace(/[̀-ͯ]/g, '').charAt(0).toUpperCase();
         return /[A-Z]/.test(c) ? c : '#';
     },
 
@@ -3331,6 +4198,7 @@ const App = {
             html += `<div style="color:var(--text-secondary);font-size:0.85rem">${this.t('actors.died')}: ${actor.deathday}</div>`;
         }
 
+        html += `<div id="actor-social"></div>`;
         html += `<div style="margin-top:8px;display:flex;gap:12px;flex-wrap:wrap">
                 <span style="background:var(--accent);color:#fff;padding:4px 10px;border-radius:12px;font-size:0.8rem">${actor.movieCount} ${this.t('actors.inLibrary')}</span>
             </div>`;
@@ -3367,6 +4235,13 @@ const App = {
             <div id="actor-knownfor" style="display:flex;gap:12px;overflow-x:auto;padding-bottom:8px">
                 <div class="spinner" style="margin:20px auto"></div>
             </div>
+        </div>`;
+
+        // Filmography section — populated async, hidden until data arrives
+        html += `<div id="actor-filmography-section" style="display:none;margin-bottom:30px">
+            <h3 style="margin-bottom:4px">Filmography</h3>
+            <div id="actor-filmo-tabs" class="actor-filmo-tabs"></div>
+            <div id="actor-filmo-list"></div>
         </div>`;
 
         content.innerHTML = html;
@@ -3415,6 +4290,14 @@ const App = {
                 kfEl.innerHTML = `<div style="color:var(--text-secondary);font-size:0.9rem;padding:20px">${this.t('actors.noResults') || 'No credits found.'}</div>`;
             }
         }
+
+        // Social links + full filmography — fetched in parallel, stored in DB on first view
+        const [social, filmo] = await Promise.all([
+            this.api(`actors/${id}/social`),
+            this.api(`actors/${id}/filmography`)
+        ]);
+        this._actorPopulateSocial(social);
+        this._actorInitFilmography(filmo);
     },
 
     async _kfOpenDetail(idx) {
@@ -3434,7 +4317,7 @@ const App = {
                     <div class="nr-detail-poster">
                         ${posterSrc
                             ? `<img src="${this.esc(posterSrc)}" alt="" onerror="this.style.display='none'">`
-                            : `<span class="nr-card-ph" style="height:200px"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                            : `<span class="nr-card-ph" style="height:200px">${this._FILM_SVG}</span>`}
                     </div>
                     <div class="nr-detail-info">
                         <h2 class="nr-detail-title">${this.esc(item.title)}</h2>
@@ -3503,6 +4386,62 @@ const App = {
         const v = data.videos[0];
         btn.closest('.nr-detail-overlay')?.remove();
         this.openVideoDetail(v.id);
+    },
+
+    _actorPopulateSocial(social) {
+        const el = document.getElementById('actor-social');
+        if (!el || !social) return;
+        const fbSvg = `<svg viewBox="0 0 24 24" fill="white" width="18" height="18"><path d="M18 2h-3a5 5 0 0 0-5 5v3H7v4h3v8h4v-8h3l1-4h-4V7a1 1 0 0 1 1-1h3z"/></svg>`;
+        const igSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>`;
+        const xSvg  = `<svg viewBox="0 0 24 24" fill="white" width="18" height="18"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.747l7.73-8.835L1.254 2.25H8.08l4.256 5.638L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>`;
+        const links = [];
+        if (social.facebook)  links.push(`<a href="https://www.facebook.com/${this.esc(social.facebook)}"  target="_blank" rel="noopener" class="actor-social-btn" style="background:#1877F2"  title="Facebook">${fbSvg}</a>`);
+        if (social.instagram) links.push(`<a href="https://www.instagram.com/${this.esc(social.instagram)}" target="_blank" rel="noopener" class="actor-social-btn" style="background:linear-gradient(45deg,#f09433,#e6683c,#dc2743,#cc2366,#bc1888)" title="Instagram">${igSvg}</a>`);
+        if (social.twitter)   links.push(`<a href="https://x.com/${this.esc(social.twitter)}"              target="_blank" rel="noopener" class="actor-social-btn" style="background:#000"    title="X (Twitter)">${xSvg}</a>`);
+        if (links.length) el.innerHTML = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;margin-bottom:4px">${links.join('')}</div>`;
+    },
+
+    _actorInitFilmography(filmo) {
+        const section = document.getElementById('actor-filmography-section');
+        const tabsEl  = document.getElementById('actor-filmo-tabs');
+        if (!section || !tabsEl || !filmo) return;
+        const tabs = [];
+        if (filmo.actor?.length)       tabs.push({ key: 'actor',       label: `Actor (${filmo.actor.length})` });
+        if (filmo.appearances?.length) tabs.push({ key: 'appearances', label: `Appearances (${filmo.appearances.length})` });
+        if (filmo.producer?.length)    tabs.push({ key: 'producer',    label: `Producer (${filmo.producer.length})` });
+        if (!tabs.length) return;
+        App._actorFilmoData = filmo;
+        const firstKey = tabs[0].key;
+        tabsEl.innerHTML = tabs.map(t =>
+            `<button class="actor-filmo-tab${t.key === firstKey ? ' active' : ''}" data-tab="${t.key}" onclick="App._actorFilmoTab('${t.key}')">${t.label}</button>`
+        ).join('');
+        this._actorFilmoRenderList(firstKey);
+        section.style.display = '';
+    },
+
+    _actorFilmoTab(tab) {
+        document.querySelectorAll('.actor-filmo-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+        this._actorFilmoRenderList(tab);
+    },
+
+    _actorFilmoRenderList(tab) {
+        const el = document.getElementById('actor-filmo-list');
+        if (!el) return;
+        const items = App._actorFilmoData?.[tab] || [];
+        if (!items.length) {
+            el.innerHTML = `<div style="padding:16px 0;color:var(--text-secondary);font-size:.9rem">No credits found.</div>`;
+            return;
+        }
+        el.innerHTML = items.map(item => {
+            const role = tab === 'producer'
+                ? (item.job       ? ` • ${this.esc(item.job)}`         : '')
+                : (item.character ? ` • as ${this.esc(item.character)}` : '');
+            return `<div class="actor-filmo-item">
+                <span class="actor-filmo-year">${item.year || '—'}</span>
+                <span class="actor-filmo-ttl">${this.esc(item.title || '')}</span>
+                <span class="actor-filmo-role">${role}</span>
+            </div>`;
+        }).join('');
     },
 
     // ─── Analysis Page ──────────────────────────────────────
@@ -3872,7 +4811,17 @@ const App = {
         html += `<div class="section-title"><svg class="an-section-icon"><use href="#icon-copy"/></svg> ${this.t('analysis.duplicates')}</div>`;
         html += `<div class="an-panel" id="dup-panel">
             <p style="font-size:13px;color:var(--text-secondary);margin:0 0 14px">${this.t('analysis.duplicatesDesc')}</p>
-            <button class="an-dup-scan-btn" onclick="App._dupScan()">${this.t('analysis.duplicatesScan')}</button>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <button class="an-dup-scan-btn" onclick="App._dupScan()">${this.t('analysis.duplicatesScan')}</button>
+                <div id="dup-export-btns" style="display:none;gap:8px">
+                    <button class="an-export-btn" onclick="App._dupExportCsv()">
+                        <svg class="an-export-icon"><use href="#icon-download"/></svg> ${this.t('analysis.exportCsv')}
+                    </button>
+                    <button class="an-export-btn" onclick="App._dupExportHtml()">
+                        <svg class="an-export-icon"><use href="#icon-download"/></svg> ${this.t('analysis.exportHtml')}
+                    </button>
+                </div>
+            </div>
             <div id="dup-results" style="margin-top:16px"></div>
         </div>`;
 
@@ -3892,10 +4841,15 @@ const App = {
         btn.textContent = this.t('analysis.duplicatesScan');
         if (!data) { results.innerHTML = ''; return; }
 
+        const exportBtns = document.getElementById('dup-export-btns');
         if (data.totalGroups === 0) {
             results.innerHTML = `<div class="dup-empty">${this.t('analysis.duplicatesNone')}</div>`;
+            if (exportBtns) exportBtns.style.display = 'none';
+            this._dupData = null;
             return;
         }
+        this._dupData = data;
+        if (exportBtns) exportBtns.style.display = 'flex';
 
         const sections = [
             { key: 'music',       label: this.t('analysis.duplicatesMusic'),      color: '#1db954', items: data.music },
@@ -3951,6 +4905,85 @@ const App = {
         header.querySelector('.dup-chevron').style.transform = open ? 'rotate(180deg)' : '';
     },
 
+    _dupExportCsv() {
+        if (!this._dupData) return;
+        const sections = [
+            { key: 'music',       label: this.t('analysis.duplicatesMusic') },
+            { key: 'videos',      label: this.t('analysis.duplicatesVideos') },
+            { key: 'tvEpisodes',  label: this.t('analysis.duplicatesTv') },
+            { key: 'musicVideos', label: this.t('analysis.duplicatesMv') },
+            { key: 'ebooks',      label: this.t('analysis.duplicatesEbooks') },
+            { key: 'audiobooks',  label: this.t('analysis.duplicatesAudiobooks') },
+        ];
+        const esc = v => `"${(v + '').replace(/"/g, '""')}"`;
+        const rows = [['Section', 'Group', 'File Path', 'Size', 'Detail', 'Best Copy'].map(esc).join(',')];
+        for (const sec of sections) {
+            const items = this._dupData[sec.key];
+            if (!items || !items.length) continue;
+            for (const g of items) {
+                for (let i = 0; i < g.items.length; i++) {
+                    const it = g.items[i];
+                    rows.push([sec.label, g.label, it.filePath, this.formatSize(it.fileSize), it.detail || '', i === 0 ? 'Yes' : 'No'].map(esc).join(','));
+                }
+            }
+        }
+        const blob = new Blob([rows.join('\r\n')], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'nexusm-duplicates.csv';
+        a.click();
+    },
+
+    _dupExportHtml() {
+        if (!this._dupData) return;
+        const d = this._dupData;
+        const sections = [
+            { key: 'music',       label: this.t('analysis.duplicatesMusic'),      color: '#1db954' },
+            { key: 'videos',      label: this.t('analysis.duplicatesVideos'),     color: '#e67e22' },
+            { key: 'tvEpisodes',  label: this.t('analysis.duplicatesTv'),         color: '#e67e22' },
+            { key: 'musicVideos', label: this.t('analysis.duplicatesMv'),         color: '#9b59b6' },
+            { key: 'ebooks',      label: this.t('analysis.duplicatesEbooks'),     color: '#e74c3c' },
+            { key: 'audiobooks',  label: this.t('analysis.duplicatesAudiobooks'), color: '#3498db' },
+        ].filter(s => d[s.key] && d[s.key].length > 0);
+        const esc = s => (s + '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        let body = '';
+        for (const sec of sections) {
+            body += `<h2 style="color:${sec.color};margin:28px 0 12px;font-size:15px">${esc(sec.label)} (${d[sec.key].length})</h2>`;
+            for (const g of d[sec.key]) {
+                body += `<div style="margin-bottom:16px;border:1px solid #333;border-radius:6px;overflow:hidden">
+                    <div style="background:#222;padding:8px 12px;font-weight:600;font-size:13px;display:flex;justify-content:space-between">
+                        <span>${esc(g.label)}</span>
+                        <span style="color:#888;font-weight:400">${g.count} copies</span>
+                    </div>`;
+                for (let i = 0; i < g.items.length; i++) {
+                    const it = g.items[i];
+                    const best = i === 0;
+                    body += `<div style="padding:7px 12px;background:${best ? '#1a1a2e' : '#161616'};border-top:1px solid #2a2a2a;font-size:12px">
+                        ${best ? `<span style="color:#1db954;font-size:10px;font-weight:600;margin-right:8px">BEST</span>` : ''}
+                        <span style="color:#ccc;word-break:break-all">${esc(it.filePath)}</span>
+                        <span style="color:#888;margin-left:12px">${esc(this.formatSize(it.fileSize))}</span>
+                        ${it.detail ? `<span style="color:#666;margin-left:8px">${esc(it.detail)}</span>` : ''}
+                    </div>`;
+                }
+                body += `</div>`;
+            }
+        }
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>NexusM — Duplicate Detection Report</title>
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#e0e0e0;margin:0;padding:24px 32px}
+h1{font-size:22px;margin:0 0 6px}.summary{color:#888;font-size:13px;margin-bottom:24px}</style>
+</head><body>
+<h1>NexusM — Duplicate Detection Report</h1>
+<p class="summary">${d.totalGroups.toLocaleString()} groups &nbsp;·&nbsp; ${d.totalDuplicateFiles.toLocaleString()} duplicate files &nbsp;·&nbsp; ${esc(this.formatSize(d.totalWastedBytes))} potentially recoverable</p>
+${body}
+</body></html>`;
+        const blob = new Blob([html], { type: 'text/html' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'nexusm-duplicates.html';
+        a.click();
+    },
+
     async _deepScanTrigger() {
         const btn = document.querySelector('[onclick="App._deepScanTrigger()"]');
         if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
@@ -4003,6 +5036,7 @@ const App = {
         this.musicSort = 'recent';
         this.musicSubView = 'all';
         this.musicFormat = '';
+        this.musicGenreFilter = '';
         this._musicFormats = null;
 
         let html = '<div class="music-sub-nav">';
@@ -4026,6 +5060,7 @@ const App = {
         if (!container) return;
         container.innerHTML = '<div class="spinner"></div>';
 
+        this.musicGenreFilter = '';
         switch (view) {
             case 'albums':
                 await this.renderAlbums(container);
@@ -4047,11 +5082,12 @@ const App = {
     async loadMusicPage(el) {
         const target = el || document.getElementById('music-sub-content') || document.getElementById('main-content');
         const fmtParam = this.musicFormat ? `&format=${this.musicFormat}` : '';
+        const genreParam = this.musicGenreFilter ? `&genre=${encodeURIComponent(this.musicGenreFilter)}` : '';
 
         // Letter browse mode: fetch all tracks + formats in one parallel round, skip paginated fetch
         if (this.musicSort === 'title') {
             const [allData, allFormats] = await Promise.all([
-                this.api(`tracks?limit=5000&page=1&sort=title${fmtParam}`),
+                this.api(`tracks?limit=5000&page=1&sort=title${fmtParam}${genreParam}`),
                 this._musicFormats ? Promise.resolve(null) : this.api('tracks/formats')
             ]);
             if (!allData) { target.innerHTML = this.emptyState('Error', 'Could not load tracks.'); return; }
@@ -4082,6 +5118,9 @@ const App = {
                 html += `<button class="filter-chip${this.musicSort === key ? ' active' : ''}" onclick="App.changeMusicSort('${key}')">${label}</button>`;
             }
             html += `</div></div>`;
+            if (this.musicGenreFilter) {
+                html += `<div class="songs-genre-filter-bar"><span class="songs-format-label">Genre:</span><span class="genre-filter-badge">${this.esc(this.musicGenreFilter)}</span><button class="genre-filter-clear-btn" onclick="App.clearMusicGenreFilter()">× Clear filter</button></div>`;
+            }
             if (fmtList.length > 0) {
                 html += `<div class="songs-format-bar"><span class="songs-format-label">Format:</span>`;
                 html += `<button class="filter-chip${!this.musicFormat ? ' active' : ''}" onclick="App.changeMusicFormat('')">All</button>`;
@@ -4120,7 +5159,7 @@ const App = {
         }
 
         const [data, allFormats] = await Promise.all([
-            this.api(`tracks?limit=${this.musicPerPage}&page=${this.musicPage}&sort=${this.musicSort}${fmtParam}`),
+            this.api(`tracks?limit=${this.musicPerPage}&page=${this.musicPage}&sort=${this.musicSort}${fmtParam}${genreParam}`),
             this._musicFormats ? Promise.resolve(null) : this.api('tracks/formats')
         ]);
         if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load music library.'); return; }
@@ -4153,6 +5192,9 @@ const App = {
             html += `<button class="filter-chip${this.musicSort === key ? ' active' : ''}" onclick="App.changeMusicSort('${key}')">${label}</button>`;
         }
         html += `</div></div>`;
+        if (this.musicGenreFilter) {
+            html += `<div class="songs-genre-filter-bar"><span class="songs-format-label">Genre:</span><span class="genre-filter-badge">${this.esc(this.musicGenreFilter)}</span><button class="genre-filter-clear-btn" onclick="App.clearMusicGenreFilter()">× Clear filter</button></div>`;
+        }
         if (fmtList.length > 0) {
             html += `<div class="songs-format-bar"><span class="songs-format-label">Format:</span>`;
             html += `<button class="filter-chip${!this.musicFormat ? ' active' : ''}" onclick="App.changeMusicFormat('')">All</button>`;
@@ -4189,6 +5231,24 @@ const App = {
 
     changeMusicFormat(fmt) {
         this.musicFormat = fmt;
+        this.musicPage = 1;
+        this.loadMusicPage();
+    },
+
+    async filterMusicByGenre(genre) {
+        if (this.currentPage !== 'music') {
+            await this.navigate('music');
+        } else if (this.musicSubView !== 'all') {
+            this.musicSubView = 'all';
+            document.querySelectorAll('.music-sub-tab').forEach((t, i) => t.classList.toggle('active', i === 0));
+        }
+        this.musicGenreFilter = genre;
+        this.musicPage = 1;
+        await this.loadMusicPage();
+    },
+
+    clearMusicGenreFilter() {
+        this.musicGenreFilter = '';
         this.musicPage = 1;
         this.loadMusicPage();
     },
@@ -4248,10 +5308,33 @@ const App = {
     },
 
     async shuffleWithAndroidPlayer() {
-        const data = await this.api('tracks?limit=200&page=1&sort=recent');
+        const data = await this.api('tracks?limit=100000&page=1&sort=random');
         if (!data || !data.tracks || !data.tracks.length) return;
-        const tracks = [...data.tracks].sort(() => Math.random() - 0.5);
-        this.launchAndroidMusicPlayer(tracks, 0);
+        this.launchAndroidMusicPlayer(data.tracks, 0);
+    },
+
+    async shuffleGenre(genre) {
+        if (!genre) return;
+        const data = await this.api(`tracks?genre=${encodeURIComponent(genre)}&limit=100000&page=1&sort=random`);
+        if (!data || !data.tracks || !data.tracks.length) return;
+        this.shuffle = true;
+        document.getElementById('btn-shuffle').style.color = 'var(--accent)';
+        this.playlist = data.tracks;
+        this.playIndex = 0;
+        this.playTrack(data.tracks[0]);
+    },
+
+    async startNightClubModeFromGenre(genre) {
+        this._playlistTracks = [];
+        await this.shuffleGenre(genre);
+        this.startNightClubMode();
+    },
+
+    async shuffleGenreWithAndroid(genre) {
+        if (!genre) return;
+        const data = await this.api(`tracks?genre=${encodeURIComponent(genre)}&limit=100000&page=1&sort=random`);
+        if (!data || !data.tracks || !data.tracks.length) return;
+        this.launchAndroidMusicPlayer(data.tracks, 0);
     },
 
     goMusicPage(page) {
@@ -4450,7 +5533,8 @@ const App = {
         const el = document.getElementById('main-content');
         document.getElementById('page-title').innerHTML = `<span>${this.esc(album.name)}</span>`;
 
-        let html = `<div class="album-hero">
+        let html = `<div style="margin-bottom:12px"><button class="filter-chip" onclick="App.navigate('albums')">&laquo; ${this.t('btn.backToAlbums', 'Back to Albums')}</button></div>
+        <div class="album-hero">
             <div class="album-hero-art">
                 <img src="/api/cover/${album.id}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
                 <div class="album-hero-art-placeholder" style="display:none">&#127925;</div>
@@ -4458,6 +5542,7 @@ const App = {
             <div class="album-hero-info">
                 <div class="album-hero-label">Album</div>
                 <div class="album-hero-title">${this.esc(album.name)}</div>
+                ${album.genre ? `<div class="album-hero-genre">${album.genre.split(/[,;\/]/).map(g => `<span class="genre-chip">${this.esc(g.trim())}</span>`).join('')}</div>` : ''}
                 <div class="album-hero-meta">
                     ${this.esc(album.artist)}${album.year ? ' &middot; ' + album.year : ''}
                     &middot; ${album.tracks ? album.tracks.length : 0} tracks
@@ -4525,22 +5610,30 @@ const App = {
     // ─── Artists Page ────────────────────────────────────────
     _artistsPage: 1,
     _artistsTotal: 0,
-    _artistsSort: 'paginated',
 
     async renderArtists(el) {
-        this._artistsPage = 1;
-        this._artistsSort = 'paginated';
         await this.loadArtistsPage(el);
     },
 
     _artistCardHtml(artist) {
-        const imgHtml = artist.imagePath
-            ? `<img src="/singerphoto/${artist.imagePath}" class="artist-portrait" loading="lazy"
+        const paths = artist.imagePaths || (artist.imagePath ? [artist.imagePath] : []);
+        const fallback = `<div class="artist-portrait-fallback"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`;
+        let imgHtml;
+        if (paths.length >= 4) {
+            imgHtml = `<div class="artist-cover-quad">${paths.slice(0,4).map(p =>
+                `<div class="artist-cover-cell"><img src="/singerphoto/${p}" loading="lazy" alt="" onerror="this.parentElement.style.background='var(--bg-surface)'"></div>`
+            ).join('')}</div>`;
+        } else if (paths.length >= 2) {
+            imgHtml = `<div class="artist-cover-dual">${paths.slice(0,2).map(p =>
+                `<div class="artist-cover-cell"><img src="/singerphoto/${p}" loading="lazy" alt="" onerror="this.parentElement.style.background='var(--bg-surface)'"></div>`
+            ).join('')}</div>`;
+        } else if (paths.length === 1) {
+            imgHtml = `<img src="/singerphoto/${paths[0]}" class="artist-portrait" loading="lazy"
                    onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-               <div class="artist-portrait-fallback" style="display:none">
-                   <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`
-            : `<div class="artist-portrait-fallback">
-                   <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`;
+               <div class="artist-portrait-fallback" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-music"/></svg></div>`;
+        } else {
+            imgHtml = fallback;
+        }
         return `<div class="card" onclick="App.openArtist('${this.esc(artist.name).replace(/'/g, "\\'")}')">
             <div class="card-cover artist-cover">${imgHtml}</div>
             <div class="card-info">
@@ -4551,71 +5644,55 @@ const App = {
     },
 
     async loadArtistsPage(el) {
-        const perPage = 100;
         const target = el || document.getElementById('music-sub-content');
+        target.innerHTML = `<div style="text-align:center;padding:60px"><div class="spinner"></div></div>`;
 
-        const headerHtml = (totalCount) => `<div class="page-header"><h1>${this.t('page.artists')}</h1>
+        const allData = await this.api('artists?limit=2000&page=1&sort=name');
+        if (!allData) { target.innerHTML = this.emptyState('Error', 'Could not load artists.'); return; }
+        const allArtists = allData.artists || [];
+
+        const ALL_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
+        const groups = new Map();
+        allArtists.forEach(artist => {
+            const letter = this._actorFirstLetter(artist.name).toUpperCase();
+            if (!groups.has(letter)) groups.set(letter, []);
+            groups.get(letter).push(artist);
+        });
+        const activeLetters = new Set(groups.keys());
+
+        let html = `<div class="page-header"><h1>${this.t('page.artists')}</h1>
             <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-                <div style="font-size:13px;color:var(--text-secondary)">${totalCount} artists</div>
-                <button class="filter-chip${this._artistsSort === 'paginated' ? ' active' : ''}" onclick="App.changeArtistsSort('paginated')">${this.t('sort.recent')}</button>
-                <button class="filter-chip${this._artistsSort === 'name' ? ' active' : ''}" onclick="App.changeArtistsSort('name')">${this.t('sort.name')}</button>
+                <div style="font-size:13px;color:var(--text-secondary)">${allArtists.length} artists</div>
                 <button class="filter-chip" id="btn-fetch-artist-images" onclick="App.fetchArtistImages()">
                     <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:middle;margin-right:4px"><use href="#icon-download"/></svg>Fetch Artist Images</button>
             </div></div>`;
 
-        // Letter browse mode
-        if (this._artistsSort === 'name') {
-            const allData = await this.api('artists?limit=2000&page=1&sort=name');
-            if (!allData) { target.innerHTML = this.emptyState('Error', 'Could not load artists.'); return; }
-            const allArtists = allData.artists || [];
-
-            const groups = {};
-            allArtists.forEach(artist => {
-                const letter = this._actorFirstLetter(artist.name).toUpperCase();
-                if (!groups[letter]) groups[letter] = [];
-                groups[letter].push(artist);
-            });
-            const letters = Object.keys(groups).sort();
-
-            let html = headerHtml(allArtists.length);
-            html += `<div class="vid-timeline-wrapper">`;
-            letters.forEach(letter => {
-                html += `<div class="vid-letter-anchor" id="artist-letter-${letter}"></div>`;
-                html += `<div class="vid-letter-header">${letter}</div>`;
-                html += `<div class="card-grid">`;
-                groups[letter].forEach(artist => { html += this._artistCardHtml(artist); });
-                html += `</div>`;
-            });
-            html += `</div>`;
-            html += `<div class="vid-scrubber" id="artists-letter-scrubber">`;
-            letters.forEach(l => {
-                html += `<div class="vid-scrubber-item" data-key="${l}" onclick="App._vidScrollToAnchor('artist-letter-${l}')">${l}</div>`;
-            });
-            html += `</div>`;
-
+        if (allArtists.length === 0) {
+            html += this.emptyState(this.t('empty.noArtists.title'), this.t('empty.noArtists.desc'));
             target.innerHTML = html;
-            this._setupVidScrubber(letters, 'artist-letter-');
             return;
         }
 
-        const data = await this.api(`artists?limit=${perPage}&page=${this._artistsPage}`);
-        if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load artists.'); return; }
-        this._artistsTotal = data.total;
-        const totalPages = Math.ceil(data.total / perPage);
+        html += `<div class="vid-timeline-wrapper">`;
+        ALL_LETTERS.forEach(l => {
+            if (!groups.has(l)) return;
+            html += `<div class="vid-letter-anchor" id="artist-letter-${l}" data-key="${l}"></div>`;
+            html += `<div class="vid-letter-header">${l}</div>`;
+            html += `<div class="card-grid" style="margin-bottom:28px">`;
+            groups.get(l).forEach(artist => { html += this._artistCardHtml(artist); });
+            html += `</div>`;
+        });
+        html += `</div>`;
 
-        let html = headerHtml(data.total);
-        if (data.artists && data.artists.length > 0) {
-            if (totalPages > 1) {
-                html += `<div style="text-align:right;margin-bottom:12px;color:var(--text-muted);font-size:12px">Page ${this._artistsPage} of ${totalPages}</div>`;
-            }
-            html += '<div class="card-grid">';
-            data.artists.forEach(artist => { html += this._artistCardHtml(artist); });
-            html += '</div>';
-            if (totalPages > 1) html += this.renderArtistsPagination(this._artistsPage, totalPages);
-        } else {
-            html += this.emptyState(this.t('empty.noArtists.title'), this.t('empty.noArtists.desc'));
-        }
-        target.innerHTML = html;
+        let scrubHtml = `<div class="vid-scrubber" id="artists-letter-scrubber">`;
+        ALL_LETTERS.forEach(l => {
+            scrubHtml += `<div class="vid-scrubber-item${activeLetters.has(l) ? '' : ' empty'}" data-key="${l}" onclick="App._vidScrollToAnchor('artist-letter-${l}')">${l}</div>`;
+        });
+        scrubHtml += `</div>`;
+
+        target.innerHTML = html + scrubHtml;
+        const activeKeys = ALL_LETTERS.filter(l => activeLetters.has(l));
+        this._setupVidScrubber(activeKeys, 'artist-letter-');
     },
 
     changeArtistsSort(sort) {
@@ -4684,6 +5761,7 @@ const App = {
     _artistName: '',
     _artistPage: 1,
     _artistTracks: [],
+    _artistAlbums: [],
 
     async openArtist(name) {
         this._artistName = name;
@@ -4694,34 +5772,188 @@ const App = {
     async loadArtistPage() {
         const name = this._artistName;
         const perPage = 100;
-        const data = await this.api(`tracks?artist=${encodeURIComponent(name)}&limit=${perPage}&page=${this._artistPage}`);
         const el = document.getElementById('main-content');
         document.getElementById('page-title').innerHTML = `<span>${this.esc(name)}</span>`;
-        const total = data ? data.total : 0;
+        const hasLfm = !!(this._initCfg?.lastFmApiKey);
+
+        const [artistData, trackData] = await Promise.all([
+            this.api(`artists/by-name?name=${encodeURIComponent(name)}`),
+            this.api(`tracks?artist=${encodeURIComponent(name)}&limit=${perPage}&page=${this._artistPage}`)
+        ]);
+
+        const artist = artistData?.artist || { name, imagePath: null, bio: null, albumCount: 0, trackCount: 0 };
+        const albums  = artistData?.albums || [];
+        const tracks  = trackData?.tracks || [];
+        const total   = trackData?.total ?? artist.trackCount ?? 0;
         const totalPages = Math.ceil(total / perPage);
 
-        let html = `<div class="page-header"><h1>${this.esc(name)}</h1>
-            <div style="font-size:13px;color:var(--text-secondary)">${total} tracks</div></div>`;
+        this._artistTracks = tracks;
+        this._artistAlbums = albums;
 
-        if (data && data.tracks && data.tracks.length > 0) {
-            this._artistTracks = data.tracks;
-            if (totalPages > 1) {
-                html += `<div style="text-align:right;margin-bottom:12px;color:var(--text-muted);font-size:12px">Page ${this._artistPage} of ${totalPages}</div>`;
-            }
+        let html = `<div style="margin-bottom:10px"><button class="filter-chip" onclick="App.navigate('artists')">&laquo; ${this.t('btn.backToArtists', 'Back to Artists')}</button></div>`;
+        html += this._renderArtistHero(artist, total, albums.length);
+
+        if (albums.length > 0) html += this._renderArtistAlbumsGrid(albums);
+
+        if (tracks.length > 0) {
+            html += `<div class="artist-section-header">
+                <span class="artist-section-title">${this.t('artist.allTracks', 'All Tracks')}</span>
+                <span class="artist-section-count">${total}</span>
+            </div>`;
+            if (totalPages > 1) html += `<div style="text-align:right;margin-bottom:10px;color:var(--text-muted);font-size:12px">${this.t('label.page','Page')} ${this._artistPage} / ${totalPages}</div>`;
             html += '<div class="songs-grid">';
-            data.tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playArtistTrack' }); });
+            tracks.forEach((t, i) => { html += this._songCardHtml(t, i, { playFn: 'playArtistTrack' }); });
             html += '</div>';
             if (totalPages > 1) html += this.renderArtistPagination(this._artistPage, totalPages);
         } else {
             html += this.emptyState('No tracks found', 'No tracks found for this artist.');
         }
+
+        if (hasLfm) {
+            html += `<div class="artist-similar-section" id="artist-similar-section">
+                <h3 class="artist-similar-title">${this.t('artist.similarTitle', 'Similar Artists')}</h3>
+                <div class="artist-similar-chips" id="artist-similar-chips">
+                    <span class="artist-similar-loading">${this.t('artist.similarLoading', 'Loading…')}</span>
+                </div>
+            </div>`;
+        }
+
         el.innerHTML = html;
+        if (hasLfm && !artist.bio) this._loadArtistBio(name);
+        if (hasLfm) this.loadSimilarArtists(name);
+    },
+
+    async _loadArtistBio(artistName) {
+        try {
+            const data = await this.api(`lastfm/artist-info?artist=${encodeURIComponent(artistName)}`);
+            const slot = document.getElementById('artist-bio-slot');
+            if (!slot || !data) return;
+            let inner = '';
+            if (data.bio) {
+                const bio = data.bio.length > 400 ? data.bio.substring(0, 400) + '…' : data.bio;
+                inner += `<p class="artist-hero-bio">${this.esc(bio)}</p>`;
+            }
+            if (data.tags?.length) {
+                const pills = data.tags.slice(0, 5).map(t => `<span class="artist-hero-tag">${this.esc(t)}</span>`).join('');
+                inner += `<div class="artist-hero-tags">${pills}</div>`;
+            }
+            if (inner) slot.innerHTML = inner;
+        } catch { /* silently ignore — bio is non-critical */ }
+    },
+
+    _renderArtistHero(artist, trackCount, albumCount) {
+        const hasBg = !!artist.imagePath;
+        const photoHtml = artist.imagePath
+            ? `<img src="/singerphoto/${this.esc(artist.imagePath)}" class="artist-hero-photo" alt="${this.esc(artist.name)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+               <div class="artist-hero-photo-fallback" style="display:none"><svg width="56" height="56" style="stroke:currentColor;fill:none;stroke-width:1.5;opacity:.4"><use href="#icon-music"/></svg></div>`
+            : `<div class="artist-hero-photo-fallback"><svg width="56" height="56" style="stroke:currentColor;fill:none;stroke-width:1.5;opacity:.4"><use href="#icon-music"/></svg></div>`;
+        const meta = [];
+        if (albumCount > 0) meta.push(`${albumCount} ${this.t('label.albums','albums')}`);
+        if (trackCount > 0) meta.push(`${trackCount} ${this.t('artist.tracks','tracks')}`);
+        const bioHtml = artist.bio
+            ? `<p class="artist-hero-bio">${this.esc(artist.bio.length > 400 ? artist.bio.substring(0,400) + '…' : artist.bio)}</p>`
+            : '';
+        return `<div class="artist-hero${hasBg ? '' : ' artist-hero--no-bg'}">
+            ${hasBg ? `<div class="artist-hero-bg" style="background-image:url('/singerphoto/${this.esc(artist.imagePath)}')"></div><div class="artist-hero-overlay"></div>` : ''}
+            <div class="artist-hero-body">
+                <div class="artist-hero-photo-wrap">${photoHtml}</div>
+                <div class="artist-hero-info">
+                    <div class="artist-hero-name">${this.esc(artist.name)}</div>
+                    ${meta.length ? `<div class="artist-hero-meta">${meta.join(' &middot; ')}</div>` : ''}
+                    <div class="artist-hero-actions">
+                        <button class="btn-secondary artist-action-btn" onclick="App.playArtistTrack(0)"><svg width="14" height="14"><use href="#icon-play"/></svg> ${this.t('artist.playAll','Play All')}</button>
+                        <button class="btn-secondary artist-action-btn" onclick="App.playArtistRadio()"><svg width="14" height="14"><use href="#icon-radio"/></svg> ${this.t('artist.radio','Artist Radio')}</button>
+                    </div>
+                    <div id="artist-bio-slot">${bioHtml}</div>
+                </div>
+            </div>
+        </div>`;
+    },
+
+    _renderArtistAlbumsGrid(albums) {
+        let html = `<div class="artist-albums-section">
+            <div class="artist-section-header">
+                <span class="artist-section-title">${this.t('label.albums','Albums')}</span>
+                <span class="artist-section-count">${albums.length}</span>
+            </div>
+            <div class="artist-album-grid">`;
+        for (const album of albums) {
+            const metaParts = [album.year, album.trackCount ? `${album.trackCount} ${this.t('artist.tracks','tracks')}` : null].filter(Boolean);
+            html += `<div class="artist-album-card" onclick="App.openAlbum(${album.id})">
+                <div class="artist-album-cover">
+                    <img src="/api/cover/${album.id}" alt="${this.esc(album.name)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+                    <div class="artist-album-cover-placeholder" style="display:none"><svg width="40" height="40" style="stroke:currentColor;fill:none;stroke-width:1.5;opacity:.3"><use href="#icon-music"/></svg></div>
+                </div>
+                <div class="artist-album-info">
+                    <div class="artist-album-name" title="${this.esc(album.name)}">${this.esc(album.name)}</div>
+                    <div class="artist-album-meta">${metaParts.join(' &middot; ')}</div>
+                </div>
+                <div class="artist-album-footer">
+                    <button class="btn-secondary artist-album-play" onclick="event.stopPropagation();App.playArtistAlbum(${album.id})">
+                        <svg width="12" height="12"><use href="#icon-play"/></svg> ${this.t('artist.playAll','Play')}
+                    </button>
+                </div>
+            </div>`;
+        }
+        html += '</div></div>';
+        return html;
+    },
+
+    async playArtistAlbum(albumId) {
+        const data = await this.api(`albums/${albumId}`);
+        if (!data?.tracks?.length) { this.showToast(this.t('artist.noTracks','No tracks found'), 'error'); return; }
+        this.playlist = data.tracks;
+        this.playIndex = 0;
+        this.playTrack(this.playlist[0]);
+    },
+
+    async loadSimilarArtists(artistName) {
+        const data = await this.api(`lastfm/similar-artists?artist=${encodeURIComponent(artistName)}`);
+        const container = document.getElementById('artist-similar-chips');
+        if (!container) return;
+        const similar = data?.similar || [];
+        if (similar.length === 0) {
+            container.innerHTML = `<span class="artist-similar-none">${this.t('artist.similarNone', 'No similar artists found')}</span>`;
+            return;
+        }
+        let html = '';
+        for (const a of similar) {
+            if (a.inLibrary) {
+                html += `<button class="artist-chip artist-chip--local" onclick="App.openArtist(${JSON.stringify(a.name)})" title="${this.esc(a.name)}">
+                    <span class="chip-name">${this.esc(a.name)}</span>
+                    <span class="chip-count">${a.trackCount} ${this.t('artist.tracks', 'tracks')}</span>
+                </button>`;
+            } else {
+                html += `<a class="artist-chip artist-chip--external" href="${this.esc(a.url)}" target="_blank" rel="noopener" title="${this.esc(a.name)} — ${this.t('artist.notInLibrary', 'not in your library')}">
+                    <span class="chip-name">${this.esc(a.name)}</span>
+                    <span class="chip-match">${a.match}%</span>
+                </a>`;
+            }
+        }
+        container.innerHTML = html;
     },
 
     playArtistTrack(index) {
         this.playlist = [...(this._artistTracks || [])];
         this.playIndex = index;
         if (this.playlist[index]) this.playTrack(this.playlist[index]);
+    },
+
+    async playArtistRadio() {
+        const name = this._artistName;
+        if (!name) return;
+        const btn = document.querySelector('.artist-action-btn[onclick*="playArtistRadio"]');
+        if (btn) { btn.disabled = true; btn.textContent = this.t('artist.radioLoading', 'Loading radio…'); }
+        const data = await this.api(`radio/artist?artist=${encodeURIComponent(name)}`);
+        if (btn) { btn.disabled = false; btn.innerHTML = `<svg width="14" height="14"><use href="#icon-radio"/></svg> ${this.t('artist.radio', 'Artist Radio')}`; }
+        if (!data || !data.tracks || data.tracks.length === 0) {
+            this.showToast(this.t('artist.radioEmpty', 'No tracks found for Artist Radio'), 'error');
+            return;
+        }
+        this.playlist = data.tracks;
+        this.playIndex = 0;
+        this.playTrack(this.playlist[0]);
+        this.showToast(`${this.t('artist.radioStarted', 'Artist Radio')} — ${data.total} ${this.t('artist.tracks', 'tracks')}`, 'success');
     },
 
     renderArtistPagination(currentPage, totalPages) {
@@ -4908,9 +6140,24 @@ const App = {
         }
 
         if (genres && genres.length > 0) {
-            html += '<div class="genre-grid">';
+            html += '<div class="genre-card-grid">';
             genres.forEach(g => {
-                html += `<div class="genre-tag" onclick="App.openGenre('${this.esc(g.name)}')">${this.esc(g.name)}<span class="genre-count">${g.count}</span></div>`;
+                const ids = g.albumIds || [];
+                let artHtml;
+                if (ids.length >= 4) {
+                    artHtml = `<div class="gc-art gc-art-quad">${ids.slice(0,4).map(id => `<div class="gc-cell"><img src="/api/cover/${id}" loading="lazy" alt=""></div>`).join('')}</div>`;
+                } else if (ids.length >= 1) {
+                    artHtml = `<div class="gc-art gc-art-single"><img src="/api/cover/${ids[0]}" loading="lazy" alt="" onerror="this.style.opacity='0'"></div>`;
+                } else {
+                    artHtml = `<div class="gc-art" style="background:var(--bg-surface)"></div>`;
+                }
+                html += `<div class="genre-card" onclick="App.openGenre('${this.esc(g.name)}')">
+                    ${artHtml}
+                    <div class="genre-card-overlay">
+                        <div class="genre-card-name">${this.esc(g.name)}</div>
+                        <div class="genre-card-count">${g.count} track${g.count !== 1 ? 's' : ''}</div>
+                    </div>
+                </div>`;
             });
             html += '</div>';
         } else if (!customCats || customCats.length === 0) {
@@ -4953,6 +6200,12 @@ const App = {
         el.innerHTML = html;
     },
 
+    _genreColor(name) {
+        let h = 0;
+        for (let i = 0; i < name.length; i++) h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
+        return `hsl(${Math.abs(h) % 360},65%,58%)`;
+    },
+
     _genreName: '',
     _genrePage: 1,
 
@@ -4971,8 +6224,22 @@ const App = {
         const total = data ? data.total : 0;
         const totalPages = Math.ceil(total / perPage);
 
-        let html = `<div class="page-header"><h1>${this.esc(genre)}</h1>
-            <div style="font-size:13px;color:var(--text-secondary)">${total} tracks</div></div>`;
+        let html = `<div class="page-header">
+            <div style="margin-bottom:8px"><button class="filter-chip" onclick="App.navigate('genres')">&laquo; ${this.t('btn.backToGenres', 'Back to Genres')}</button></div>
+            <h1>${this.esc(genre)}</h1>
+            <div style="font-size:13px;color:var(--text-secondary)">${total} tracks</div>
+            <div class="filter-bar" style="margin-top:8px">
+                <button class="mv-shuffle-btn" onclick="App.shuffleGenre(App._genreName)" title="Shuffle Play this genre">
+                    <svg><use href="#icon-shuffle"/></svg> ${this.t('btn.shufflePlay')}
+                </button>
+                <button class="mv-nightclub-btn" onclick="App.startNightClubModeFromGenre(App._genreName)" title="Night Club Mode">
+                    <svg viewBox="0 0 24 16"><path d="M0 8 C2 2, 4 2, 6 8 S10 14, 12 8 S16 2, 18 8 S22 14, 24 8"/></svg> Night Club Mode
+                </button>
+                <button class="mv-android-btn" onclick="App.shuffleGenreWithAndroid(App._genreName)" title="Shuffle with Android Player">
+                    <svg style="width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0"><use href="#icon-android"/></svg> Shuffle with Android
+                </button>
+            </div>
+        </div>`;
 
         if (data && data.tracks && data.tracks.length > 0) {
             this._genreTracks = data.tracks;
@@ -5394,9 +6661,7 @@ const App = {
                 const dur = this.formatDuration(v.duration);
                 html += `<div class="mv-card" onclick="App.openMvDetail(${v.id})" data-mv-id="${v.id}">
                     <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none">&#127909;</span>`
-                            : `<span class="mv-card-placeholder">&#127909;</span>`}
+                        ${this._videoThumbHtml(thumbSrc, '&#127909;')}
                         <span class="mv-duration-badge">${dur}</span>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.playMusicVideo(${v.id})">&#9654;</button>
                     </div>
@@ -5422,9 +6687,7 @@ const App = {
                     : (v.year ? v.year : '');
                 html += `<div class="mv-card" onclick="App.openVideoDetail(${v.id})" data-video-id="${v.id}">
                     <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`}
+                        ${this._videoThumbHtml(thumbSrc)}
                         <span class="mv-duration-badge">${dur}</span>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.playVideo(${v.id})">&#9654;</button>
                     </div>
@@ -5528,7 +6791,7 @@ const App = {
             html += '<div class="audiobooks-grid">';
             audioBookData.audioBooks.forEach(book => {
                 const fmt = (book.format || 'MP3').toUpperCase();
-                const fmtClass = fmt === 'M4B' ? 'm4b' : 'mp3';
+                const fmtClass = fmt.toLowerCase();
                 const author = book.author || 'Unknown Author';
                 const dur = book.duration > 0 ? this.formatDuration(Math.round(book.duration)) : fmt;
                 html += `<div class="ebook-card audiobook-card" onclick="App.openAudioBookDetail(${book.id})" data-audiobook-id="${book.id}">
@@ -5611,9 +6874,7 @@ const App = {
             const watchedBadge = v.isWatched ? `<span class="mv-watched-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>WATCHED</span>` : '';
             html += `<div class="mv-card${thumbSrc ? ' mv-card-poster' : ''}" onclick="App.openVideoDetail(${v.id})" data-video-id="${v.id}" data-watchlist="1">
                 <div class="mv-card-thumb${thumbSrc ? ' mv-poster-thumb' : ''}">
-                    ${thumbSrc
-                        ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`
-                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`}
+                    ${this._videoThumbHtml(thumbSrc)}
                     <span class="mv-duration-badge">${dur}</span>
                     ${watchedBadge}
                 </div>
@@ -6044,9 +7305,9 @@ const App = {
                 </div>
                 <div style="display:flex;flex-direction:column;gap:7px">
                     <button onclick="App._plPickCover()" style="background:var(--bg-hover);border:1px solid var(--border);border-radius:7px;padding:7px 14px;color:var(--text-primary);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:7px">
-                        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                         Pick from Album Art…</button>
-                    ${this._plEditCover ? `<button onclick="App._plClearCover()" style="background:none;border:none;color:var(--text-secondary);font-size:12px;cursor:pointer;text-align:left;padding:0;display:flex;align-items:center;gap:5px"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Remove cover</button>` : ''}
+                    ${this._plEditCover ? `<button onclick="App._plClearCover()" style="background:none;border:none;color:var(--text-secondary);font-size:12px;cursor:pointer;text-align:left;padding:0;display:flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Remove cover</button>` : ''}
                 </div>
             </div>
             <div style="display:flex;justify-content:flex-end;gap:10px">
@@ -6097,6 +7358,35 @@ const App = {
         if (!confirm('Delete this playlist? This cannot be undone.')) return;
         const res = await this.apiDelete(`playlists/${id}`);
         if (res && res.message) this.renderPage('playlists');
+    },
+
+    async _downloadM3uBlob(apiUrl, filename) {
+        try {
+            const res = await fetch(apiUrl);
+            if (!res.ok) throw new Error(`Server returned ${res.status}`);
+            const blob = new Blob([await res.text()], { type: 'text/plain' });
+            const blobUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+        } catch (e) {
+            alert('Export failed: ' + e.message);
+        }
+    },
+
+    exportPlaylistM3u(id, name) {
+        const safe = (name || 'playlist').replace(/[\\/:*?"<>|]/g, '_');
+        this._downloadM3uBlob(`/api/playlists/${id}/export.m3u`, `${safe}.m3u`);
+    },
+
+    exportAgpM3u(type, param) {
+        const url = `/api/agp-export.m3u?type=${encodeURIComponent(type)}${param != null ? '&param=' + param : ''}`;
+        const safe = (type + (param != null ? '_' + param : '')).replace(/[\\/:*?"<>|]/g, '_');
+        this._downloadM3uBlob(url, `${safe}.m3u`);
     },
 
     // ─── Auto-Generated Playlists ─────────────────────────────────────
@@ -6657,10 +7947,7 @@ const App = {
                     : (v.year ? String(v.year) : '');
                 html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})" data-video-id="${v.id}">
                     <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                        ${this._videoThumbHtml(thumbSrc)}
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
                         <span class="play-count-badge">&#9654; ${v.playCount}</span>
@@ -6722,10 +8009,7 @@ const App = {
                 const dur = this.formatDuration(v.duration);
                 html += `<div class="mv-card home-card" onclick="App.openMvDetail(${v.id})" data-mv-id="${v.id}">
                     <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none">&#127909;</span>`
-                            : `<span class="mv-card-placeholder">&#127909;</span>`}
+                        ${this._videoThumbHtml(thumbSrc, '&#127909;')}
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="play-count-badge">&#9654; ${v.playCount}</span>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.playMusicVideo(${v.id})">&#9654;</button>
@@ -6867,13 +8151,28 @@ const App = {
 
         const isAdmin = this.userRole === 'admin';
         const toggle = (id, checked) => `<label class="setting-toggle"><input type="checkbox" id="cfg-${id}"${checked ? ' checked' : ''}${!isAdmin ? ' disabled' : ''}><span class="toggle-track"><span class="toggle-thumb"></span></span></label>`;
-        const input = (id, val, type = 'text', cls = '') => `<input type="${type}" id="cfg-${id}" class="setting-input ${cls}" value="${this.esc(val + '')}"${!isAdmin ? ' disabled' : ''}>`;
+        const input = (id, val, type = 'text', cls = '', attrs = '') => `<input type="${type}" id="cfg-${id}" class="setting-input ${cls}" value="${this.esc(val + '')}"${attrs ? ' ' + attrs : ''}${!isAdmin ? ' disabled' : ''}>`;
         const select = (id, val, opts) => `<select id="cfg-${id}" class="setting-select"${!isAdmin ? ' disabled' : ''}>${opts.map(o => `<option value="${o.v}"${val === o.v ? ' selected' : ''}>${o.l}</option>`).join('')}</select>`;
 
         let html = `<div class="page-header"><h1>${this.t('page.settings')}</h1></div>`;
 
+        // ── Settings tab bar ──
+        html += `<div class="stab-bar">
+            <button class="stab-btn" data-tab="server" onclick="App._settingsSwitchTab('server')">${this.t('settings.tabServer','Server')}</button>
+            <button class="stab-btn" data-tab="library" onclick="App._settingsSwitchTab('library')">${this.t('settings.tabLibrary','Library')}</button>
+            <button class="stab-btn" data-tab="playback" onclick="App._settingsSwitchTab('playback')">${this.t('settings.tabPlayback','Playback')}</button>
+            ${isAdmin ? `<button class="stab-btn" data-tab="remote" onclick="App._settingsSwitchTab('remote')">${this.t('settings.tabRemote','Remote Access')}</button>` : ''}
+            <button class="stab-btn" data-tab="users" onclick="App._settingsSwitchTab('users')">${this.t('settings.tabUsers','Users &amp; Security')}</button>
+            <button class="stab-btn" data-tab="interface" onclick="App._settingsSwitchTab('interface')">${this.t('settings.tabInterface','Interface')}</button>
+            <button class="stab-btn" data-tab="integrations" onclick="App._settingsSwitchTab('integrations')">${this.t('settings.tabIntegrations','Integrations')}</button>
+            ${isAdmin ? `<button class="stab-btn" data-tab="autoupdate" onclick="App._settingsSwitchTab('autoupdate')">${this.t('settings.tabAutoUpdate','Auto-Update')}</button>` : ''}
+            <button class="stab-btn" data-tab="about" onclick="App._settingsSwitchTab('about')">About</button>
+            <button class="stab-btn" data-tab="contact" onclick="App._settingsSwitchTab('contact')">Contact</button>
+        </div>`;
+
+
         // ── Resource Monitor ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="server">
             <h3><svg class="settings-icon"><use href="#icon-activity"/></svg> ${this.t('settings.resourceMonitor')}</h3>
             <p class="settings-section-hint">${this.t('settings.resourceMonitorHint')}</p>
             <div class="metrics-charts-row">
@@ -6920,13 +8219,13 @@ const App = {
         </div>`;
 
         // ── Server Information ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="server">
             <h3><svg class="settings-icon"><use href="#icon-settings"/></svg> ${this.t('settings.serverInformation')}</h3>
             <div class="setting-row"><span class="setting-label">${this.t('settings.version')}</span><span class="setting-value">${config.version}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.platform')}</span><span class="setting-value">${this.esc(config.platform)}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.framework')}</span><span class="setting-value">.NET ${this.esc(config.framework)}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.configFile')}</span><span class="setting-value" style="font-size:12px;word-break:break-all">${this.esc(config.configFile)}</span></div>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.welcomePopup')}</span><span class="setting-value"><label class="toggle-switch"><input type="checkbox" id="welcome-popup-toggle" ${this._welcomeDismissed ? '' : 'checked'} onchange="App.toggleWelcomePopup(this.checked)"><span class="toggle-slider"></span></label> <span class="setting-hint">${this.t('settings.welcomePopupHint')}</span></span></div>
+            <div class="setting-row"><span class="setting-label">${this.t('settings.welcomePopup')}</span><span class="setting-value"><button class="btn-secondary" style="font-size:12px;padding:5px 14px" onclick="App.showWelcomeModal()">${this.t('settings.welcomePopupHint')}</button></span></div>
             <div class="setting-group-label">${this.t('settings.serverSettings')} <span class="setting-hint">(${this.t('settings.changesRequireRestart')})</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.serverHost')}</span><span class="setting-value">${input('serverHost', config.serverHost)}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.serverPort')}</span><span class="setting-value">${input('serverPort', config.serverPort, 'number')}</span></div>
@@ -6943,10 +8242,10 @@ const App = {
         {
             const traktConnected = config.traktConnected;
             const traktUser = config.traktUsername || '';
-            html += `<div class="settings-section" id="settings-trakt-section">
-                <h3><svg class="settings-icon"><use href="#icon-radio"/></svg> ${this.t('settings.traktSection')}</h3>
+            html += `<div class="settings-section" data-stab="integrations" id="settings-trakt-section">
+                <h3><img src="/images/integrations/trakt.svg" class="intg-logo" alt="Trakt.tv"> ${this.t('settings.traktSection')}</h3>
                 <div class="setting-hint" style="margin-bottom:12px">${this.t('settings.traktGetAppKey')}</div>
-                <div class="setting-row"><span class="setting-label">${this.t('settings.traktClientId')}</span><span class="setting-value">${input('traktClientId', config.traktClientId || '', 'text', 'setting-input-wide')}</span></div>
+                <div class="setting-row"><span class="setting-label">${this.t('settings.traktClientId')}</span><span class="setting-value">${input('traktClientId', '', 'password', 'setting-input-wide')}${config.traktClientId ? ` <span class="setting-hint" style="color:var(--success);margin-left:8px">&#10003; Key is set</span>` : ''}</span></div>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.traktClientSecret')}</span><span class="setting-value">${input('traktClientSecret', config.traktClientSecret || '', 'password', 'setting-input-wide')}</span></div>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.traktScrobble')}</span><span class="setting-value">${toggle('traktScrobbleEnabled', config.traktScrobbleEnabled)} <span class="setting-hint">${this.t('settings.traktScrobbleHint')}</span></span></div>
                 <div class="setting-row">
@@ -6979,8 +8278,98 @@ const App = {
             </div>`;
         }
 
+        // ── ReplayGain ──
+        {
+            const modeOpts = [
+                { v: 'track', l: this.t('rg.modeTrack', 'Track Gain') },
+                { v: 'album', l: this.t('rg.modeAlbum', 'Album Gain') },
+                { v: 'auto',  l: this.t('rg.modeAuto',  'Auto (album if available, else track)') },
+            ];
+            html += `<div class="settings-section" data-stab="playback">
+                <h3><svg class="settings-icon"><use href="#icon-activity"/></svg> ${this.t('rg.section', 'ReplayGain Normalization')}</h3>
+                <p class="settings-section-hint">${this.t('rg.hint', 'Reads ReplayGain tags from your files and adjusts playback volume so all tracks play at the same loudness. Requires a library re-scan to populate data for existing tracks. Toggle anytime using the RG button in the player bar.')}</p>
+                <div class="setting-row">
+                    <span class="setting-label">${this.t('rg.enable', 'Enable ReplayGain')}</span>
+                    <span class="setting-value">
+                        <label class="setting-toggle">
+                            <input type="checkbox" id="rg-enabled-chk" ${this._rgEnabled ? 'checked' : ''} onchange="App._rgEnabled=this.checked;App.saveRGState();if(App.currentTrack)App._applyReplayGain(App.currentTrack);">
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </span>
+                </div>
+                <div class="setting-row">
+                    <span class="setting-label">${this.t('rg.mode', 'Gain Mode')}</span>
+                    <span class="setting-value">
+                        <select class="setting-select" id="rg-mode-sel" onchange="App._rgMode=this.value;App.saveRGState();if(App.currentTrack)App._applyReplayGain(App.currentTrack);">
+                            ${modeOpts.map(o => `<option value="${o.v}"${this._rgMode === o.v ? ' selected' : ''}>${o.l}</option>`).join('')}
+                        </select>
+                    </span>
+                </div>
+                <div class="setting-row">
+                    <span class="setting-label">${this.t('rg.preamp', 'Pre-amplification')}</span>
+                    <span class="setting-value" style="display:flex;align-items:center;gap:10px">
+                        <input type="range" class="eq-slider" id="rg-preamp-slider" min="-12" max="12" step="0.5" value="${this._rgPreamp}"
+                            oninput="App._rgPreamp=+this.value;App.saveRGState();document.getElementById('rg-preamp-val').textContent=(App._rgPreamp>=0?'+':'')+App._rgPreamp+' dB';if(App.currentTrack)App._applyReplayGain(App.currentTrack);">
+                        <span id="rg-preamp-val" style="font-size:13px;color:var(--accent);min-width:52px;text-align:right;font-variant-numeric:tabular-nums">${this._rgPreamp >= 0 ? '+' : ''}${this._rgPreamp} dB</span>
+                    </span>
+                </div>
+            </div>`;
+        }
+
+        // ── Music Scrobbling ──
+        {
+            const lfmConnected = config.lfmConnected;
+            const lbConnected  = config.lbConnected;
+            const hasLfmKey    = !!(config.lastFmApiKey);
+            html += `<div class="settings-section" data-stab="integrations" id="settings-scrobbling-section">
+                <h3><svg class="settings-icon"><use href="#icon-activity"/></svg> ${this.t('settings.scrobblingSection')}</h3>
+                <p class="settings-section-hint">${this.t('settings.scrobblingHint')}</p>
+
+                <div class="setting-group-label"><img src="/images/integrations/lastfm.svg" class="intg-logo-wide" alt="Last.fm"> ${this.t('settings.scrobblingLastFmGroup')} &mdash; <span class="setting-hint"><a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">last.fm/api/account/create</a></span></div>
+                <div class="setting-row"><span class="setting-label">${this.t('settings.scrobblingLastFmApiKey')}</span><span class="setting-value">${input('lastFmApiKey', '', 'password', 'setting-input-wide')}${config.lastFmApiKey ? ` <span class="setting-hint" style="color:var(--success);margin-left:8px">&#10003; Key is set</span>` : ''} <span class="setting-hint">${this.t('settings.scrobblingLastFmApiKeyHint')}</span></span></div>
+                <div class="setting-row"><span class="setting-label">${this.t('settings.scrobblingLastFmApiSecret')}</span><span class="setting-value">${input('lastFmApiSecret', config.lastFmApiSecret || '', 'password', 'setting-input-wide')}</span></div>
+                <div class="setting-row">
+                    <span class="setting-label">${this.t('settings.scrobblingLastFmAccount')}</span>
+                    <span class="setting-value" id="lfm-status-cell">
+                        ${lfmConnected
+                            ? `<span class="trakt-connected-badge">&#9679; ${this.t('settings.scrobblingConnectedAs')} <strong>${this.esc(config.lfmUsername)}</strong></span>
+                               <a href="https://www.last.fm/user/${this.esc(config.lfmUsername)}" target="_blank" rel="noopener" class="trakt-profile-link">last.fm/user/${this.esc(config.lfmUsername)}</a>
+                               <button class="btn-secondary trakt-action-btn" onclick="App.lfmDisconnect()">${this.t('btn.scrobblingDisconnect')}</button>`
+                            : `<span style="color:var(--text-secondary)">&#9675; ${this.t('settings.scrobblingNotConnected')}</span>
+                               <button class="btn-secondary trakt-action-btn" id="btn-lfm-connect" onclick="App.lfmConnect()"${!hasLfmKey ? ' disabled title="Save your API key first"' : ''}>${this.t('btn.scrobblingConnect')}</button>`
+                        }
+                    </span>
+                </div>
+
+                <div class="setting-group-label" style="margin-top:8px"><img src="/images/integrations/listenbrainz.svg" class="intg-logo" alt="ListenBrainz"> ${this.t('settings.scrobblingLbGroup')} &mdash; <span class="setting-hint"><a href="https://listenbrainz.org/profile/" target="_blank" rel="noopener">listenbrainz.org/profile</a></span></div>
+                <div class="setting-row">
+                    <span class="setting-label">${this.t('settings.scrobblingLbAccount')}</span>
+                    <span class="setting-value" id="lb-status-cell">
+                        ${lbConnected
+                            ? `<span class="trakt-connected-badge">&#9679; ${this.t('settings.scrobblingConnectedAs')} <strong>${this.esc(config.lbUsername)}</strong></span>
+                               <a href="https://listenbrainz.org/user/${this.esc(config.lbUsername)}" target="_blank" rel="noopener" class="trakt-profile-link">listenbrainz.org/user/${this.esc(config.lbUsername)}</a>
+                               <button class="btn-secondary trakt-action-btn" onclick="App.lbDisconnect()">${this.t('btn.scrobblingDisconnect')}</button>`
+                            : `<span style="color:var(--text-secondary)">&#9675; ${this.t('settings.scrobblingNotConnected')}</span>`
+                        }
+                    </span>
+                </div>
+                <div class="setting-row" id="lb-token-row">
+                    <span class="setting-label">${this.t('settings.scrobblingLbToken')}</span>
+                    <span class="setting-value" id="lb-token-value">
+                        ${lbConnected
+                            ? `<span class="setting-hint" style="color:var(--success)">&#10003; Token is set</span>`
+                            : `<input id="lb-token-input" type="password" class="setting-input setting-input-wide" placeholder="${this.t('settings.scrobblingLbTokenPlaceholder')}">
+                               <button class="btn-secondary trakt-action-btn" onclick="App.lbConnect()">${this.t('btn.scrobblingVerifyConnect')}</button>
+                               <span class="setting-hint" style="display:block;margin-top:4px">${this.t('settings.scrobblingLbTokenHint')}</span>`
+                        }
+                    </span>
+                </div>
+                ${!lbConnected ? `<div id="lb-connect-status" style="margin-top:4px;font-size:12px;color:var(--text-secondary);padding-left:140px"></div>` : ''}
+            </div>`;
+        }
+
         // ── DLNA ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="server">
             <h3><svg class="settings-icon"><use href="#icon-tv"/></svg> ${this.t('settings.dlna')}</h3>
             <div class="setting-group-label">${this.t('settings.changesRequireRestart')}</div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.dlnaEnabled')}</span><span class="setting-value">${toggle('dlnaEnabled', config.dlnaEnabled)} <span class="setting-hint">${this.t('settings.dlnaEnabledHint')}</span></span></div>
@@ -6997,7 +8386,7 @@ const App = {
                 ? `<span style="color:var(--danger)">${this.t('settings.httpsCertCustomMissing')}</span>`
                 : `<span style="color:var(--text-muted)">${this.t('settings.httpsCertNone')}</span>`;
 
-            html += `<div class="settings-section">
+            html += `<div class="settings-section" data-stab="server" id="settings-https-section">
                 <h3><svg class="settings-icon"><use href="#icon-lock"/></svg> ${this.t('settings.https')}</h3>
                 <div class="setting-group-label">${this.t('settings.changesRequireRestart')}</div>
                 <div class="setting-row">
@@ -7014,6 +8403,16 @@ const App = {
                 </div>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.httpsEnabled')}</span><span class="setting-value">${toggle('httpsEnabled', config.httpsEnabled)}</span></div>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.httpsPort')}</span><span class="setting-value">${input('httpsPort', config.httpsPort, 'number')} <span class="setting-hint">${this.t('settings.httpsPortHint')}</span></span></div>
+                ${config.isDocker ? `<div class="setting-row">
+                    <span class="setting-label">${this.t('settings.httpsDockerHostIPs')}</span>
+                    <span class="setting-value" style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+                        <span style="display:flex;align-items:center;gap:8px">
+                            <input type="text" id="cfg-httpsDockerHostIPs" class="setting-input" placeholder="${this.t('settings.httpsDockerHostIPsPlaceholder')}" value="${config.httpsDockerHostIPs || ''}" ${!isAdmin ? 'disabled' : ''} style="width:200px">
+                        </span>
+                        <span style="text-align:right;font-size:12px;color:#f59e0b">${this.t('settings.httpsDockerHostIPsHint')}</span>
+                        <span style="text-align:right;font-size:11px;color:#f59e0b;opacity:0.75;font-style:italic">${this.t('settings.httpsDockerHostIPsNotice')}</span>
+                    </span>
+                </div>` : ''}
                 <div class="setting-row"><span class="setting-label">${this.t('settings.httpsRedirect')}</span><span class="setting-value">${toggle('httpsRedirectHttp', config.httpsRedirectHttp)} <span class="setting-hint">${this.t('settings.httpsRedirectHint')}</span></span></div>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.httpsCertStatus')}</span><span class="setting-value">${certStatusLabel}</span></div>
                 <div class="setting-group-label">${this.t('settings.httpsCustomCertLabel')}</div>
@@ -7022,11 +8421,124 @@ const App = {
             </div>`;
         }
 
+        if (isAdmin) {
+            // Fetch gate status first — needed to show warnings in CF tunnel + Relay sections below
+            const gateStatus = await this.api('gate/status') || { enabled: false, codes: [] };
+            const _gateActive = gateStatus.enabled; // true only once at least one code has been added
+
+            // ── Cloudflare Quick Tunnel ──
+            const cfStatus = await this.api('tunnel/status') || { status: 'stopped' };
+            const cfStarting = cfStatus.status === 'starting' || cfStatus.status === 'downloading';
+            const cfRunning  = cfStatus.status === 'running';
+
+            html += `<div class="settings-section" data-stab="remote">
+                <h3><svg class="settings-icon"><use href="#icon-globe"/></svg> ${this.t('cf.sectionTitle','Cloudflare Quick Tunnel')}</h3>
+                <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${this.t('cf.sectionDesc','Creates a temporary public HTTPS URL (e.g. <em>abc.trycloudflare.com</em>) so you can reach NexusM from anywhere — no account, no router changes, no IPv6 needed. URL changes on each restart.')}</p>
+                <div class="gate-https-warning" style="color:#f59e0b;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);margin-bottom:12px">
+                    <svg style="width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;margin-top:1px"><use href="#icon-alert-triangle"/></svg>
+                    <span><strong>${this.t('cf.freeWarningTitle','Free tier limitations:')}</strong> ${this.t('cf.freeWarningBody','Cloudflare\'s free Quick Tunnel is intended for development use only. Real-world throughput is throttled and latency is higher than a direct connection. Cloudflare\'s Terms of Service <strong>explicitly prohibit video streaming</strong> on the free tier. Users who stream video through this tunnel risk having their IP address banned by Cloudflare. For reliable remote video access, consider a VPN like Tailscale instead.')}</span>
+                </div>
+                ${cfRunning && !_gateActive ? `<div class="gate-https-warning">
+                    <svg style="width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;margin-top:1px"><use href="#icon-alert-triangle"/></svg>
+                    <span><strong>${this.t('remote.gateWarningTitle','Access Gate is not set up.')}</strong> ${this.t('cf.gateWarningBody','Your tunnel is publicly reachable with only your login password as protection.')}
+                    <button onclick="App._settingsSwitchTab('remote');setTimeout(()=>{const el=document.getElementById('settings-gate-section');if(el)el.scrollIntoView({behavior:'smooth',block:'start'});},80)" class="gate-https-link">${this.t('remote.gateWarningLink','Set up Access Gate →')}</button></span>
+                </div>` : ''}
+                <div id="cf-tunnel-inner">${this._cfInnerHtml(cfStatus)}</div>
+            </div>`;
+
+            // Start lightweight in-place polling if tunnel is mid-start — never reloads the page
+            if (cfStarting) this._cfStartPolling();
+            else this._cfStopPolling();
+
+            // ── NexusM Relay ──
+            const relayStatus = await this.api('relay/status') || { enabled: false, status: 'disabled' };
+            html += `<div class="settings-section" data-stab="remote">
+                <h3><svg class="settings-icon"><use href="#icon-globe"/></svg> ${this.t('relay.sectionTitle')} <span style="font-size:10px;font-weight:500;background:var(--accent);color:#fff;border-radius:4px;padding:1px 6px;margin-left:6px;vertical-align:middle">${this.t('relay.betaBadge')}</span></h3>
+                <p style="color:var(--text-muted);font-size:12px;margin-bottom:8px">${this.t('relay.sectionDesc')}</p>
+                <p style="font-size:11px;color:var(--text-muted);border-left:2px solid var(--border);padding-left:8px;margin-bottom:12px;line-height:1.5">${this.t('relay.privacyNote','API traffic and session tokens transit <strong>nexusm.net</strong> — a free community relay run by NexusM. Your actual media files (audio, video) stream directly from your server and never touch the relay. No user data is logged, stored, or used for any commercial purpose.')}</p>
+                ${relayStatus.enabled && !_gateActive ? `<div class="gate-https-warning">
+                    <svg style="width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;margin-top:1px"><use href="#icon-alert-triangle"/></svg>
+                    <span><strong>${this.t('remote.gateWarningTitle','Access Gate is not set up.')}</strong> ${this.t('relay.gateWarningBody','Your relay tunnel is publicly reachable with only your login password as protection.')}
+                    <button onclick="App._settingsSwitchTab('remote');setTimeout(()=>{const el=document.getElementById('settings-gate-section');if(el)el.scrollIntoView({behavior:'smooth',block:'start'});},80)" class="gate-https-link">${this.t('remote.gateWarningLink','Set up Access Gate →')}</button></span>
+                </div>` : ''}
+                <div id="relay-inner">${this._relayInnerHtml(relayStatus)}</div>
+            </div>`;
+            if (relayStatus.enabled) this._relayStartPolling();
+            else this._relayStopPolling();
+
+            // ── Access Gate ──
+            // gateStatus already fetched above
+            const _gateCodes = gateStatus.codes || [];
+            html += `<div class="settings-section" data-stab="remote" id="settings-gate-section">
+                <h3><svg class="settings-icon"><use href="#icon-lock"/></svg> ${this.t('gate.sectionTitle')}</h3>
+                <p style="font-size:12px;color:var(--text-secondary);font-weight:500;margin-bottom:8px">${this.t('gate.subtitle')}</p>
+                <p style="color:var(--text-muted);font-size:12px;margin-bottom:6px">${this.t('gate.description')}</p>
+                <p style="color:var(--success,#27ae60);font-size:11px;margin-bottom:14px">&#x2022; ${this.t('gate.alwaysActive')}</p>
+                ${!config.httpsEnabled ? `<div class="gate-https-warning">
+                    <svg style="width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;margin-top:1px"><use href="#icon-alert-triangle"/></svg>
+                    <span><strong>${this.t('gate.httpsWarningTitle','HTTPS is not enabled.')}</strong> ${this.t('gate.httpsWarningBody','Invite codes and authentication tokens will be sent over unencrypted HTTP — anyone on the network path can intercept them.')}
+                    <button onclick="App._settingsSwitchTab('server');setTimeout(()=>{const el=document.getElementById('settings-https-section');if(el)el.scrollIntoView({behavior:'smooth',block:'start'});},80)" class="gate-https-link">${this.t('gate.httpsWarningLink','Enable HTTPS →')}</button></span>
+                </div>` : ''}
+                <div class="setting-row" style="align-items:flex-start">
+                    <span class="setting-label" style="padding-top:4px">${this.t('gate.inviteCodes')} <span style="font-weight:400;color:var(--text-muted)">(${_gateCodes.length}/10)</span></span>
+                    <span class="setting-value" style="flex:1;min-width:0;padding-left:14px">
+                        ${_gateCodes.length > 0 ? `
+                        <div class="gate-codes-list">
+                            ${_gateCodes.map(c => `
+                            <div class="gate-code-row${c.isExpired ? ' gate-code-expired' : ''}" data-idx="${c.index}" data-expires="${c.expires||''}">
+                                <code class="gate-code-val">${this.esc(c.code)}</code>
+                                <input class="gate-code-label-input" type="text" value="${this.esc(c.label||'')}" placeholder="${this.t('gate.labelPlaceholder')}"
+                                       data-idx="${c.index}" onchange="App.gateUpdateCode(${c.index})">
+                                <span class="gate-code-exp-display${c.isExpired ? ' gate-code-exp-expired' : ''}" title="${this.t('gate.expiryTitle')}">${c.expires ? new Date(c.expires + 'T12:00:00').toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) : this.t('gate.noExpiry', 'No expiry date')}</span>
+                                <div class="gate-code-btns">
+                                    <button onclick="App.gateCopyCode('${this.esc(c.code)}', this)">${this.t('gate.copyBtn')}</button>
+                                    <button onclick="App.gateShowQr('${this.esc(c.code)}')">${this.t('gate.qrBtn')}</button>
+                                    <button onclick="App.gateRegenerateCode(${c.index})">${this.t('gate.regenBtn')}</button>
+                                    <button onclick="App.gateDeleteCode(${c.index})" class="gate-code-del">${this.t('gate.delBtn')}</button>
+                                </div>
+                                ${c.isExpired ? `<span class="gate-expired-badge">${this.t('gate.expired')}</span>` : ''}
+                            </div>`).join('')}
+                        </div>` : `<p style="color:var(--text-muted);font-size:12px;margin:4px 0 8px">${this.t('gate.noCodes')}</p>`}
+                        ${_gateCodes.length < 10 ? `
+                        <button onclick="App.gateAddCode()" style="font-size:12px;padding:4px 14px;margin-top:6px;background:var(--bg-tertiary);color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer">${this.t('gate.addCodeBtn')}</button>` : ''}
+                    </span>
+                </div>
+            </div>`;
+        }
+
+        // ── My Profile (all users) ──
+        {
+            const myInitial = (this.userName || '?').charAt(0).toUpperCase();
+            const myRoleClass = this.userRole === 'admin' ? 'admin' : this.userRole === 'child' ? 'child' : '';
+            const myPicUrl = `/api/auth/users/${encodeURIComponent(this.userName)}/profile-picture`;
+            html += `<div class="settings-section" data-stab="users">
+                <h3>${this.t('settings.myProfile','My Profile')}</h3>
+                <div class="setting-row">
+                    <span class="setting-label">${this.t('settings.profilePicture','Profile Picture')}</span>
+                    <span class="setting-value">
+                        <div style="display:flex;align-items:center;gap:16px">
+                            <div class="my-profile-avatar ${myRoleClass}" id="my-profile-av">
+                                ${myInitial}
+                                <img src="${myPicUrl}?t=${Date.now()}"
+                                    style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .25s"
+                                    onload="this.style.opacity=1; var rb=document.getElementById('my-profile-remove-btn'); if(rb) rb.style.display='';"
+                                    onerror="this.remove(); var rb=document.getElementById('my-profile-remove-btn'); if(rb) rb.style.display='none';">
+                            </div>
+                            <div style="display:flex;flex-direction:column;gap:8px">
+                                <button onclick="App._openProfilePicModal('${this.esc(this.userName)}', null)" class="user-mgmt-btn">${this.t('settings.uploadPhoto','Upload Photo')}</button>
+                                <button id="my-profile-remove-btn" onclick="App._deleteProfilePic('${this.esc(this.userName)}', null)" class="user-mgmt-btn user-mgmt-btn-danger" style="display:none">${this.t('settings.removePhoto','Remove Photo')}</button>
+                            </div>
+                        </div>
+                    </span>
+                </div>
+            </div>`;
+        }
+
         // ── User Management (admin only) ──
         if (isAdmin) {
             const users = await this.api('auth/users');
             this._adminUsers = users || [];
-            html += `<div class="settings-section">
+            html += `<div class="settings-section" data-stab="users">
                 <h3><svg class="settings-icon"><use href="#icon-users"/></svg> ${this.t('settings.userManagement')}</h3>`;
 
             if (users && users.length > 0) {
@@ -7041,8 +8553,19 @@ const App = {
                         : u.role === 'child'
                         ? `<span class="settings-badge" style="background:#22c55e">${this.t('settings.child')}</span>`
                         : `<span class="settings-badge" style="background:var(--accent)">${this.t('settings.guest')}</span>`;
+                    const uInitial = (u.displayName || u.username).charAt(0).toUpperCase();
+                    const uRoleClass = u.role === 'admin' ? 'admin' : u.role === 'child' ? 'child' : '';
+                    const uPicUrl = `/api/auth/users/${encodeURIComponent(u.username)}/profile-picture`;
                     html += `<tr id="user-row-${u.id}" data-child-settings='${(u.childSettings || '').replace(/'/g, '&#39;')}'>
-                        <td style="font-weight:500">${this.esc(u.username)}</td>
+                        <td style="font-weight:500">
+                            <div style="display:flex;align-items:center;gap:10px">
+                                <div class="up-avatar ${uRoleClass}" id="up-av-${u.id}">
+                                    ${uInitial}
+                                    ${u.hasPicture ? `<img src="${uPicUrl}?t=${Date.now()}" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover" onerror="this.remove()">` : ''}
+                                </div>
+                                ${this.esc(u.username)}
+                            </div>
+                        </td>
                         <td>${this.esc(u.displayName || '-')}</td>
                         <td>${roleBadge}</td>
                         <td style="font-size:12px;color:var(--text-muted)">${lastLogin}</td>
@@ -7065,7 +8588,7 @@ const App = {
         }
 
         // ── Security ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="users">
             <h3><svg class="settings-icon"><use href="#icon-lock"/></svg> ${this.t('settings.security')}</h3>
             <div class="setting-row"><span class="setting-label">${this.t('settings.pinAuthentication')}</span><span class="setting-value">${toggle('securityByPin', config.securityByPin)}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.defaultAdminUser')}</span><span class="setting-value">${input('defaultAdminUser', config.defaultAdminUser)}</span></div>
@@ -7073,7 +8596,7 @@ const App = {
         </div>`;
 
         // ── UI Preferences ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="interface">
             <h3><svg class="settings-icon"><use href="#icon-layers"/></svg> ${this.t('settings.uiPreferences')}</h3>
             <div class="setting-row"><span class="setting-label">${this.t('settings.goBigDefault')}</span><span class="setting-value">${toggle('goBigDefault', config.goBigDefault)} <span class="setting-hint">${this.t('settings.goBigDefaultHint')}</span></span></div>
             <div class="setting-row" style="display:block;padding:6px 0 2px">
@@ -7090,7 +8613,7 @@ const App = {
         </div>`;
 
         // ── UI Templates ──
-        html += `<div class="settings-section" id="settings-templates-section">
+        html += `<div class="settings-section" data-stab="interface" id="settings-templates-section">
             <h3><svg class="settings-icon"><use href="#icon-layers"/></svg> ${this.t('settings.uiTemplates')}</h3>
             <p class="settings-section-hint">${this.t('settings.uiTemplatesHint')}</p>
             <div id="tpl-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:12px">
@@ -7109,9 +8632,47 @@ const App = {
             <p class="settings-section-hint" style="margin-top:10px">${this.t('settings.uiTemplatesFolder')} <code>wwwroot/templates/</code></p>
         </div>`;
 
+        // ── Media Shares ──
+        const folderTypes = [
+            { key: 'musicFolders', type: 'music', label: this.t('settings.musicFolders') },
+            { key: 'moviesFolders', type: 'movies', label: this.t('settings.moviesFolders') },
+            { key: 'tvShowsFolders', type: 'tvshows', label: this.t('settings.tvShowsFolders') },
+            { key: 'musicVideosFolders', type: 'musicvideos', label: this.t('settings.musicVideosFolders') },
+            { key: 'picturesFolders', type: 'pictures', label: this.t('settings.picturesFolders') },
+            { key: 'ebooksFolders', type: 'ebooks', label: this.t('settings.ebooksFolders') },
+            { key: 'audioBooksFolders', type: 'audiobooks', label: this.t('settings.audioBooksFolders') },
+            { key: 'animeFolders', type: 'anime', label: this.t('settings.animeFolders') }
+        ];
+        html += `<div class="settings-section" data-stab="library">
+            <h3><svg class="settings-icon"><use href="#icon-folder"/></svg> ${this.t('settings.libraryFolders')}</h3>
+            ${config.isDocker ? `<div class="settings-docker-notice">
+                <svg style="width:15px;height:15px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-info"/></svg>
+                <div>${this.t('settings.dockerNotice')}</div>
+            </div>` : ''}`;
+        folderTypes.forEach(f => {
+            const currentVal = (config[f.key] || '') + '';
+            // Hidden input keeps save-settings compatibility; chips are the visible UI
+            html += `<div class="share-folder-card">
+                <div class="share-folder-header">
+                    <span class="share-folder-label">${f.label}</span>
+                    ${isAdmin ? `<button class="share-add-btn" onclick="App._openFolderBrowser('${f.type}')">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        Add Folder
+                    </button>` : ''}
+                </div>
+                <div id="share-chips-${f.type}" class="share-chips-row"><span class="share-no-paths">No folders added yet</span></div>
+                <input type="hidden" id="cfg-${f.key}" value="${this.esc(currentVal)}">
+            </div>`;
+        });
+        html += `<div class="setting-group-label" style="margin-top:14px">${this.t('settings.scanSettings')}</div>
+            <div class="setting-row"><span class="setting-label">${this.t('settings.autoScanOnStartup')}</span><span class="setting-value">${toggle('autoScanOnStartup', config.autoScanOnStartup)}</span></div>
+            <div class="setting-row"><span class="setting-label">${this.t('settings.autoScanInterval')}</span><span class="setting-value"><input type="number" id="cfg-autoScanInterval" class="setting-input" min="15" value="${this.esc(config.autoScanInterval + '')}"${!isAdmin ? ' disabled' : ''}> <span class="setting-hint">${this.t('settings.manualOnlyHint')}</span></span></div>
+            <div class="setting-row"><span class="setting-label">${this.t('settings.scanThreads')}</span><span class="setting-value">${input('scanThreads', config.scanThreads, 'number')}</span></div>
+        </div>`;
+
         // ── Deep Media Analysis ──
         if (isAdmin) {
-            html += `<div class="settings-section">
+            html += `<div class="settings-section" data-stab="library">
                 <h3><svg class="settings-icon"><use href="#icon-activity"/></svg> ${this.t('settings.deepScan')}</h3>
                 <p class="settings-section-hint">${this.t('settings.deepScanHint')}</p>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.deepScanEnabled')}</span><span class="setting-value">${toggle('deepScanEnabled', config.deepScanEnabled)}</span></div>
@@ -7123,7 +8684,7 @@ const App = {
 
         // ── Seek Preview Thumbnails ──
         if (isAdmin) {
-            html += `<div class="settings-section">
+            html += `<div class="settings-section" data-stab="library">
                 <h3><svg class="settings-icon"><use href="#icon-image"/></svg> ${this.t('settings.videoThumbnails')}</h3>
                 <p class="settings-section-hint">${this.t('settings.videoThumbnailsHint')}</p>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.videoThumbnailsEnabled')}</span><span class="setting-value">${toggle('videoThumbnailsEnabled', config.videoThumbnailsEnabled)}</span></div>
@@ -7131,8 +8692,30 @@ const App = {
             </div>`;
         }
 
+        // ── Hero Video Previews ──
+        if (isAdmin) {
+            html += `<div class="settings-section" data-stab="library">
+                <h3><svg class="settings-icon"><use href="#icon-video"/></svg> ${this.t('settings.videoPreviews')}</h3>
+                <p class="settings-section-hint">${this.t('settings.videoPreviewsHint')}</p>
+                <div class="setting-row"><span class="setting-label">${this.t('settings.videoPreviewsEnabled')}</span><span class="setting-value">${toggle('videoPreviewsEnabled', config.videoPreviewsEnabled)}</span></div>
+                <div class="setting-row"><span class="setting-label">${this.t('settings.videoPreviewsRate')}</span><span class="setting-value" style="white-space:nowrap">${input('videoPreviewsRate', config.videoPreviewsRate ?? 5, 'number', 'setting-input-sm', 'min="1" max="20"')} <span class="setting-hint">${this.t('settings.videoPreviewsRateHint')}</span></span></div>
+                <div class="setting-row" id="vpreview-status-row" style="display:none">
+                    <span class="setting-label">${this.t('settings.videoPreviewsStatus')}</span>
+                    <span class="setting-value" id="vpreview-status-text"></span>
+                </div>
+                <div class="setting-row">
+                    <span class="setting-label"></span>
+                    <span class="setting-value" style="display:flex;gap:8px;flex-wrap:wrap">
+                        <button class="btn-secondary" id="vpreview-start-btn" onclick="App._vpreviewStartScan()">${this.t('settings.videoPreviewsStartScan')}</button>
+                        <button class="btn-secondary" id="vpreview-stop-btn" style="display:none" onclick="App._vpreviewStopScan()">${this.t('settings.videoPreviewsStopScan')}</button>
+                        <button class="btn-secondary" id="vpreview-clear-btn" onclick="App._vpreviewClearAll()" style="color:var(--text-secondary)">${this.t('settings.videoPreviewsClearAll','Clear All')}</button>
+                    </span>
+                </div>
+            </div>`;
+        }
+
         // ── Menu Components ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="interface">
             <h3><svg class="settings-icon"><use href="#icon-menu"/></svg> ${this.t('settings.menuComponents')}</h3>`;
         const menuItems = [
             { label: this.t('nav.music'), key: 'showMusic', icon: 'music' },
@@ -7159,43 +8742,32 @@ const App = {
         });
         html += '</div>';
 
-        // ── Media Shares ──
-        const folderTypes = [
-            { key: 'musicFolders', type: 'music', label: this.t('settings.musicFolders') },
-            { key: 'moviesFolders', type: 'movies', label: this.t('settings.moviesFolders') },
-            { key: 'tvShowsFolders', type: 'tvshows', label: this.t('settings.tvShowsFolders') },
-            { key: 'musicVideosFolders', type: 'musicvideos', label: this.t('settings.musicVideosFolders') },
-            { key: 'picturesFolders', type: 'pictures', label: this.t('settings.picturesFolders') },
-            { key: 'ebooksFolders', type: 'ebooks', label: this.t('settings.ebooksFolders') },
-            { key: 'audioBooksFolders', type: 'audiobooks', label: this.t('settings.audioBooksFolders') },
-            { key: 'animeFolders', type: 'anime', label: this.t('settings.animeFolders') }
-        ];
-        html += `<div class="settings-section">
-            <h3><svg class="settings-icon"><use href="#icon-folder"/></svg> ${this.t('settings.libraryFolders')}</h3>
-            <p class="setting-hint" style="margin-bottom:12px">${this.t('settings.libraryFoldersHint')}</p>
-            ${config.isDocker ? `<div class="settings-docker-notice">
-                <svg style="width:15px;height:15px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-info"/></svg>
-                <div>${this.t('settings.dockerNotice')}</div>
-            </div>` : ''}`;
-        folderTypes.forEach(f => {
-            html += `<div class="setting-row setting-row-col" style="margin-bottom:4px">
-                <span class="setting-label">${f.label}</span>
-                <span class="setting-value" style="display:flex;gap:6px;align-items:center">
-                    <input type="text" id="cfg-${f.key}" class="setting-input setting-input-wide" value="${this.esc((config[f.key] || '') + '')}" oninput="this.style.outline='';this.style.outlineOffset=''"${!isAdmin ? ' disabled' : ''}>
-                    <button class="btn-action" style="font-size:11px;padding:4px 8px;white-space:nowrap" onclick="App.toggleShareCredentials('${f.type}')" title="${this.t('btn.credentials', 'Credentials')}">&#128274;</button>
+        // ── Dynamic Library Cleanup ──
+        html += `<div class="settings-section" data-stab="library">
+            <h3><svg class="settings-icon"><use href="#icon-refresh"/></svg> ${this.t('settings.dynamicCleanup')}</h3>
+            <p class="setting-hint" style="margin-bottom:12px">${this.t('settings.dynamicCleanupHint')}</p>
+            <div class="setting-row">
+                <span class="setting-label">${this.t('settings.dynamicCleanEnabled')}</span>
+                <span class="setting-value">${toggle('dynamicCleanEnabled', config.dynamicCleanEnabled)}</span>
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">${this.t('settings.dynamicCleanInterval')}</span>
+                <span class="setting-value">
+                    <select id="cfg-dynamicCleanIntervalMinutes" class="setting-select"${!isAdmin ? ' disabled' : ''}>
+                        <option value="15"${config.dynamicCleanIntervalMinutes == 15 ? ' selected' : ''}>${this.t('settings.dynamicClean15min')}</option>
+                        <option value="30"${config.dynamicCleanIntervalMinutes == 30 ? ' selected' : ''}>${this.t('settings.dynamicClean30min')}</option>
+                        <option value="60"${config.dynamicCleanIntervalMinutes == 60 ? ' selected' : ''}>${this.t('settings.dynamicClean60min')}</option>
+                    </select>
                 </span>
             </div>
-            <div id="share-creds-${f.type}" style="display:none"></div>`;
-        });
-        html += `<div style="margin:8px 0 12px 0"><button class="btn-action" style="font-size:12px" onclick="App.mountAllShares()">${this.t('btn.mountAll', 'Mount All Shares')}</button></div>
-            <div class="setting-group-label">${this.t('settings.scanSettings')}</div>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.autoScanOnStartup')}</span><span class="setting-value">${toggle('autoScanOnStartup', config.autoScanOnStartup)}</span></div>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.autoScanInterval')}</span><span class="setting-value">${input('autoScanInterval', config.autoScanInterval, 'number')} <span class="setting-hint">${this.t('settings.manualOnlyHint')}</span></span></div>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.scanThreads')}</span><span class="setting-value">${input('scanThreads', config.scanThreads, 'number')}</span></div>
+            <div class="setting-row" style="margin-top:8px;align-items:center;gap:12px;flex-wrap:wrap">
+                <button class="btn-action" style="font-size:12px" onclick="App._dynamicCleanRunNow()" id="dynamic-clean-run-btn">${this.t('settings.dynamicCleanRunNow')}</button>
+                <span id="dynamic-clean-status" class="setting-hint" style="font-size:11px"></span>
+            </div>
         </div>`;
 
         // ── File Extensions ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="library">
             <h3><svg class="settings-icon"><use href="#icon-file"/></svg> ${this.t('settings.fileExtensions')}</h3>
             <p class="setting-hint" style="margin-bottom:12px">${this.t('settings.fileExtensionsHint')}</p>
             <div class="setting-row setting-row-col"><span class="setting-label">${this.t('settings.audioExtensions')}</span><span class="setting-value">${input('audioExtensions', config.audioExtensions, 'text', 'setting-input-wide')}</span></div>
@@ -7207,12 +8779,13 @@ const App = {
         </div>`;
 
         // ── Metadata Providers ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="library">
             <h3><svg class="settings-icon"><use href="#icon-film"/></svg> ${this.t('settings.metadataProviders')}</h3>
             <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${this.t('settings.metadataProvidersDesc')}</p>
             <div class="setting-row"><span class="setting-label">${this.t('settings.provider')}</span><span class="setting-value">${select('metadataProvider', config.metadataProvider, [{v:'tvmaze',l:this.t('settings.tvmazeFree')},{v:'tmdb',l:this.t('settings.tmdbApiKeyOption')},{v:'none',l:this.t('settings.none')}])}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.tmdbApiKey')}</span><span class="setting-value">${input('tmdbApiKey', '', 'password', 'setting-input-wide')}${config.tmdbApiKey ? ` <span class="setting-hint" style="color:var(--success);margin-left:8px">&#10003; Key is set</span>` : ''} <a href="https://www.themoviedb.org/settings/api" target="_blank" style="color:var(--accent);font-size:11px;margin-left:8px">${this.t('settings.getFreeKey')}</a></span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.watchmodeApiKey')}</span><span class="setting-value">${input('watchmodeApiKey', '', 'password', 'setting-input-wide')}${config.watchmodeApiKey ? ` <span class="setting-hint" style="color:var(--success);margin-left:8px">&#10003; Key is set</span>` : ''} <a href="https://api.watchmode.com" target="_blank" style="color:var(--accent);font-size:11px;margin-left:8px">${this.t('settings.getFreeKey')}</a><span class="setting-hint" style="margin-left:8px">1,000 req/month free</span></span></div>
+            <div class="setting-row"><span class="setting-label">${this.t('settings.fanartApiKey','fanart.tv API Key')}</span><span class="setting-value">${input('fanartApiKey', '', 'password', 'setting-input-wide')}${config.fanartApiKey ? ` <span class="setting-hint" style="color:var(--success);margin-left:8px">&#10003; Key is set</span>` : ''} <a href="https://fanart.tv/get-an-api-key/" target="_blank" style="color:var(--accent);font-size:11px;margin-left:8px">${this.t('settings.getFreeKey')}</a><span class="setting-hint" style="margin-left:8px">${this.t('settings.fanartApiKeyHint','Alternative posters &amp; backdrops')}</span></span></div>
 
             <div class="setting-row"><span class="setting-label">${this.t('settings.fetchOnScan')}</span><span class="setting-value">${toggle('fetchMetadataOnScan', config.fetchMetadataOnScan)} <span class="setting-hint" style="margin-left:8px">${this.t('settings.autoFetchMetadata')}</span></span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.castPhotos')}</span><span class="setting-value">${toggle('fetchCastPhotos', config.fetchCastPhotos)} <span class="setting-hint" style="margin-left:8px">${this.t('settings.downloadActorPhotos')}</span></span></div>
@@ -7224,7 +8797,7 @@ const App = {
         </div>`;
 
         // ── Subtitles ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="library">
             <h3><svg class="settings-icon"><use href="#icon-file-text"/></svg> ${this.t('settings.subtitles')}</h3>
             <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px">${this.t('settings.subtitlesDesc')}</p>
             <div class="setting-row"><span class="setting-label">${this.t('settings.osApiKey')}</span><span class="setting-value">${input('openSubtitlesApiKey', config.openSubtitlesApiKey || '', 'password', 'setting-input-wide')} <a href="https://www.opensubtitles.com/consumers" target="_blank" style="color:var(--accent);font-size:11px;margin-left:8px">${this.t('settings.getFreeKey')}</a></span></div>
@@ -7234,12 +8807,9 @@ const App = {
         </div>`;
 
         // ── Playback & Tools ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="playback">
             <h3><svg class="settings-icon"><use href="#icon-video"/></svg> ${this.t('settings.playbackTools')}</h3>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.transcodingEnabled')}</span><span class="setting-value">${toggle('transcodingEnabled', config.transcodingEnabled)}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.introSkipper')}</span><span class="setting-value">${toggle('introSkipperEnabled', config.introSkipperEnabled)} <span class="setting-hint">${this.t('settings.introSkipperHint')}</span></span></div>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.transcodeFormat')}</span><span class="setting-value">${select('transcodeFormat', config.transcodeFormat, [{v:'mp3',l:'MP3'},{v:'aac',l:'AAC'},{v:'opus',l:'Opus'}])}</span></div>
-            <div class="setting-row"><span class="setting-label">${this.t('settings.transcodeBitrate')}</span><span class="setting-value">${select('transcodeBitrate', config.transcodeBitrate, [{v:'128k',l:'128 kbps'},{v:'192k',l:'192 kbps'},{v:'256k',l:'256 kbps'},{v:'320k',l:'320 kbps'}])}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.ffmpegPath')}</span><span class="setting-value">${input('ffmpegPath', config.ffmpegPath || '', 'text', 'setting-input-wide')} <span class="setting-hint">${this.t('settings.emptyAutoDetect')}</span></span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.ffmpegStatus')}</span><span class="setting-value">${config.ffmpegAvailable
                 ? `<span style="color:var(--success)">${this.t('status.available')}</span>`
@@ -7249,8 +8819,21 @@ const App = {
             <div class="setting-row"><span class="setting-label">${this.t('settings.ffmpegFeatures')}</span><span class="setting-value"><div class="ffmpeg-caps"><span class="ffmpeg-cap ${config.ffmpegHasLibx264 ? 'cap-ok' : 'cap-miss'}">${config.ffmpegHasLibx264 ? '✓' : '✗'} H.264 (libx264)</span><span class="ffmpeg-cap ${config.ffmpegHasNvenc ? 'cap-ok' : 'cap-miss'}">${config.ffmpegHasNvenc ? '✓' : '✗'} H.265/HEVC (NVENC)</span>${config.ffmpegHasVaapi ? `<span class="ffmpeg-cap cap-ok">✓ H.265/HEVC (VAAPI)</span>` : `<span class="ffmpeg-cap ${config.ffmpegHasAmf ? 'cap-ok' : 'cap-miss'}">${config.ffmpegHasAmf ? '✓' : '✗'} H.265/HEVC (AMF)</span>`}<span class="ffmpeg-cap ${config.ffmpegHasQsv ? 'cap-ok' : 'cap-miss'}">${config.ffmpegHasQsv ? '✓' : '✗'} H.265/HEVC (QSV)</span><span class="ffmpeg-cap ${config.ffmpegHasLibzimg ? 'cap-ok' : 'cap-miss'}">${config.ffmpegHasLibzimg ? '✓' : '✗'} HDR tone-mapping (libzimg)</span><span class="ffmpeg-cap ${config.ffmpegHasNvdec ? 'cap-ok' : 'cap-miss'}">${config.ffmpegHasNvdec ? '✓' : '✗'} GPU decoding (NVDEC/CUVID)</span></div>${(!config.ffmpegHasLibx264 || !config.ffmpegHasLibzimg) ? '<div class="ffmpeg-build-warn">⚠ ' + this.t('settings.ffmpegUpgradeHint') + '</div>' : ''}</span></div>` : ''}
         </div>`;
 
+        // ── Audio ──
+        html += `<div class="settings-section" data-stab="playback">
+            <h3><svg class="settings-icon"><use href="#icon-music"/></svg> ${this.t('settings.audioSection')}</h3>
+            <div class="setting-row">
+                <span class="setting-label">${this.t('settings.audioDirectPlay')}</span>
+                <span class="setting-value">${toggle('transcodingEnabled', config.transcodingEnabled)} <span class="setting-hint">${this.t('settings.audioDirectPlayDesc')}</span></span>
+            </div>
+            ${config.transcodingEnabled ? `<div class="setting-row"><span class="setting-label" style="color:var(--warning,#f59e0b)"><svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-2px;margin-right:4px"><use href="#icon-alert-triangle"/></svg>${this.t('settings.audioDirectPlayWarning')}</span></div>` : ''}
+            ${!config.transcodingEnabled ? `
+            <div class="setting-row"><span class="setting-label">${this.t('settings.audioFallbackFormat')}</span><span class="setting-value">${select('transcodeFormat', config.transcodeFormat, [{v:'aac',l:'AAC (recommended)'},{v:'mp3',l:'MP3'},{v:'opus',l:'Opus'}])} <span class="setting-hint">${this.t('settings.audioFallbackFormatDesc')}</span></span></div>
+            <div class="setting-row"><span class="setting-label">${this.t('settings.audioFallbackBitrate')}</span><span class="setting-value">${select('transcodeBitrate', config.transcodeBitrate, [{v:'128k',l:'128 kbps'},{v:'192k',l:'192 kbps'},{v:'256k',l:'256 kbps'},{v:'320k',l:'320 kbps'}])}</span></div>` : ''}
+        </div>`;
+
         // ── Video Transcoding ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="playback">
             <h3><svg class="settings-icon"><use href="#icon-video"/></svg> ${this.t('settings.videoTranscoding')}</h3>`;
         // GPU detection status
         if (config.detectedGpus && config.detectedGpus.length > 0) {
@@ -7291,7 +8874,7 @@ const App = {
         html += `</div>`;
 
         // ── Logging ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="server">
             <h3><svg class="settings-icon"><use href="#icon-file-text"/></svg> ${this.t('settings.logging')}</h3>
             <div class="setting-row"><span class="setting-label">${this.t('settings.logLevel')}</span><span class="setting-value">${select('logLevel', config.logLevel, [{v:'Debug',l:this.t('settings.debug')},{v:'Information',l:this.t('settings.information')},{v:'Warning',l:this.t('settings.warning')},{v:'Error',l:this.t('settings.error')}])}</span></div>
             <div class="setting-row"><span class="setting-label">${this.t('settings.logFile')}</span><span class="setting-value" style="font-size:12px;word-break:break-all;color:var(--text-muted)">${this.esc(config.logFile)}</span></div>
@@ -7299,11 +8882,25 @@ const App = {
         </div>`;
 
         // ── Databases (read-only) ──
-        html += `<div class="settings-section">
+        html += `<div class="settings-section" data-stab="server">
             <h3><svg class="settings-icon"><use href="#icon-disc"/></svg> ${this.t('settings.databases')}</h3>`;
         if (config.databases && config.databases.length > 0) {
             html += `<table class="settings-shares-table"><thead><tr><th>${this.t('table.database')}</th><th>${this.t('table.path')}</th><th>${this.t('table.status')}</th><th>${this.t('label.size')}</th></tr></thead><tbody>`;
-            const _dbNameKeys = {'Music':'nav.music','Pictures':'settings.dbPictures','eBooks':'nav.ebooks','Audio Books':'nav.audioBooks','Podcasts':'nav.podcasts','Music Videos':'nav.musicVideos','Movies & TV':'analysis.moviesTv','Shares':'settings.dbShares'};
+            const _dbNameKeys = {
+                'Actors':        'page.actors',
+                'Audio Books':   'nav.audioBooks',
+                'eBooks':        'nav.ebooks',
+                'EPG Guide TV':  'settings.dbEpg',
+                'Internet TV':   'settings.dbInternetTv',
+                'Movies & TV':   'analysis.moviesTv',
+                'Music':         'nav.music',
+                'Music Videos':  'nav.musicVideos',
+                'Pictures':      'settings.dbPictures',
+                'Podcasts':      'nav.podcasts',
+                'Ratings':       'settings.dbRatings',
+                'Shares':        'settings.dbShares',
+                'Users':         'settings.dbUsers'
+            };
             config.databases.forEach(db => {
                 const status = db.exists
                     ? `<span class="status-ok">${this.t('nav.online')}</span>`
@@ -7324,7 +8921,7 @@ const App = {
 
         // ── System Power (admin only) ──
         if (isAdmin) {
-            html += `<div class="settings-section">
+            html += `<div class="settings-section" data-stab="server">
                 <h3><svg class="settings-icon"><use href="#icon-power"/></svg> ${this.t('settings.systemPower')}</h3>
                 <p style="color:var(--text-secondary);font-size:13px;margin-bottom:16px">${this.t('settings.systemPowerDesc')}</p>
                 <div style="display:flex;gap:12px;flex-wrap:wrap">
@@ -7341,9 +8938,16 @@ const App = {
             </div>`;
         }
 
+        // ── EPG Sources ──
+        if (isAdmin) {
+            html += `<div class="settings-section" data-stab="integrations" id="epg-settings-section">
+                <h3><svg class="settings-icon"><use href="#icon-list"/></svg> ${this.t('epg.sources')}</h3>
+            </div>`;
+        }
+
         // ── Server Logs (admin only) ──
         if (isAdmin) {
-            html += `<div class="settings-section">
+            html += `<div class="settings-section" data-stab="server">
                 <h3><svg class="settings-icon"><use href="#icon-file-text"/></svg> ${this.t('settings.serverLogs')}</h3>
                 <div class="setting-row"><span class="setting-label">${this.t('settings.logFile')}</span><span class="setting-value"><code style="font-size:11px;word-break:break-all;user-select:all">${this.esc(config.logFile || '')}</code></span></div>
                 <div style="margin-top:10px;display:flex;align-items:center;gap:8px">
@@ -7353,6 +8957,111 @@ const App = {
                 <div id="log-viewer" class="log-viewer" style="display:none"></div>
             </div>`;
         }
+
+        // ── Auto-Update tab ──
+        if (isAdmin) {
+            html += `<div class="settings-section" data-stab="autoupdate" id="au-section">
+                <h3><svg class="settings-icon"><use href="#icon-download"/></svg> ${this.t('autoupdate.title')}</h3>
+                <div id="au-content">${this._renderAutoUpdateHtml(null, config)}</div>
+            </div>`;
+        }
+
+        // ── About tab ──
+        html += `<div class="settings-section" data-stab="about">
+            <div class="about-hero">
+                <div class="about-logo-wrap">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                </div>
+                <div>
+                    <div class="about-app-name">NexusM</div>
+                    <div class="about-app-version">Version ${this.esc(config.version || '')}</div>
+                </div>
+            </div>
+
+            <div class="about-card">
+                <h3 class="about-section-title">
+                    <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M20 21a8 8 0 1 0-16 0"/></svg>
+                    Author
+                </h3>
+                <div class="about-row"><span class="about-label">Creator</span><span class="about-value">Michael Dalla Riva</span></div>
+                <div class="about-row"><span class="about-label">Founded</span><span class="about-value">December 2025</span></div>
+                <div class="about-row"><span class="about-label">Website</span><span class="about-value"><a href="https://nexusm.org" target="_blank" rel="noopener noreferrer" class="about-link">nexusm.org</a></span></div>
+            </div>
+
+            <div class="about-card">
+                <h3 class="about-section-title">
+                    <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    The Story
+                </h3>
+                <p class="about-story">NexusM started as a personal project to build a tiny web server that would run on one of my computers to index all my eBooks, music and videos, with a search function and automatic thumbnail generation. It started as a PowerShell project, and given the reception and impact it made following a few posts on social media, I decided to migrate the code to C# in order to benefit from a much faster user interface, multithreading capabilities and cross-platform compatibility.</p>
+                <p class="about-screenshot-caption">Original PowerShell version web user interface — <a href="https://nexusm.org/i/nexus-beta-0.6.20251228141239.png" target="_blank" rel="noopener noreferrer" class="about-link">view screenshot</a></p>
+            </div>
+
+            <div class="about-card">
+                <h3 class="about-section-title">
+                    <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    Release History
+                </h3>
+                <a href="https://nexusm.org/d/changelog" target="_blank" rel="noopener noreferrer" class="contact-btn contact-btn-secondary">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                    View Full Changelog
+                </a>
+            </div>
+
+            <div class="about-card">
+                <h3 class="about-section-title">
+                    <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    License &amp; Credits
+                </h3>
+                <div class="about-row"><span class="about-label">License</span><span class="about-value"><a href="https://github.com/michaeldallariva/NexusM/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" class="about-link">View license on GitHub</a></span></div>
+                <div class="about-row"><span class="about-label">Credits</span><span class="about-value"><a href="https://nexusm.org/d/credits" target="_blank" rel="noopener noreferrer" class="about-link">View third-party credits</a></span></div>
+            </div>
+        </div>`;
+
+        // ── Contact tab ──
+        html += `<div class="settings-section" data-stab="contact">
+            <div class="about-card">
+                <h3 class="about-section-title">
+                    <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Share Feedback &amp; Report Bugs
+                </h3>
+                <p class="about-story">Found a bug? Have a feature request or idea? We'd love to hear from you — no account required, completely anonymous. Your feedback directly shapes what gets built next.</p>
+                <a href="https://nexusm.org/#contact" target="_blank" rel="noopener noreferrer" class="contact-btn contact-btn-primary">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                    Open Feedback &amp; Bug Report Form
+                </a>
+            </div>
+
+            <div class="about-card">
+                <h3 class="about-section-title">
+                    <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    Documentation &amp; Support
+                </h3>
+                <p class="about-story">Browse the official documentation, setup guides, release notes, and download the latest version of NexusM from the support page.</p>
+                <a href="https://nexusm.org/support.html" target="_blank" rel="noopener noreferrer" class="contact-btn contact-btn-secondary">
+                    <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+                    View Documentation &amp; Releases
+                </a>
+            </div>
+
+            <div class="about-card">
+                <h3 class="about-section-title">
+                    <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+                    Community &amp; Source
+                </h3>
+                <p class="about-story">NexusM is developed actively. Follow releases, star the project, or contribute ideas on GitHub.</p>
+                <div class="contact-links-row">
+                    <a href="https://nexusm.org" target="_blank" rel="noopener noreferrer" class="contact-link-chip">
+                        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                        nexusm.org
+                    </a>
+                    <a href="https://hub.docker.com/r/dockernexusm/nexusm" target="_blank" rel="noopener noreferrer" class="contact-link-chip">
+                        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="3"/><path d="M7 12h2m2 0h2m2 0h2M7 8h2m2 0h2M7 16h2"/></svg>
+                        Docker Hub
+                    </a>
+                </div>
+            </div>
+        </div>`;
 
         // ── Floating Save Button (admin only) ──
         if (isAdmin) {
@@ -7367,14 +9076,268 @@ const App = {
 
         el.innerHTML = html;
 
+        // Restore active settings tab (fall back to 'server' if saved tab has no button, e.g. 'remote' for non-admins)
+        const _savedTab = localStorage.getItem('settings_tab') || 'server';
+        const _tabExists = !!document.querySelector(`.stab-btn[data-tab="${_savedTab}"]`);
+        this._settingsSwitchTab(_tabExists ? _savedTab : 'server');
+
+        // Populate path chips immediately from config (before credentials API responds)
+        this._fbUpdateAllChips();
+
         // Start live resource metrics polling (charts refresh every 15s in-place)
         this._startMetricsPolling();
 
-        // Load share credentials for each folder type
+        // Load share credentials — updates chip mount-status badges when done
         this.loadShareCredentials();
 
         // Populate template cards from server
         this._loadTemplateGrid();
+
+        // Load dynamic cleanup last-run status
+        this._dynamicCleanLoadStatus();
+
+        // Populate EPG sources section (async, non-blocking)
+        this.renderEpgSettings();
+
+        // Refresh video preview scan status
+        this._vpreviewPollStatus();
+    },
+
+    _settingsSwitchTab(tab) {
+        localStorage.setItem('settings_tab', tab);
+        document.querySelectorAll('.settings-section[data-stab]').forEach(s => {
+            s.style.display = s.dataset.stab === tab ? '' : 'none';
+        });
+        document.querySelectorAll('.stab-btn').forEach(b => {
+            b.classList.toggle('stab-btn--active', b.dataset.tab === tab);
+        });
+    },
+
+    // ─── Auto-Update UI ────────────────────────────────────────────
+    _auPollTimer: null,
+
+    _renderAutoUpdateHtml(status, config) {
+        // status comes from /api/autoupdate/status; config from /api/config/info (for initial load)
+        const s = status || {
+            currentVersion: config?.version?.split(' ')[0] || '—',
+            availableVersion: null,
+            updateAvailable: false,
+            isDownloading: false,
+            downloadProgress: 0,
+            downloadState: 'idle',
+            stagingReady: false,
+            hasBackup: false,
+            backupVersion: null,
+            isDocker: config?.isDocker || false,
+            enabled: config?.autoUpdateEnabled || false,
+            checkIntervalHours: config?.autoUpdateCheckInterval || 24,
+            channel: config?.autoUpdateChannel || 'stable',
+            lastChecked: null,
+            releaseNotes: null,
+            releaseDate: null,
+            packageSizeBytes: null,
+            errorMessage: null
+        };
+
+        let html = '';
+
+        // Docker notice
+        if (s.isDocker) {
+            html += `<div class="au-docker-notice">
+                <div class="au-docker-header">${this.t('autoupdate.dockerTitle','Docker Installation — Manual Update Required')}</div>
+                <p class="au-docker-explain">${this.t('autoupdate.dockerNotice')}</p>
+                <div class="au-docker-step">
+                    <span class="au-docker-step-num">1</span>
+                    <div>
+                        <div class="au-docker-step-label">${this.t('autoupdate.dockerStep1','Pull the latest image:')}</div>
+                        <code class="au-docker-cmd">docker pull dockernexusm/nexusm:latest</code>
+                    </div>
+                </div>
+                <div class="au-docker-step">
+                    <span class="au-docker-step-num">2</span>
+                    <div>
+                        <div class="au-docker-step-label">${this.t('autoupdate.dockerStep2','Recreate the container:')}</div>
+                        <code class="au-docker-cmd">docker compose down &amp;&amp; docker compose up -d</code>
+                    </div>
+                </div>
+                <div class="au-docker-note">${this.t('autoupdate.dockerVolumesNote','Your media library and configuration are stored in Docker volumes and will not be affected by the update.')}</div>
+            </div>`;
+            return html;
+        }
+
+        // Error banner
+        if (s.errorMessage) {
+            const msg = s.errorMessage.startsWith('autoupdate.') ? this.t(s.errorMessage) : s.errorMessage;
+            html += `<div class="au-error">${this.esc(msg)}</div>`;
+        }
+
+        // ── Current version card ──
+        const lastCheckedStr = s.lastChecked
+            ? this.esc(s.lastChecked)
+            : this.t('autoupdate.never');
+        html += `<div class="au-card">
+            <div class="au-card-title">${this.t('autoupdate.currentVersion')}</div>
+            <div class="au-version-row">
+                <div>
+                    <div class="au-version-badge">${this.esc(s.currentVersion)}</div>
+                    <div class="au-meta">${this.t('autoupdate.lastChecked')}: ${lastCheckedStr}</div>
+                </div>
+                <button class="au-btn au-btn-secondary" id="au-check-btn" onclick="App._auCheck()" ${s.isDownloading || s.downloadState === 'applying' ? 'disabled' : ''}>
+                    ${this.t('autoupdate.checkNow')}
+                </button>
+            </div>
+        </div>`;
+
+        // ── Settings card ──
+        html += `<div class="au-card">
+            <div class="setting-row" style="margin-bottom:12px">
+                <span class="setting-label">${this.t('autoupdate.enable')}</span>
+                <label class="setting-toggle"><input type="checkbox" id="cfg-autoUpdateEnabled"${s.enabled ? ' checked' : ''}><span class="toggle-track"><span class="toggle-thumb"></span></span></label>
+            </div>
+            <div class="setting-row" style="margin-bottom:12px">
+                <span class="setting-label">${this.t('autoupdate.checkInterval')}</span>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <input type="number" id="cfg-autoUpdateCheckInterval" class="setting-input" value="${s.checkIntervalHours}" min="1" max="168" style="width:70px">
+                    <span style="font-size:13px;color:var(--text-secondary)">${this.t('autoupdate.hours')}</span>
+                </div>
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">${this.t('autoupdate.channel')}</span>
+                <select id="cfg-autoUpdateChannel" class="setting-select" style="width:140px">
+                    <option value="stable"${s.channel === 'stable' ? ' selected' : ''}>${this.t('autoupdate.stable')}</option>
+                </select>
+            </div>
+        </div>`;
+
+        // ── Update available card ──
+        if (s.updateAvailable || s.stagingReady || s.isDownloading) {
+            const sizeMb = s.packageSizeBytes ? (s.packageSizeBytes / 1048576).toFixed(1) + ' MB' : '';
+            html += `<div class="au-card" style="border-color:rgba(59,130,246,.35)">
+                <div class="au-card-title">${this.t('autoupdate.updateAvailable')}</div>
+                <div style="margin-bottom:10px">
+                    <span class="au-update-badge">&#8593; ${this.esc(s.availableVersion || '')}</span>
+                    ${s.releaseDate ? `<span style="font-size:12px;color:var(--text-secondary);margin-left:8px">${this.esc(s.releaseDate)}</span>` : ''}
+                    ${sizeMb ? `<span style="font-size:12px;color:var(--text-secondary);margin-left:8px">${sizeMb}</span>` : ''}
+                </div>
+                ${s.releaseNotes ? `<div style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5">${this.esc(s.releaseNotes)}</div>` : ''}
+                ${this._renderDownloadControls(s)}
+            </div>`;
+        } else if (!s.updateAvailable && s.lastChecked) {
+            html += `<div class="au-card" style="border-color:rgba(34,197,94,.25)">
+                <div style="font-size:13px;color:#4ade80">&#10003; ${this.t('autoupdate.upToDate')}</div>
+            </div>`;
+        }
+
+        return html;
+    },
+
+    _renderDownloadControls(s) {
+        if (s.downloadState === 'applying') {
+            return `<div style="font-size:13px;color:var(--text-secondary)">${this.t('autoupdate.applying')}</div>`;
+        }
+        if (s.stagingReady) {
+            return `<div style="display:flex;gap:10px;flex-wrap:wrap">
+                <button class="au-btn au-btn-primary" onclick="App._auApply()">&#9654; ${this.t('autoupdate.restartApply')}</button>
+                <button class="au-btn au-btn-danger" onclick="App._auDiscard()">&#10005; ${this.t('autoupdate.discardDownload')}</button>
+            </div>`;
+        }
+        if (s.isDownloading || s.downloadState === 'verifying') {
+            const label = s.downloadState === 'verifying'
+                ? this.t('autoupdate.verifying')
+                : `${this.t('autoupdate.downloading')} ${s.downloadProgress}%`;
+            const fileHint = s.downloadLabel ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:3px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${this.esc(s.downloadLabel)}">${this.esc(s.downloadLabel)}</div>` : '';
+            return `<div>
+                <div class="au-progress-bar"><div class="au-progress-fill" id="au-prog-fill" style="width:${s.downloadProgress}%"></div></div>
+                <div class="au-progress-label" id="au-prog-label">${label}</div>
+                ${fileHint}
+            </div>`;
+        }
+        // idle — show Download button
+        return `<button class="au-btn au-btn-primary" onclick="App._auDownload()">&#8595; ${this.t('autoupdate.download')}</button>`;
+    },
+
+    async _auRefresh() {
+        const status = await this.api('autoupdate/status');
+        const el = document.getElementById('au-content');
+        if (el && status) el.innerHTML = this._renderAutoUpdateHtml(status, null);
+    },
+
+    async _auCheck() {
+        const btn = document.getElementById('au-check-btn');
+        if (btn) { btn.disabled = true; btn.textContent = this.t('autoupdate.checking'); }
+        await this.apiPost('autoupdate/check', {});
+        await this._auRefresh();
+        const errEl = document.querySelector('#au-content .au-error');
+        if (errEl) setTimeout(() => { if (errEl.parentNode) errEl.remove(); }, 10000);
+    },
+
+    async _auDownload() {
+        await this.apiPost('autoupdate/download', {});
+        await this._auRefresh();
+        this._auStartPolling();
+    },
+
+    _auStartPolling() {
+        this._auStopPolling();
+        this._auPollTimer = setInterval(async () => {
+            const status = await this.api('autoupdate/download-progress');
+            const el = document.getElementById('au-content');
+            if (el && status) el.innerHTML = this._renderAutoUpdateHtml(status, null);
+            if (!status?.isDownloading && status?.downloadState !== 'ready') this._auStopPolling();
+            if (status?.stagingReady || status?.downloadState === 'ready') this._auStopPolling();
+        }, 1500);
+    },
+
+    _auStopPolling() {
+        if (this._auPollTimer) { clearInterval(this._auPollTimer); this._auPollTimer = null; }
+    },
+
+    async _auApply() {
+        if (!confirm(this.t('autoupdate.restartApply') + '?')) return;
+        // Remember the version we are updating to, so we only reload once the
+        // NEW binary is actually serving (otherwise we'd reload onto the old app.js).
+        let target = null;
+        try { const st = await this.api('autoupdate/status'); target = st?.availableVersion || null; } catch (e) {}
+        const el = document.getElementById('au-content');
+        if (el) el.innerHTML = `<div class="au-success">${this.t('autoupdate.applyingReload', 'Applying update… This page will reload automatically when the new version is ready.')}</div>`;
+        this._auStopPolling();
+        // The apply call tears the server down mid-response, so a failure here is expected.
+        try { await this.apiPost('autoupdate/apply', {}); } catch (e) {}
+        this._auWaitForRestart(target);
+    },
+
+    // Poll the server through its restart and hard-reload the page once it is
+    // back up on the new version — so the user never has to refresh manually.
+    _auWaitForRestart(target) {
+        let sawDown = false;
+        const started = Date.now();
+        const tick = async () => {
+            if (Date.now() - started > 180000) return; // give up after 3 min; manual refresh still works
+            let ok = false, version = null;
+            try {
+                const res = await fetch('/api/autoupdate/status?_=' + Date.now(), { cache: 'no-store' });
+                if (res.ok) { ok = true; const j = await res.json(); version = j.currentVersion; }
+            } catch (e) { ok = false; }
+            if (!ok) sawDown = true; // server has gone down for the restart
+            // Reload only after we've seen it go down AND it's back up reporting the
+            // new version (or we never learned the target — then any recovery is fine).
+            const versionReady = !target || !version || version === target;
+            if (ok && sawDown && versionReady) { window.location.reload(true); return; }
+            setTimeout(tick, 2000);
+        };
+        setTimeout(tick, 3000); // give the apply a head start before probing
+    },
+
+    async _auDiscard() {
+        await this.apiDelete('autoupdate/staging');
+        await this._auRefresh();
+    },
+
+    async _auRollback() {
+        if (!confirm(this.t('autoupdate.rollbackTo') + '?')) return;
+        const el = document.getElementById('au-content');
+        if (el) el.innerHTML = `<div class="au-success">${this.t('autoupdate.applying')}</div>`;
+        await this.apiPost('autoupdate/rollback', {});
     },
 
     _sharesCache: null,
@@ -7382,21 +9345,7 @@ const App = {
     async loadShareCredentials() {
         const shares = await this.api('shares');
         this._sharesCache = shares || [];
-        const types = ['music', 'movies', 'tvshows', 'musicvideos', 'pictures', 'ebooks'];
-        types.forEach(type => {
-            const container = document.getElementById(`share-creds-${type}`);
-            if (!container) return;
-            const share = this._sharesCache.find(s => s.folderType === type);
-            if (share) {
-                // Show a small inline status badge next to the lock button
-                const btn = container.previousElementSibling?.querySelector('button');
-                if (btn) {
-                    const badge = share.isMounted ? '&#128275;' : '&#128274;';
-                    btn.innerHTML = badge;
-                    btn.title = share.isMounted ? 'Mounted - Click to manage credentials' : 'Has credentials - Click to manage';
-                }
-            }
-        });
+        this._fbUpdateAllChips();
     },
 
     async toggleShareCredentials(folderType) {
@@ -7523,11 +9472,6 @@ const App = {
         await this.apiDelete(`shares/${id}`);
         this._sharesCache = null;
         await this.loadShareCredentials();
-        // Collapse all credential panels
-        ['music', 'movies', 'tvshows', 'musicvideos', 'pictures', 'ebooks'].forEach(t => {
-            const c = document.getElementById(`share-creds-${t}`);
-            if (c) { c.style.display = 'none'; c.innerHTML = ''; }
-        });
     },
 
     async mountAllShares() {
@@ -7535,6 +9479,371 @@ const App = {
         if (res) {
             this._sharesCache = null;
             await this.loadShareCredentials();
+        }
+    },
+
+    // ── Folder Browser Modal ─────────────────────────────────────
+    _fbFolderType: null,
+    _fbCurrentPath: '',
+    _fbParentPath: null,
+    _fbPathsState: {},
+
+    _fbKeyMap() {
+        return { music: 'musicFolders', movies: 'moviesFolders', tvshows: 'tvShowsFolders', musicvideos: 'musicVideosFolders', pictures: 'picturesFolders', ebooks: 'ebooksFolders', audiobooks: 'audioBooksFolders', anime: 'animeFolders' };
+    },
+
+    _openFolderBrowser(folderType) {
+        const labelMap = { music: this.t('settings.musicFolders'), movies: this.t('settings.moviesFolders'), tvshows: this.t('settings.tvShowsFolders'), musicvideos: this.t('settings.musicVideosFolders'), pictures: this.t('settings.picturesFolders'), ebooks: this.t('settings.ebooksFolders'), audiobooks: this.t('settings.audioBooksFolders'), anime: this.t('settings.animeFolders') };
+        const label = labelMap[folderType] || folderType;
+        this._fbFolderType = folderType;
+        this._fbCurrentPath = '';
+        this._fbParentPath = null;
+
+        let overlay = document.getElementById('fb-modal-overlay');
+        if (!overlay) {
+            overlay = document.createElement('div');
+            overlay.id = 'fb-modal-overlay';
+            overlay.className = 'fb-overlay';
+            overlay.addEventListener('click', e => { if (e.target === overlay) App._closeFolderBrowser(); });
+            document.body.appendChild(overlay);
+            overlay.innerHTML = `
+            <div class="fb-box" onclick="event.stopPropagation()">
+                <div class="fb-header">
+                    <span class="fb-title" id="fb-modal-title"></span>
+                    <button class="fb-close" onclick="App._closeFolderBrowser()" title="Close">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    </button>
+                </div>
+                <div class="fb-tabs">
+                    <button class="fb-tab active" id="fb-tab-btn-local" onclick="App._fbSwitchTab('local')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        Browse Local
+                    </button>
+                    <button class="fb-tab" id="fb-tab-btn-net" onclick="App._fbSwitchTab('network')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                        Network Share
+                    </button>
+                </div>
+                <div class="fb-body" id="fb-tab-local-body">
+                    <div class="fb-nav-bar">
+                        <button class="fb-back-btn" id="fb-back-btn" onclick="App._fbGoBack()" disabled>
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                            Back
+                        </button>
+                        <span class="fb-current-path" id="fb-current-path-label">Select a drive to get started</span>
+                    </div>
+                    <div id="fb-folder-list" class="fb-folder-list"></div>
+                    <div class="fb-path-row">
+                        <input type="text" id="fb-path-input" placeholder="Or type a path here, e.g. D:\\Music or /mnt/media">
+                    </div>
+                    <div class="fb-actions">
+                        <button class="fb-btn-secondary" onclick="App._closeFolderBrowser()">Cancel</button>
+                        <button class="fb-btn-primary" onclick="App._fbConfirmLocal()">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                            Add This Folder
+                        </button>
+                    </div>
+                </div>
+                <div class="fb-body" id="fb-tab-net-body" style="display:none">
+                    <div class="fb-unc-notice">
+                        <strong>Network / Remote Shares only</strong><br>
+                        Use UNC paths like <code>\\\\server\\share</code> (Windows) or <code>//server/share</code> (Linux/Mac) for NAS drives, Synology, TrueNAS or Samba servers.<br>
+                        For <strong>local folders</strong> like <code>D:\\Music</code> or <code>/home/media</code>, use the <strong>Browse Local</strong> tab instead — no credentials needed.
+                    </div>
+                    <div class="fb-path-row">
+                        <input type="text" id="fb-unc-path" placeholder="\\\\server\\share  or  //server/share/folder">
+                    </div>
+                    <div id="fb-unc-status-row" class="fb-unc-cred-status" style="display:none">
+                        <span id="fb-unc-status-badge"></span>
+                        <span id="fb-unc-last-error" style="font-size:11px;color:var(--danger,#e74c3c)"></span>
+                    </div>
+                    <div class="fb-creds-grid">
+                        <div>
+                            <label class="fb-creds-label">Username</label>
+                            <input id="fb-unc-user" class="fb-creds-input" autocomplete="off" placeholder="e.g. guest">
+                        </div>
+                        <div>
+                            <label class="fb-creds-label">Password</label>
+                            <input id="fb-unc-pass" type="password" class="fb-creds-input" autocomplete="new-password" placeholder="(leave blank to keep saved)">
+                        </div>
+                        <div>
+                            <label class="fb-creds-label">Domain <span style="opacity:.6">(optional)</span></label>
+                            <input id="fb-unc-domain" class="fb-creds-input" placeholder="WORKGROUP">
+                        </div>
+                        <div>
+                            <label class="fb-creds-label">Mount Point <span style="opacity:.6">(optional)</span></label>
+                            <input id="fb-unc-mount" class="fb-creds-input" placeholder="(auto)">
+                        </div>
+                        <div class="fb-creds-full">
+                            <label class="fb-creds-label">Mount Options <span style="opacity:.6">(optional)</span></label>
+                            <input id="fb-unc-opts" class="fb-creds-input" placeholder="vers=3.0">
+                        </div>
+                    </div>
+                    <div class="fb-actions">
+                        <button class="fb-btn-secondary" onclick="App._fbTestUncShare()">Test Connection</button>
+                        <span class="fb-status" id="fb-unc-test-status"></span>
+                        <button class="fb-btn-secondary" onclick="App._closeFolderBrowser()">Cancel</button>
+                        <button class="fb-btn-primary" onclick="App._fbSaveUncShare()">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            Save &amp; Mount
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+
+            // Set up delegated click for folder items (persists across innerHTML resets)
+            document.getElementById('fb-folder-list').addEventListener('click', e => {
+                const item = e.target.closest('[data-fb-path]');
+                if (!item || item.classList.contains('inaccessible')) return;
+                App._fbBrowse(item.dataset.fbPath);
+            });
+        }
+
+        document.getElementById('fb-modal-title').textContent = `Add ${label}`;
+
+        // Pre-fill UNC tab if existing credentials exist for this folder type
+        if (!this._sharesCache) { this.api('shares').then(s => { this._sharesCache = s || []; this._fbPreFillUnc(folderType); }); }
+        else { this._fbPreFillUnc(folderType); }
+
+        this._fbSwitchTab('local');
+        overlay.classList.add('fb-open');
+        this._fbBrowse('');
+    },
+
+    _fbPreFillUnc(folderType) {
+        const existing = (this._sharesCache || []).find(s => s.folderType === folderType);
+        const pathEl = document.getElementById('fb-unc-path');
+        const userEl = document.getElementById('fb-unc-user');
+        const domainEl = document.getElementById('fb-unc-domain');
+        const mountEl = document.getElementById('fb-unc-mount');
+        const optsEl = document.getElementById('fb-unc-opts');
+        const statusRow = document.getElementById('fb-unc-status-row');
+        const badge = document.getElementById('fb-unc-status-badge');
+        const errEl = document.getElementById('fb-unc-last-error');
+        if (!pathEl) return;
+        if (existing) {
+            pathEl.value = existing.sharePath || '';
+            if (userEl) userEl.value = existing.username || '';
+            if (domainEl) domainEl.value = existing.domain || '';
+            if (mountEl) mountEl.value = existing.mountPoint || '';
+            if (optsEl) optsEl.value = existing.mountOptions || '';
+            if (statusRow) statusRow.style.display = 'flex';
+            if (badge) badge.innerHTML = existing.isMounted
+                ? '<span style="background:rgba(39,174,96,.2);color:#2ecc71;padding:2px 9px;border-radius:10px;font-size:10px;font-weight:700">MOUNTED</span>'
+                : '<span style="background:rgba(127,140,141,.12);color:var(--text-muted);padding:2px 9px;border-radius:10px;font-size:10px">NOT MOUNTED</span>';
+            if (errEl) errEl.textContent = existing.lastError || '';
+        } else {
+            pathEl.value = '';
+            if (userEl) userEl.value = '';
+            if (domainEl) domainEl.value = '';
+            if (mountEl) mountEl.value = '';
+            if (optsEl) optsEl.value = '';
+            if (statusRow) statusRow.style.display = 'none';
+        }
+        const statusEl = document.getElementById('fb-unc-test-status');
+        if (statusEl) statusEl.textContent = '';
+    },
+
+    _closeFolderBrowser() {
+        const overlay = document.getElementById('fb-modal-overlay');
+        if (overlay) overlay.classList.remove('fb-open');
+        if (this._wizardStep === 1) setTimeout(() => this._wzRefreshStep1(), 150);
+    },
+
+    _fbSwitchTab(tab) {
+        const localBtn = document.getElementById('fb-tab-btn-local');
+        const netBtn = document.getElementById('fb-tab-btn-net');
+        const localBody = document.getElementById('fb-tab-local-body');
+        const netBody = document.getElementById('fb-tab-net-body');
+        if (!localBtn) return;
+        if (tab === 'local') {
+            localBtn.classList.add('active'); netBtn.classList.remove('active');
+            localBody.style.display = ''; netBody.style.display = 'none';
+        } else {
+            netBtn.classList.add('active'); localBtn.classList.remove('active');
+            netBody.style.display = ''; localBody.style.display = 'none';
+        }
+    },
+
+    async _fbBrowse(path) {
+        this._fbCurrentPath = path;
+        const listEl = document.getElementById('fb-folder-list');
+        const pathLabel = document.getElementById('fb-current-path-label');
+        const backBtn = document.getElementById('fb-back-btn');
+        const pathInput = document.getElementById('fb-path-input');
+        if (!listEl) return;
+        listEl.innerHTML = '<div class="fb-empty"><div class="spinner" style="width:16px;height:16px;border-width:2px"></div> Loading...</div>';
+        try {
+            const endpoint = path ? `filesystem/browse?path=${encodeURIComponent(path)}` : 'filesystem/browse';
+            const data = await this.api(endpoint);
+            if (!data) return;
+            this._fbParentPath = data.parent !== undefined ? data.parent : null;
+            if (pathLabel) pathLabel.textContent = path || 'Select a drive';
+            if (pathInput && path) pathInput.value = path;
+            if (backBtn) backBtn.disabled = !path;
+            if (!data.items || data.items.length === 0) {
+                listEl.innerHTML = '<div class="fb-empty" style="color:var(--text-muted)">No sub-folders found in this location</div>';
+                return;
+            }
+            const isDriveList = data.isDriveList;
+            const driveIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`;
+            const folderIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+            listEl.innerHTML = data.items.map(item => {
+                const icon = isDriveList ? driveIcon : folderIcon;
+                const cls = item.accessible === false ? 'fb-folder-item inaccessible' : 'fb-folder-item';
+                return `<div class="${cls}" data-fb-path="${this.esc(item.path)}">
+                    <span class="fb-icon">${icon}</span>
+                    <span class="fb-name" title="${this.esc(item.path)}">${this.esc(item.name)}</span>
+                </div>`;
+            }).join('');
+        } catch(e) {
+            const warnIcon = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+            listEl.innerHTML = `<div class="fb-empty" style="color:var(--danger,#e74c3c)">${warnIcon} ${this.esc(e.message || 'Could not load folder')}</div>`;
+        }
+    },
+
+    _fbGoBack() {
+        if (!this._fbCurrentPath) return;
+        this._fbBrowse(this._fbParentPath !== null ? (this._fbParentPath || '') : '');
+    },
+
+    _fbConfirmLocal() {
+        const pathInput = document.getElementById('fb-path-input');
+        const path = pathInput?.value?.trim();
+        if (!path) { if (pathInput) { pathInput.style.outline = '2px solid var(--danger,#e74c3c)'; setTimeout(() => pathInput.style.outline = '', 2000); } return; }
+        this._fbAddPath(this._fbFolderType, path);
+        this._closeFolderBrowser();
+    },
+
+    _fbAddPath(folderType, path) {
+        const key = this._fbKeyMap()[folderType];
+        const input = document.getElementById(`cfg-${key}`);
+        if (!input) return;
+        const current = input.value.split(',').map(p => p.trim()).filter(Boolean);
+        if (!current.includes(path)) { current.push(path); input.value = current.join(','); }
+        this._fbUpdateChips(folderType);
+        this._fbAutoSaveFolders(folderType);
+    },
+
+    _fbRemovePath(folderType, path) {
+        const key = this._fbKeyMap()[folderType];
+        const input = document.getElementById(`cfg-${key}`);
+        if (!input) return;
+        const current = input.value.split(',').map(p => p.trim()).filter(Boolean);
+        input.value = current.filter(p => p !== path).join(',');
+        this._fbUpdateChips(folderType);
+        this._fbAutoSaveFolders(folderType);
+    },
+
+    _fbRemovePathByIdx(folderType, idx) {
+        const paths = this._fbPathsState[folderType] || [];
+        if (paths[idx] !== undefined) this._fbRemovePath(folderType, paths[idx]);
+    },
+
+    async _fbAutoSaveFolders(changedType) {
+        // Immediately persist all library folder paths to server so that scans
+        // use the correct config without requiring a manual Save Settings click.
+        const keyMap = this._fbKeyMap();
+        const payload = {};
+        Object.values(keyMap).forEach(key => {
+            const input = document.getElementById(`cfg-${key}`);
+            if (input) payload[key] = input.value.trim();
+        });
+        try {
+            await this.apiPost('config/save', payload);
+            // Show a brief subtle indicator on the affected chips container
+            const container = document.getElementById(`share-chips-${changedType}`);
+            if (container) {
+                const indicator = document.createElement('span');
+                indicator.style.cssText = 'font-size:10px;color:var(--success,#27ae60);transition:opacity .5s;opacity:1;margin-left:4px';
+                indicator.textContent = 'Saved';
+                container.appendChild(indicator);
+                setTimeout(() => { indicator.style.opacity = '0'; setTimeout(() => indicator.remove(), 500); }, 1500);
+            }
+        } catch(e) {
+            // Silent fail — user can still Save Settings manually
+        }
+    },
+
+    _fbUpdateChips(folderType) {
+        const key = this._fbKeyMap()[folderType];
+        const input = document.getElementById(`cfg-${key}`);
+        const container = document.getElementById(`share-chips-${folderType}`);
+        if (!container || !input) return;
+        const paths = input.value.split(',').map(p => p.trim()).filter(Boolean);
+        this._fbPathsState[folderType] = paths;
+        if (paths.length === 0) { container.innerHTML = '<span class="share-no-paths">No folders added yet</span>'; return; }
+        const share = (this._sharesCache || []).find(s => s.folderType === folderType);
+        container.innerHTML = paths.map((path, i) => {
+            const isUnc = path.startsWith('\\\\') || path.startsWith('//');
+            const pathEsc = this.esc(path);
+            let badge = '';
+            if (isUnc && share) {
+                badge = share.isMounted
+                    ? '<span class="path-chip-badge path-chip-badge-mounted">MOUNTED</span>'
+                    : '<span class="path-chip-badge path-chip-badge-unmounted">NOT MOUNTED</span>';
+            }
+            return `<span class="path-chip${isUnc ? ' path-chip-unc' : ''}" title="${pathEsc}">
+                ${isUnc ? '<span class="path-chip-key"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span>' : ''}
+                <span class="path-chip-text">${pathEsc}</span>
+                ${badge}
+                <button class="path-chip-remove" onclick="App._fbRemovePathByIdx('${folderType}',${i})" title="Remove this folder"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </span>`;
+        }).join('');
+    },
+
+    _fbUpdateAllChips() {
+        Object.keys(this._fbKeyMap()).forEach(t => this._fbUpdateChips(t));
+    },
+
+    async _fbSaveUncShare() {
+        const folderType = this._fbFolderType;
+        const path = document.getElementById('fb-unc-path')?.value?.trim();
+        const username = document.getElementById('fb-unc-user')?.value?.trim();
+        const password = document.getElementById('fb-unc-pass')?.value;
+        const domain = document.getElementById('fb-unc-domain')?.value?.trim() || '';
+        const mountPoint = document.getElementById('fb-unc-mount')?.value?.trim() || '';
+        const mountOptions = document.getElementById('fb-unc-opts')?.value?.trim() || '';
+        const statusEl = document.getElementById('fb-unc-test-status');
+        if (!path) { if (statusEl) { statusEl.style.color = 'var(--danger,#e74c3c)'; statusEl.textContent = 'Enter a network path first'; } return; }
+        if (!username) { if (statusEl) { statusEl.style.color = 'var(--danger,#e74c3c)'; statusEl.textContent = 'Username is required'; } return; }
+        if (statusEl) { statusEl.style.color = 'var(--text-secondary)'; statusEl.textContent = 'Saving...'; }
+        const existing = (this._sharesCache || []).find(s => s.folderType === folderType);
+        let res;
+        if (existing) {
+            const payload = { sharePath: path, username, domain, mountPoint, mountOptions, folderType };
+            if (password) payload.password = password;
+            res = await this.apiPut(`shares/${existing.id}`, payload);
+        } else {
+            if (!password) { if (statusEl) { statusEl.style.color = 'var(--danger,#e74c3c)'; statusEl.textContent = 'Password required for new credentials'; } return; }
+            res = await this.apiPost('shares', { sharePath: path, username, password, domain, mountPoint, mountOptions, shareType: 'smb', folderType });
+        }
+        if (res && res.success) {
+            if (statusEl) { statusEl.style.color = 'var(--success,#27ae60)'; statusEl.textContent = 'Saved — mounting...'; }
+            const shareId = res.id || (existing && existing.id);
+            if (shareId) await this.apiPost(`shares/${shareId}/mount`, {});
+            this._fbAddPath(folderType, path);
+            this._sharesCache = null;
+            await this.loadShareCredentials();
+            setTimeout(() => this._closeFolderBrowser(), 700);
+        } else if (statusEl) {
+            statusEl.style.color = 'var(--danger,#e74c3c)';
+            statusEl.textContent = (res && res.message) || 'Failed to save';
+        }
+    },
+
+    async _fbTestUncShare() {
+        const statusEl = document.getElementById('fb-unc-test-status');
+        if (statusEl) { statusEl.style.color = 'var(--text-secondary)'; statusEl.textContent = 'Testing...'; }
+        const res = await this.apiPost('shares/test', {
+            sharePath: document.getElementById('fb-unc-path')?.value?.trim() || '',
+            username: document.getElementById('fb-unc-user')?.value?.trim() || '',
+            password: document.getElementById('fb-unc-pass')?.value || '',
+            domain: document.getElementById('fb-unc-domain')?.value?.trim() || ''
+        });
+        if (statusEl && res) {
+            statusEl.style.color = res.success ? 'var(--success,#27ae60)' : 'var(--danger,#e74c3c)';
+            statusEl.textContent = res.message || (res.success ? 'Connection successful!' : 'Connection failed');
         }
     },
 
@@ -7615,6 +9924,97 @@ const App = {
         if (this._initCfg) { this._initCfg.traktConnected = true; this._initCfg.traktUsername = data.traktUsername; }
     },
 
+    // ── Last.fm connect / disconnect ──────────────────────────────────────
+
+    async lfmConnect() {
+        const btn = document.getElementById('btn-lfm-connect');
+        if (btn) { btn.disabled = true; btn.textContent = this.t('settings.scrobblingConnecting'); }
+        const data = await this.api('lastfm/auth-url');
+        if (!data || data.error) {
+            if (btn) { btn.disabled = false; btn.textContent = this.t('btn.scrobblingConnect'); }
+            this.showToast(data?.error || 'Could not get Last.fm auth URL. Check your API key.', 'error');
+            return;
+        }
+        // Open Last.fm auth page; after approval Last.fm redirects to /api/lastfm/callback
+        // which sets the session key and redirects back to /?lastfm=ok
+        window.open(data.url, '_blank', 'noopener');
+        if (btn) { btn.textContent = this.t('settings.scrobblingWaitingApproval'); }
+        // Poll status every 3 s for up to 2 min so the UI updates when the user returns
+        let attempts = 0;
+        const poll = setInterval(async () => {
+            attempts++;
+            const status = await this.api('lastfm/status');
+            if (status?.connected) {
+                clearInterval(poll);
+                const cell = document.getElementById('lfm-status-cell');
+                if (cell) cell.innerHTML =
+                    `<span class="trakt-connected-badge">&#9679; ${this.t('settings.scrobblingConnectedAs')} <strong>${this.esc(status.lfmUsername)}</strong></span>
+                     <a href="https://www.last.fm/user/${this.esc(status.lfmUsername)}" target="_blank" rel="noopener" class="trakt-profile-link">last.fm/user/${this.esc(status.lfmUsername)}</a>
+                     <button class="btn-secondary trakt-action-btn" onclick="App.lfmDisconnect()">${this.t('btn.scrobblingDisconnect')}</button>`;
+            } else if (attempts >= 40) {
+                clearInterval(poll);
+                if (btn) { btn.disabled = false; btn.textContent = this.t('btn.scrobblingConnect'); }
+            }
+        }, 3000);
+    },
+
+    async lfmDisconnect() {
+        await this.apiPost('lastfm/disconnect', {});
+        const cell = document.getElementById('lfm-status-cell');
+        if (cell) cell.innerHTML =
+            `<span style="color:var(--text-secondary)">&#9675; ${this.t('settings.scrobblingNotConnected')}</span>
+             <button class="btn-secondary trakt-action-btn" id="btn-lfm-connect" onclick="App.lfmConnect()">${this.t('btn.scrobblingConnect')}</button>`;
+    },
+
+    // ── ListenBrainz connect / disconnect ─────────────────────────────────
+
+    lbShowConnect() {}, // no-op — token row is always visible when not connected
+    lbHideConnect() {}, // no-op
+
+    async lbConnect() {
+        const inp    = document.getElementById('lb-token-input');
+        const status = document.getElementById('lb-connect-status');
+        const token  = inp?.value?.trim();
+        if (!token) {
+            if (status) { status.style.color = 'var(--danger)'; status.textContent = this.t('settings.scrobblingLbTokenRequired'); }
+            return;
+        }
+        if (status) { status.style.color = 'var(--text-secondary)'; status.textContent = this.t('settings.scrobblingConnecting'); }
+        const data = await this.apiPost('listenbrainz/connect', { token });
+        if (!data || data.error) {
+            if (status) { status.style.color = 'var(--danger)'; status.textContent = data?.error || 'Token validation failed.'; }
+            return;
+        }
+        const lbUser = data.lbUsername || '';
+        // Update status cell to connected state and remove the token row
+        const cell = document.getElementById('lb-status-cell');
+        if (cell) cell.innerHTML =
+            `<span class="trakt-connected-badge">&#9679; ${this.t('settings.scrobblingConnectedAs')} <strong>${this.esc(lbUser)}</strong></span>
+             <a href="https://listenbrainz.org/user/${this.esc(lbUser)}" target="_blank" rel="noopener" class="trakt-profile-link">listenbrainz.org/user/${this.esc(lbUser)}</a>
+             <button class="btn-secondary trakt-action-btn" onclick="App.lbDisconnect()">${this.t('btn.scrobblingDisconnect')}</button>`;
+        document.getElementById('lb-token-row')?.remove();
+        document.getElementById('lb-connect-status')?.remove();
+        if (this._initCfg) { this._initCfg.lbConnected = true; this._initCfg.lbUsername = lbUser; }
+    },
+
+    async lbDisconnect() {
+        await this.apiPost('listenbrainz/disconnect', {});
+        const cell = document.getElementById('lb-status-cell');
+        if (cell) cell.innerHTML = `<span style="color:var(--text-secondary)">&#9675; ${this.t('settings.scrobblingNotConnected')}</span>`;
+        // Update token row in-place (it is always rendered now)
+        const tokenValue = document.getElementById('lb-token-value');
+        if (tokenValue) {
+            tokenValue.innerHTML = `<input id="lb-token-input" type="password" class="setting-input setting-input-wide" placeholder="${this.t('settings.scrobblingLbTokenPlaceholder')}">
+                <button class="btn-secondary trakt-action-btn" onclick="App.lbConnect()">${this.t('btn.scrobblingVerifyConnect')}</button>
+                <span class="setting-hint" style="display:block;margin-top:4px">${this.t('settings.scrobblingLbTokenHint')}</span>`;
+        }
+        const tokenRow = document.getElementById('lb-token-row');
+        if (tokenRow && !document.getElementById('lb-connect-status')) {
+            tokenRow.insertAdjacentHTML('afterend', `<div id="lb-connect-status" style="margin-top:4px;font-size:12px;color:var(--text-secondary);padding-left:140px"></div>`);
+        }
+        if (this._initCfg) { this._initCfg.lbConnected = false; this._initCfg.lbUsername = ''; }
+    },
+
     // ─────────────────────────────────────────────────────────────────────
 
     async saveSettings() {
@@ -7632,6 +10032,7 @@ const App = {
             httpsPort: n('httpsPort'),
             httpsRedirectHttp: b('httpsRedirectHttp'),
             httpsCertPassword: v('httpsCertPassword'),
+            httpsDockerHostIPs: v('httpsDockerHostIPs'),
             workerThreads: n('workerThreads'),
             requestTimeout: n('requestTimeout'),
             sessionTimeout: n('sessionTimeout'),
@@ -7642,6 +10043,9 @@ const App = {
             traktClientId:       v('traktClientId'),
             traktClientSecret:   v('traktClientSecret'),
             traktScrobbleEnabled: b('traktScrobbleEnabled'),
+            // Last.fm
+            lastFmApiKey:    v('lastFmApiKey'),
+            lastFmApiSecret: v('lastFmApiSecret'),
             // DLNA
             dlnaEnabled: b('dlnaEnabled'),
             dlnaFriendlyName: v('dlnaFriendlyName'),
@@ -7682,6 +10086,8 @@ const App = {
             autoScanOnStartup: b('autoScanOnStartup'),
             autoScanInterval: n('autoScanInterval'),
             scanThreads: n('scanThreads'),
+            dynamicCleanEnabled: b('dynamicCleanEnabled'),
+            dynamicCleanIntervalMinutes: n('dynamicCleanIntervalMinutes'),
             // Extensions
             audioExtensions: v('audioExtensions'),
             videoExtensions: v('videoExtensions'),
@@ -7693,6 +10099,7 @@ const App = {
             metadataProvider: v('metadataProvider'),
             tmdbApiKey: v('tmdbApiKey'),
             watchmodeApiKey: v('watchmodeApiKey'),
+            fanartApiKey: v('fanartApiKey'),
             fetchMetadataOnScan: b('fetchMetadataOnScan'),
             fetchCastPhotos: b('fetchCastPhotos'),
             // Subtitles
@@ -7725,10 +10132,27 @@ const App = {
             // Video Thumbnails
             videoThumbnailsEnabled:  b('videoThumbnailsEnabled'),
             videoThumbnailsInterval: n('videoThumbnailsIntervalSeconds'),
+            // Video Previews
+            videoPreviewsEnabled: b('videoPreviewsEnabled'),
+            videoPreviewsRate:    n('videoPreviewsRate'),
             // Logging
             logLevel: v('logLevel'),
-            maxLogSizeMB: n('maxLogSizeMB')
+            maxLogSizeMB: n('maxLogSizeMB'),
+            // Auto-Update
+            autoUpdateEnabled:       b('autoUpdateEnabled'),
+            autoUpdateCheckInterval: n('autoUpdateCheckInterval') || 24,
+            autoUpdateChannel:       v('autoUpdateChannel') || 'stable'
         };
+
+        // Validate auto scan interval: must be 0 (disabled) or ≥ 15
+        const _scanInterval = payload.autoScanInterval;
+        if (_scanInterval > 0 && _scanInterval < 15) {
+            const msg2 = document.getElementById('settings-save-msg');
+            if (msg2) { msg2.style.color = 'var(--danger,#e74c3c)'; msg2.textContent = 'Auto Scan Interval must be at least 15 minutes (or 0 to disable).'; }
+            const el = document.getElementById('cfg-autoScanInterval');
+            if (el) { el.style.outline = '2px solid var(--danger,#e74c3c)'; el.focus(); setTimeout(() => { el.style.outline = ''; }, 3000); }
+            return;
+        }
 
         const msg = document.getElementById('settings-save-msg');
         if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = this.t('status.saving'); }
@@ -7738,12 +10162,15 @@ const App = {
             // Apply theme + template changes live
             const newTheme = payload.theme || 'dark';
             this.applyTheme(newTheme);
+            // Template is applied on page reload (via dismissRestartModal) — applying it
+            // live here causes the Netflux script to initialize mid-session and flash the
+            // profile picture full-screen before its CSS container is ready.
             const newTemplate = payload.uiTemplate || '';
-            if (newTemplate !== (this._activeTemplate || '')) {
-                this.applyTemplate(newTemplate);
-            }
             // Apply menu visibility dynamically
             this.applyMenuVisibility();
+            // Mirror Trakt scrobble flag into _initCfg so same-session plays pick it up
+            // without waiting for a page reload (the check in openVideoDetail reads _initCfg).
+            if (this._initCfg) this._initCfg.traktScrobbleEnabled = payload.traktScrobbleEnabled;
             // Apply language change dynamically
             const newLang = payload.language;
             if (newLang && newLang !== this._langCode) {
@@ -7915,6 +10342,454 @@ const App = {
         } finally {
             if (btn) { btn.disabled = false; btn.innerHTML = origLabel; }
         }
+    },
+
+    // ─── Access Gate helpers ──────────────────────────────────────────────────
+
+    gateAddCode() {
+        const existing = document.getElementById('gate-add-modal');
+        if (existing) existing.remove();
+        const today = new Date();
+        const minDateStr = today.toISOString().split('T')[0];
+        const maxDate = new Date(today);
+        maxDate.setDate(maxDate.getDate() + 360);
+        const maxDateStr = maxDate.toISOString().split('T')[0];
+        const overlay = document.createElement('div');
+        overlay.id = 'gate-add-modal';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.88);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px';
+        overlay.innerHTML = `
+            <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:14px;padding:28px 24px;max-width:380px;width:100%;box-shadow:0 8px 32px rgba(0,0,0,.6)" onclick="event.stopPropagation()">
+                <div style="font-size:17px;font-weight:700;margin-bottom:18px">${this.t('gate.addCodeTitle')}</div>
+                <div style="margin-bottom:14px">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">${this.t('gate.addCodeLabelLabel')}</label>
+                    <input id="gate-add-label" type="text" placeholder="${this.t('gate.addCodeLabelPlaceholder')}" maxlength="40"
+                           style="width:100%;box-sizing:border-box;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-active);color:var(--text-primary);font-size:13px">
+                </div>
+                <div style="margin-bottom:6px">
+                    <label style="font-size:12px;font-weight:600;color:var(--text-secondary);display:block;margin-bottom:4px">${this.t('gate.addCodeExpiryLabel')}</label>
+                    <input id="gate-add-expiry" type="date" min="${minDateStr}" max="${maxDateStr}"
+                           style="width:100%;box-sizing:border-box;padding:7px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-active);color:var(--text-primary);font-size:13px"
+                           oninput="App._gateValidateExpiry()">
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${this.t('gate.addCodeExpiryHint')}</div>
+                    <div id="gate-add-expiry-err" style="font-size:11px;color:#e74c3c;margin-top:4px;display:none"></div>
+                </div>
+                <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
+                    <button onclick="document.getElementById('gate-add-modal').remove()"
+                            style="padding:7px 18px;border-radius:7px;border:1px solid var(--border);background:var(--bg-tertiary);color:var(--text);font-size:13px;cursor:pointer">
+                        ${this.t('btn.cancel')}
+                    </button>
+                    <button id="gate-add-submit" onclick="App._gateSubmitAddCode()"
+                            style="padding:7px 18px;border-radius:7px;border:none;background:var(--accent);color:#fff;font-size:13px;cursor:pointer;font-weight:600">
+                        ${this.t('gate.addCodeCreate')}
+                    </button>
+                </div>
+            </div>`;
+        overlay.addEventListener('click', () => overlay.remove());
+        document.body.appendChild(overlay);
+        setTimeout(() => document.getElementById('gate-add-label')?.focus(), 50);
+    },
+
+    _gateValidateExpiry() {
+        const val = document.getElementById('gate-add-expiry')?.value;
+        const errEl = document.getElementById('gate-add-expiry-err');
+        const submitBtn = document.getElementById('gate-add-submit');
+        if (!errEl || !submitBtn) return true;
+        if (!val) { errEl.style.display = 'none'; submitBtn.disabled = false; return true; }
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const selected = new Date(val + 'T00:00:00');
+        const maxDate = new Date(today); maxDate.setDate(maxDate.getDate() + 360);
+        if (selected < today) {
+            errEl.textContent = this.t('gate.addCodeExpiryPastError');
+            errEl.style.display = 'block'; submitBtn.disabled = true; return false;
+        }
+        if (selected > maxDate) {
+            errEl.textContent = this.t('gate.addCodeExpiryError');
+            errEl.style.display = 'block'; submitBtn.disabled = true; return false;
+        }
+        errEl.style.display = 'none'; submitBtn.disabled = false; return true;
+    },
+
+    async _gateSubmitAddCode() {
+        if (!this._gateValidateExpiry()) return;
+        const label = document.getElementById('gate-add-label')?.value?.trim() || '';
+        const expires = document.getElementById('gate-add-expiry')?.value || null;
+        const submitBtn = document.getElementById('gate-add-submit');
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = '…'; }
+        try {
+            await this.apiPost('gate/codes/add', { label, expires });
+            document.getElementById('gate-add-modal')?.remove();
+            this.navigate('settings');
+        } catch(e) {
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = this.t('gate.addCodeCreate'); }
+            alert('Error: ' + e.message);
+        }
+    },
+
+    async gateDeleteCode(index) {
+        if (!confirm(this.t('gate.deleteConfirm'))) return;
+        try { await this.apiDelete('gate/codes/' + index); } catch(e) { alert('Error: ' + e.message); }
+        this.navigate('settings');
+    },
+
+    async gateRegenerateCode(index) {
+        if (!confirm(this.t('gate.regenConfirm'))) return;
+        try { await this.apiPost('gate/codes/' + index + '/regenerate', {}); } catch(e) { alert('Error: ' + e.message); }
+        this.navigate('settings');
+    },
+
+    async gateUpdateCode(index) {
+        const row = document.querySelector('.gate-code-row[data-idx="' + index + '"]');
+        if (!row) return;
+        const label = row.querySelector('.gate-code-label-input')?.value ?? '';
+        const expires = row.getAttribute('data-expires') || null;
+        try { await this.apiPost('gate/codes/' + index + '/update', { label, expires }); } catch(e) { /* silent */ }
+    },
+
+    gateCopyCode(code, btn) {
+        const showCopied = () => {
+            if (!btn) return;
+            const orig = btn.textContent;
+            btn.textContent = '✓ Copied!';
+            btn.style.cssText = 'background:var(--success,#27ae60);color:#fff;transition:background .2s,color .2s';
+            setTimeout(() => { btn.textContent = orig; btn.style.cssText = ''; }, 1800);
+        };
+        const fallback = () => {
+            const ta = document.createElement('textarea');
+            ta.value = code; ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+            document.body.appendChild(ta); ta.focus(); ta.select();
+            try { document.execCommand('copy'); showCopied(); } catch { prompt('Copy this invite code:', code); }
+            document.body.removeChild(ta);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(code).then(showCopied).catch(fallback);
+        } else {
+            fallback();
+        }
+    },
+
+    gateShowQr(code) {
+        const existing = document.getElementById('gate-qr-overlay');
+        if (existing) existing.remove();
+        const overlay = document.createElement('div');
+        overlay.id = 'gate-qr-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.88);display:flex;align-items:center;justify-content:center;z-index:9999;cursor:pointer;padding:16px';
+        overlay.innerHTML = `
+            <div style="background:#fff;border-radius:14px;padding:28px 24px;text-align:center;max-width:320px;width:100%;cursor:default" onclick="event.stopPropagation()">
+                <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:4px">${this.t('gate.qrTitle')}</div>
+                <div style="font-size:12px;color:#666;margin-bottom:18px">${this.t('gate.qrSubtitle')}</div>
+                <img src="/api/gate/qr.png?code=${encodeURIComponent(code)}" style="width:220px;height:220px;display:block;margin:0 auto;border-radius:4px" alt="Access QR">
+                <div style="font-size:10px;color:#aaa;margin-top:10px">${this.t('gate.qrFooter')}</div>
+                <div style="font-size:11px;color:#92400e;background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:7px 10px;margin-top:10px;line-height:1.5;text-align:left">
+                    &#x26A0; ${this.t('gate.qrTokenWarning','Treat this link like a password — anyone who receives it gains immediate access to your server until this code is regenerated or expires.')}
+                </div>
+                <button onclick="document.getElementById('gate-qr-overlay').remove()" style="margin-top:14px;padding:8px 28px;background:#333;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">${this.t('btn.close')}</button>
+            </div>`;
+        overlay.addEventListener('click', () => overlay.remove());
+        document.body.appendChild(overlay);
+    },
+
+    // ─── Cloudflare Tunnel helpers ────────────────────────────────────────────
+
+    async cfTunnelStart(cloudflaredPresent) {
+        // M1: show consent before downloading and executing a third-party binary
+        if (!cloudflaredPresent) {
+            const confirmed = await this._cfDownloadConsent();
+            if (!confirmed) return;
+        }
+        this._cfUpdateInPlace({ status: 'starting' });   // instant feedback, no page reload
+        try { await this.apiPost('tunnel/start', {}); } catch(e) {}
+        this._cfStartPolling();
+    },
+
+    _cfDownloadConsent() {
+        return new Promise(resolve => {
+            const existing = document.getElementById('cf-consent-overlay');
+            if (existing) existing.remove();
+            const ov = document.createElement('div');
+            ov.id = 'cf-consent-overlay';
+            ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.82);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px';
+            ov.innerHTML = `
+                <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:14px;padding:28px 26px;max-width:440px;width:100%" onclick="event.stopPropagation()">
+                    <div style="font-size:16px;font-weight:600;color:var(--text);margin-bottom:12px">${this.t('tunnel.downloadConsent.title','Download cloudflared?')}</div>
+                    <p style="font-size:13px;color:var(--text-secondary);line-height:1.6;margin-bottom:12px">${this.t('tunnel.downloadConsent.body','NexusM will download <strong>cloudflared</strong> (~50 MB) from Cloudflare\'s official GitHub releases and run it on this server to create a temporary public HTTPS tunnel.')}</p>
+                    <div class="gate-https-warning" style="margin-bottom:18px">
+                        <svg style="width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;margin-top:1px"><use href="#icon-alert-triangle"/></svg>
+                        <span>${this.t('tunnel.downloadConsent.warning','NexusM does not verify the binary\'s checksum or code signature. Only proceed if you trust Cloudflare\'s official GitHub releases.')}</span>
+                    </div>
+                    <div style="display:flex;gap:10px;justify-content:flex-end">
+                        <button id="cf-consent-cancel" style="padding:8px 20px;background:var(--bg-tertiary);color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px;font-family:inherit">${this.t('btn.cancel','Cancel')}</button>
+                        <button id="cf-consent-confirm" style="padding:8px 20px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;font-family:inherit">${this.t('tunnel.downloadConsent.confirm','Download & Start')}</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(ov);
+            document.getElementById('cf-consent-confirm').onclick = () => { ov.remove(); resolve(true); };
+            document.getElementById('cf-consent-cancel').onclick  = () => { ov.remove(); resolve(false); };
+            ov.addEventListener('click', () => { ov.remove(); resolve(false); });
+        });
+    },
+
+    async cfTunnelStop() {
+        this._cfStopPolling();
+        this._cfUpdateInPlace({ status: 'stopped' });
+        try { await this.apiPost('tunnel/stop', {}); } catch(e) {}
+    },
+
+    _cfPollTimer: null,
+    _cfPollDots: 0,
+
+    _cfStartPolling() {
+        this._cfStopPolling();
+        this._cfPollDots = 0;
+        this._cfPollTimer = setInterval(async () => {
+            this._cfPollDots = (this._cfPollDots + 1) % 4;
+            try {
+                const s = await this.api('tunnel/status');
+                if (!s) return;
+                this._cfUpdateInPlace(s);
+                if (s.status !== 'starting' && s.status !== 'downloading')
+                    this._cfStopPolling();
+            } catch(e) {}
+        }, 2000);
+    },
+
+    _cfStopPolling() {
+        if (this._cfPollTimer) { clearInterval(this._cfPollTimer); this._cfPollTimer = null; }
+    },
+
+    _cfUpdateInPlace(s) {
+        const el = document.getElementById('cf-tunnel-inner');
+        if (el) el.innerHTML = this._cfInnerHtml(s);
+    },
+
+    _cfInnerHtml(s) {
+        const running = s.status === 'running';
+        const busy    = s.status === 'starting' || s.status === 'downloading';
+        const err     = s.status === 'error';
+        const dots    = '.'.repeat((this._cfPollDots % 4) + 1);
+
+        const badge = running
+            ? `<span style="color:var(--success);font-weight:500">&#x2022; ${this.t('cf.statusActive','Active')}</span>`
+            : busy
+                ? `<span style="color:var(--accent)">&#x23F3; ${s.status === 'downloading' ? this.t('cf.statusDownloading','Downloading…') : this.t('cf.statusConnecting','Connecting…')}</span>`
+                : err ? `<span style="color:#e74c3c">&#x26A0; ${this.t('cf.statusError','Error')}</span>`
+                      : `<span style="color:var(--text-muted)">${this.t('cf.statusStopped','Stopped')}</span>`;
+
+        const btn = running
+            ? `<button onclick="App.cfTunnelStop()" style="font-size:12px;padding:4px 14px;background:#e74c3c;color:#fff;border:none;border-radius:6px;cursor:pointer">${this.t('cf.stopBtn','Stop')}</button>`
+            : busy
+                ? `<button disabled style="font-size:12px;padding:4px 14px;background:var(--bg-tertiary);color:var(--text-muted);border:none;border-radius:6px;opacity:0.7;cursor:not-allowed">${this.t('cf.statusStarting','Starting…')}</button>`
+                : `<button onclick="App.cfTunnelStart(${s.cloudflaredPresent ? 'true' : 'false'})" style="font-size:12px;padding:4px 14px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer">${this.t('cf.startBtn','Start Tunnel')}</button>`;
+
+        let html = `<div class="setting-row">
+            <span class="setting-label">${this.t('cf.tunnelLabel','Tunnel')}</span>
+            <span class="setting-value">${btn} &nbsp; ${badge}</span>
+        </div>`;
+
+        if (running && s.tunnelUrl) {
+            html += `<div class="setting-row">
+                <span class="setting-label">${this.t('cf.publicUrl','Public URL')}</span>
+                <span class="setting-value">
+                    <code style="background:var(--bg-tertiary);padding:3px 8px;border-radius:4px;font-size:12px;user-select:all">${this.esc(s.tunnelUrl)}</code>
+                    <button onclick="App.relayCopyUrl('${this.esc(s.tunnelUrl)}', this)" style="font-size:11px;padding:2px 10px;background:var(--bg-tertiary);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;margin-left:8px">${this.t('relay.copyBtn')}</button>
+                    <button onclick="App.cfTunnelShowQr('${this.esc(s.tunnelUrl)}')" style="font-size:11px;padding:2px 10px;background:var(--bg-tertiary);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer">&#x1F4F1; QR</button>
+                </span>
+            </div>
+            <div class="setting-row"><span class="setting-label"></span>
+                <span class="setting-value" style="font-size:11px;color:var(--text-muted)">${this.t('cf.phoneHint','Open on your phone — no certificate needed, Cloudflare provides HTTPS.')}</span>
+            </div>`;
+        }
+
+        if (err) {
+            html += `<div class="setting-row"><span class="setting-label"></span>
+                <span class="setting-value" style="color:#e74c3c;font-size:12px">${this.esc(s.errorMessage || this.t('cf.unknownError','Unknown error'))}</span>
+            </div>`;
+        }
+
+        if (busy) {
+            html += `<div class="setting-row"><span class="setting-label"></span>
+                <span class="setting-value" style="font-size:12px;color:var(--text-muted)">
+                    ${s.status === 'downloading' ? this.t('cf.progressDownloading','Downloading cloudflared (~50 MB) from GitHub') : this.t('cf.progressConnecting','Connecting to Cloudflare')}${dots}
+                    &nbsp; <button onclick="App.cfTunnelStop()" style="font-size:10px;padding:1px 8px;background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border);border-radius:4px;cursor:pointer">${this.t('cf.cancelBtn','Cancel')}</button>
+                </span>
+            </div>`;
+        }
+
+        return html;
+    },
+
+    cfTunnelShowQr(url) {
+        const existing = document.getElementById('cf-qr-overlay');
+        if (existing) existing.remove();
+        const overlay = document.createElement('div');
+        overlay.id = 'cf-qr-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.88);display:flex;align-items:center;justify-content:center;z-index:9999;cursor:pointer;padding:16px';
+        overlay.innerHTML = `
+            <div style="background:#fff;border-radius:12px;padding:24px;text-align:center;max-width:320px;width:100%;cursor:default" onclick="event.stopPropagation()">
+                <div style="font-size:15px;font-weight:600;color:#222;margin-bottom:4px">${this.t('cf.qrTitle','Scan to open NexusM')}</div>
+                <div style="font-size:11px;color:#888;margin-bottom:16px">${this.t('cf.qrSubtitle','No certificate needed — Cloudflare provides HTTPS')}</div>
+                <img src="/api/tunnel/qr.png" style="width:220px;height:220px;display:block;margin:0 auto;border-radius:4px" alt="Tunnel QR">
+                <div style="margin-top:12px;font-family:monospace;font-size:11px;color:#555;word-break:break-all">${this.esc(url)}</div>
+                <div style="font-size:10px;color:#bbb;margin-top:8px">${this.t('cf.qrFooter','URL changes each time the tunnel restarts')}</div>
+                <button onclick="document.getElementById('cf-qr-overlay').remove()" style="margin-top:14px;padding:7px 28px;background:#333;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">${this.t('cf.qrClose','Close')}</button>
+            </div>`;
+        overlay.addEventListener('click', () => overlay.remove());
+        document.body.appendChild(overlay);
+    },
+
+    // ─── NexusM Relay helpers ─────────────────────────────────────────────────
+
+    async relayToggle(enable) {
+        const btn = document.querySelector('#relay-inner button.relay-toggle-btn');
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
+        try { await this.apiPost(enable ? 'relay/enable' : 'relay/disable', {}); } catch(e) {}
+        const s = await this.api('relay/status') || {};
+        this._relayUpdateInPlace(s);
+        if (s.enabled) this._relayStartPolling(); else this._relayStopPolling();
+    },
+
+    _relayPollTimer: null,
+
+    _relayStartPolling() {
+        this._relayStopPolling();
+        this._relayPollTimer = setInterval(async () => {
+            try {
+                const s = await this.api('relay/status');
+                if (!s) return;
+                this._relayUpdateInPlace(s);
+                if (s.status === 'connected' || s.status === 'error') this._relayStopPolling();
+            } catch(e) {}
+        }, 2000);
+    },
+
+    _relayStopPolling() {
+        if (this._relayPollTimer) { clearInterval(this._relayPollTimer); this._relayPollTimer = null; }
+    },
+
+    _relayUpdateInPlace(s) {
+        const el = document.getElementById('relay-inner');
+        if (el) el.innerHTML = this._relayInnerHtml(s);
+    },
+
+    _relayInnerHtml(s) {
+        const connected   = s.status === 'connected';
+        const connecting  = s.status === 'connecting';
+        const errored     = s.status === 'error';
+
+        const svgRefresh  = `<svg style="width:13px;height:13px;vertical-align:middle"><use href="#icon-refresh"/></svg>`;
+        const svgAlert    = `<svg style="width:13px;height:13px;vertical-align:middle"><use href="#icon-alert-triangle"/></svg>`;
+        const svgActivity = `<svg style="width:13px;height:13px;vertical-align:middle"><use href="#icon-activity"/></svg>`;
+
+        const badge = connected
+            ? `<span style="color:var(--success,#27ae60);font-weight:500">&#x2022; ${this.t('relay.connected')}</span>`
+            : connecting
+                ? `<span style="color:var(--accent)">${svgRefresh} ${this.t('relay.connecting')}</span>`
+                : errored
+                    ? `<span style="color:#e74c3c">${svgAlert} ${this.t('relay.error')}</span>`
+                    : `<span style="color:var(--text-muted)">${this.t('relay.offline')}</span>`;
+
+        const toggleBtn = s.enabled
+            ? `<button class="relay-toggle-btn" onclick="App.relayToggle(false)" style="font-size:12px;padding:4px 14px;background:#e74c3c;color:#fff;border:none;border-radius:6px;cursor:pointer">${this.t('relay.disableBtn')}</button>`
+            : `<button class="relay-toggle-btn" onclick="App.relayToggle(true)" style="font-size:12px;padding:4px 14px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer">${this.t('relay.enableBtn')}</button>`;
+
+        let html = `<div class="setting-row">
+            <span class="setting-label">${this.t('relay.label')}</span>
+            <span class="setting-value">${toggleBtn} &nbsp; ${badge}</span>
+        </div>`;
+
+        // Always show the assigned URL — even before first connect, it's pre-computed
+        if (s.tunnelUrl) {
+            const directBadge = connected
+                ? (s.directCapable
+                    ? `<span style="font-size:11px;color:var(--success,#27ae60);margin-left:8px">${svgActivity} ${this.t('relay.directMedia')}</span>`
+                    : `<span style="font-size:11px;color:#e67e22;margin-left:8px">${svgAlert} ${this.t('relay.mediaUnreachable')}</span>`)
+                : '';
+            html += `<div class="setting-row">
+                <span class="setting-label">${this.t('relay.urlLabel')}</span>
+                <span class="setting-value" style="flex-wrap:wrap;gap:6px">
+                    <code style="background:var(--bg-tertiary);padding:3px 8px;border-radius:4px;font-size:11px;user-select:all;word-break:break-all">${this.esc(s.tunnelUrl)}</code>
+                    <button onclick="App.relayCopyUrl('${this.esc(s.tunnelUrl)}', this)" style="font-size:11px;padding:2px 10px;background:var(--bg-tertiary);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer">${this.t('relay.copyBtn')}</button>
+                    <button onclick="App.relayShowQr()" style="font-size:11px;padding:2px 10px;background:var(--bg-tertiary);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer">${this.t('relay.qrBtn')}</button>
+                    ${directBadge}
+                </span>
+            </div>`;
+            html += `<div class="setting-row"><span class="setting-label"></span>
+                <span class="setting-value" style="font-size:11px;color:var(--text-muted)">${this.t('relay.urlHint')}</span>
+            </div>`;
+        }
+
+        // ── Reachability warning ──────────────────────────────────────────────
+        if (connected && !s.directCapable) {
+            const port = s.directBaseUrl
+                ? s.directBaseUrl.replace(/.*:/, '')
+                : '8183';
+            html += `<div style="margin:10px 0 4px;padding:12px 14px;background:rgba(230,126,34,.12);border:1px solid rgba(230,126,34,.35);border-radius:8px;font-size:12px;line-height:1.6">
+                <div style="font-weight:600;color:#e67e22;margin-bottom:6px"><svg style="width:14px;height:14px;vertical-align:middle"><use href="#icon-alert-triangle"/></svg> ${this.t('relay.warnTitle')}</div>
+                <div style="color:var(--text-secondary);margin-bottom:8px">${this.t('relay.warnBody')}</div>
+                <div style="color:var(--text-secondary);font-weight:500;margin-bottom:4px">${this.t('relay.warnFixIntro')}</div>
+                <ol style="color:var(--text-secondary);margin:0 0 0 18px;padding:0">
+                    <li style="margin-bottom:4px"><strong>${this.t('relay.warnOpt1')}</strong> — ${this.t('relay.warnOpt1Desc').replace('{port}', `<code style="background:var(--bg-tertiary);padding:1px 5px;border-radius:3px">${this.esc(port)}</code>`)}</li>
+                    <li style="margin-bottom:4px"><strong>${this.t('relay.warnOpt2')}</strong> — ${this.t('relay.warnOpt2Desc')}</li>
+                    <li><strong>${this.t('relay.warnOpt3')}</strong> — ${this.t('relay.warnOpt3Desc')}</li>
+                </ol>
+            </div>`;
+        }
+
+        if (errored && s.errorMessage) {
+            html += `<div class="setting-row"><span class="setting-label"></span>
+                <span class="setting-value" style="color:#e74c3c;font-size:12px">${this.esc(s.errorMessage)}</span>
+            </div>`;
+        }
+
+        if (s.fingerprint) {
+            html += `<div class="setting-row">
+                <span class="setting-label" style="color:var(--text-muted)">${this.t('relay.machineId')}</span>
+                <span class="setting-value"><code style="font-size:10px;color:var(--text-muted)">${this.esc(s.fingerprint)}</code></span>
+            </div>`;
+        }
+
+        return html;
+    },
+
+    relayCopyUrl(url, btn) {
+        const showCopied = () => {
+            if (!btn) return;
+            const orig = btn.textContent;
+            btn.textContent = '✓ Copied!';
+            btn.style.cssText = 'background:var(--success,#27ae60);color:#fff;transition:background .2s,color .2s;font-size:11px;padding:2px 10px;border-radius:4px;cursor:pointer';
+            setTimeout(() => { btn.textContent = orig; btn.style.cssText = ''; }, 1800);
+        };
+        const fallback = () => {
+            const ta = document.createElement('textarea');
+            ta.value = url; ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+            document.body.appendChild(ta); ta.focus(); ta.select();
+            try { document.execCommand('copy'); showCopied(); } catch { prompt('Copy this URL:', url); }
+            document.body.removeChild(ta);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(showCopied).catch(fallback);
+        } else {
+            fallback();
+        }
+    },
+
+    relayShowQr() {
+        const existing = document.getElementById('relay-qr-overlay');
+        if (existing) existing.remove();
+        const urlEl = document.querySelector('#relay-inner code');
+        const url = urlEl ? urlEl.textContent.trim() : '';
+        const overlay = document.createElement('div');
+        overlay.id = 'relay-qr-overlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.88);display:flex;align-items:center;justify-content:center;z-index:9999;cursor:pointer;padding:16px';
+        overlay.innerHTML = `
+            <div style="background:#fff;border-radius:12px;padding:24px;text-align:center;max-width:320px;width:100%;cursor:default" onclick="event.stopPropagation()">
+                <div style="font-size:15px;font-weight:600;color:#222;margin-bottom:4px">${this.t('relay.qrTitle')}</div>
+                <div style="font-size:11px;color:#888;margin-bottom:16px">${this.t('relay.qrSubtitle')}</div>
+                <img src="/api/relay/qr.png" style="width:220px;height:220px;display:block;margin:0 auto;border-radius:4px" alt="Relay QR">
+                <div style="margin-top:12px;font-family:monospace;font-size:11px;color:#555;word-break:break-all">${this.esc(url)}</div>
+                <button onclick="document.getElementById('relay-qr-overlay').remove()" style="margin-top:14px;padding:7px 28px;background:#333;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">${this.t('relay.qrClose')}</button>
+            </div>`;
+        overlay.addEventListener('click', () => overlay.remove());
+        document.body.appendChild(overlay);
     },
 
     _logAutoRefreshTimer: null,
@@ -8105,6 +10980,7 @@ const App = {
             <td><input type="password" class="user-mgmt-inline-input" id="edit-pin-${id}" maxlength="6" placeholder="New PIN (optional)" inputmode="numeric"></td>
             <td colspan="2" class="user-mgmt-actions">
                 <button class="user-mgmt-btn user-mgmt-btn-save" onclick="App.submitEditUser(${id})">Save</button>
+                <button class="user-mgmt-btn" onclick="App._openProfilePicModal('${this.esc(username)}', ${id})" title="${this.t('settings.uploadPhoto','Upload Photo')}">${this.t('settings.uploadPhoto','Upload Photo')}</button>
                 <button class="user-mgmt-btn" onclick="App.cancelEditUser(${id})">Cancel</button>
             </td>`;
         // Remove any stale child settings row from a previous edit session
@@ -8129,6 +11005,432 @@ const App = {
     cancelEditUser(id) {
         document.getElementById(`child-settings-row-${id}`)?.remove();
         this.navigate('settings');
+    },
+
+    // ─── Profile Picture Modal ───────────────────────────────────────
+    _openProfilePicModal(username, userId) {
+        // Clean up any previous drag listeners
+        if (this._ppDragMove)  { document.removeEventListener('mousemove', this._ppDragMove); }
+        if (this._ppDragEnd)   { document.removeEventListener('mouseup', this._ppDragEnd); }
+        if (this._ppTouchMove) { document.removeEventListener('touchmove', this._ppTouchMove); }
+        if (this._ppTouchEnd)  { document.removeEventListener('touchend', this._ppTouchEnd); }
+        document.getElementById('pp-modal')?.remove();
+
+        this._ppUsername = username;
+        this._ppUserId = userId;
+        this._ppDragging = false;
+
+        const modal = document.createElement('div');
+        modal.id = 'pp-modal';
+        modal.className = 'pp-modal-overlay';
+        modal.innerHTML = `
+            <div class="pp-modal">
+                <p class="pp-modal-title">${this.t('settings.profilePicture','Profile Picture')} — ${this.esc(username)}</p>
+                <div id="pp-step1">
+                    <label class="pp-file-input-btn">
+                        ${this.t('settings.uploadPhoto','Choose Photo...')}
+                        <input type="file" accept="image/*" id="pp-file-input" style="display:none">
+                    </label>
+                    <div class="pp-modal-actions">
+                        <button onclick="document.getElementById('pp-modal').remove()" class="user-mgmt-btn">${this.t('settings.profilePicCancel','Cancel')}</button>
+                    </div>
+                </div>
+                <div id="pp-step2" style="display:none">
+                    <div class="pp-cropper-wrap" id="pp-cropper">
+                        <img id="pp-img" class="pp-cropper-img" draggable="false" alt="">
+                    </div>
+                    <p class="pp-cropper-hint">${this.t('settings.profilePicCrop','Drag to adjust position')}</p>
+                    <div class="pp-modal-actions">
+                        <button id="pp-save-btn" onclick="App._ppSave()" class="user-mgmt-btn user-mgmt-btn-save">${this.t('settings.profilePicSave','Save Photo')}</button>
+                        <button onclick="document.getElementById('pp-modal').remove()" class="user-mgmt-btn">${this.t('settings.profilePicCancel','Cancel')}</button>
+                    </div>
+                </div>
+            </div>`;
+        document.body.appendChild(modal);
+
+        document.getElementById('pp-file-input').addEventListener('change', e => this._ppFileSelected(e.target));
+
+        const cropper = document.getElementById('pp-cropper');
+        cropper.addEventListener('mousedown', e => this._ppDragStartHandler(e));
+        cropper.addEventListener('touchstart', e => this._ppDragStartHandler(e), { passive: false });
+
+        this._ppDragMove  = e => this._ppDragMoveHandler(e);
+        this._ppDragEnd   = () => { this._ppDragging = false; };
+        this._ppTouchMove = e => { e.preventDefault(); if (e.touches[0]) this._ppDragMoveHandler(e.touches[0]); };
+        this._ppTouchEnd  = () => { this._ppDragging = false; };
+
+        document.addEventListener('mousemove', this._ppDragMove);
+        document.addEventListener('mouseup', this._ppDragEnd);
+        document.addEventListener('touchmove', this._ppTouchMove, { passive: false });
+        document.addEventListener('touchend', this._ppTouchEnd);
+    },
+
+    _ppFileSelected(input) {
+        const file = input.files[0];
+        if (!file) return;
+        const url = URL.createObjectURL(file);
+        const img = document.getElementById('pp-img');
+        img.onload = () => {
+            // Scale image so it fully covers the 200px circle
+            const scaleW = 200 / img.naturalWidth;
+            const scaleH = 200 / img.naturalHeight;
+            const scale = Math.max(scaleW, scaleH);
+            const dispW = img.naturalWidth * scale;
+            const dispH = img.naturalHeight * scale;
+            img.style.width  = dispW + 'px';
+            img.style.height = dispH + 'px';
+            img.style.left   = ((200 - dispW) / 2) + 'px';
+            img.style.top    = ((200 - dispH) / 2) + 'px';
+        };
+        img.src = url;
+        document.getElementById('pp-step1').style.display = 'none';
+        document.getElementById('pp-step2').style.display = 'block';
+    },
+
+    _ppDragStartHandler(e) {
+        e.preventDefault();
+        const img = document.getElementById('pp-img');
+        if (!img) return;
+        const cx = e.touches ? e.touches[0].clientX : e.clientX;
+        const cy = e.touches ? e.touches[0].clientY : e.clientY;
+        this._ppDragging = true;
+        this._ppDragData = {
+            startX: cx,
+            startY: cy,
+            origLeft: parseFloat(img.style.left) || 0,
+            origTop:  parseFloat(img.style.top)  || 0
+        };
+    },
+
+    _ppDragMoveHandler(e) {
+        if (!this._ppDragging) return;
+        const img = document.getElementById('pp-img');
+        if (!img) return;
+        const dx = e.clientX - this._ppDragData.startX;
+        const dy = e.clientY - this._ppDragData.startY;
+        const newLeft = this._ppDragData.origLeft + dx;
+        const newTop  = this._ppDragData.origTop  + dy;
+        // Clamp so image always covers the 200px circle
+        const minLeft = Math.min(0, 200 - img.offsetWidth);
+        const minTop  = Math.min(0, 200 - img.offsetHeight);
+        img.style.left = Math.max(minLeft, Math.min(0, newLeft)) + 'px';
+        img.style.top  = Math.max(minTop,  Math.min(0, newTop))  + 'px';
+    },
+
+    async _ppSave() {
+        const img = document.getElementById('pp-img');
+        if (!img || !img.src) return;
+        const btn = document.getElementById('pp-save-btn');
+        if (btn) btn.textContent = this.t('settings.profilePicSaving','Saving...');
+
+        const canvas = document.createElement('canvas');
+        canvas.width  = 150;
+        canvas.height = 150;
+        const ctx = canvas.getContext('2d');
+        // Scale 200px display coords down to 150px canvas
+        const s = 150 / 200;
+        ctx.drawImage(img,
+            parseFloat(img.style.left) * s,
+            parseFloat(img.style.top)  * s,
+            img.offsetWidth  * s,
+            img.offsetHeight * s
+        );
+
+        canvas.toBlob(async blob => {
+            const fd = new FormData();
+            fd.append('file', blob, 'profile.jpg');
+            try {
+                const res = await fetch(`/api/auth/users/${encodeURIComponent(this._ppUsername)}/profile-picture`, {
+                    method: 'POST', body: fd
+                });
+                if (res.ok) {
+                    document.getElementById('pp-modal')?.remove();
+                    this._ppRefreshAvatar(this._ppUsername, this._ppUserId, true);
+                } else {
+                    const d = await res.json().catch(() => ({}));
+                    if (btn) btn.textContent = this.t('settings.profilePicSave','Save Photo');
+                    alert(d.error || 'Failed to save photo');
+                }
+            } catch (err) {
+                if (btn) btn.textContent = this.t('settings.profilePicSave','Save Photo');
+            }
+        }, 'image/jpeg', 0.92);
+    },
+
+    _ppRefreshAvatar(username, userId, hasPicture) {
+        const t = Date.now();
+        const url = `/api/auth/users/${encodeURIComponent(username)}/profile-picture?t=${t}`;
+        // Refresh "My Profile" section
+        if (username === this.userName) {
+            const av = document.getElementById('my-profile-av');
+            if (av) {
+                if (hasPicture) {
+                    // Remove any existing img, add fresh one
+                    av.querySelectorAll('img').forEach(i => i.remove());
+                    const newImg = document.createElement('img');
+                    newImg.src = url;
+                    newImg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .25s';
+                    newImg.onload  = () => { newImg.style.opacity = '1'; };
+                    newImg.onerror = () => newImg.remove();
+                    av.appendChild(newImg);
+                    const rb = document.getElementById('my-profile-remove-btn');
+                    if (rb) rb.style.display = '';
+                } else {
+                    av.querySelectorAll('img').forEach(i => i.remove());
+                    const rb = document.getElementById('my-profile-remove-btn');
+                    if (rb) rb.style.display = 'none';
+                }
+            }
+        }
+        // Refresh user management table avatar
+        if (userId !== null && userId !== undefined) {
+            const av = document.getElementById(`up-av-${userId}`);
+            if (av) {
+                if (hasPicture) {
+                    av.querySelectorAll('img').forEach(i => i.remove());
+                    const newImg = document.createElement('img');
+                    newImg.src = url;
+                    newImg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover';
+                    newImg.onerror = () => newImg.remove();
+                    av.appendChild(newImg);
+                } else {
+                    av.querySelectorAll('img').forEach(i => i.remove());
+                }
+            }
+        }
+    },
+
+    async _deleteProfilePic(username, userId) {
+        try {
+            const res = await fetch(`/api/auth/users/${encodeURIComponent(username)}/profile-picture`, { method: 'DELETE' });
+            if (res.ok) this._ppRefreshAvatar(username, userId, false);
+        } catch (err) {}
+    },
+
+    // ─── AudioBook Player — Progress Save ────────────────────────────
+    _abStartProgressSave(audiobookId) {
+        this._abStopProgressSave();
+        this._abSaveId = audiobookId;
+        this._abSaveInterval = setInterval(() => this._abSaveProgress(), 15000);
+    },
+
+    _abStopProgressSave() {
+        if (this._abSaveInterval) { clearInterval(this._abSaveInterval); this._abSaveInterval = null; }
+        if (this._abSaveId && this.isAudioBookPlaying && this.audioPlayer.currentTime > 5) {
+            this._abSaveProgress();
+        }
+    },
+
+    _abSaveProgress() {
+        if (!this._abSaveId || !this.audioPlayer.currentTime) return;
+        const pos = this.audioPlayer.currentTime;
+        // Prefer the live audio duration; fall back to what we stored from loadedmetadata
+        const dur = (isFinite(this.audioPlayer.duration) && this.audioPlayer.duration > 0)
+            ? this.audioPlayer.duration
+            : (this._abBookDuration || 0);
+        if (pos < 5) return;
+        fetch(`/api/audiobooks/${this._abSaveId}/progress`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ position: pos, duration: dur })
+        }).catch(() => {});
+    },
+
+    // ─── AudioBook Player — Speed ─────────────────────────────────────
+    _abCycleSpeed() {
+        const speeds = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 0.5, 0.75];
+        const cur = this._abCurrentSpeed || 1;
+        const idx = speeds.indexOf(cur);
+        this._abCurrentSpeed = speeds[(idx + 1) % speeds.length];
+        this.audioPlayer.playbackRate = this._abCurrentSpeed;
+        const btn = document.getElementById('btn-ab-speed');
+        if (btn) btn.textContent = this._abCurrentSpeed === 1 ? '1×' : `${this._abCurrentSpeed}×`;
+        btn?.classList.toggle('active', this._abCurrentSpeed !== 1);
+    },
+
+    // ─── AudioBook Player — Sleep Timer ──────────────────────────────
+    _abToggleSleepPanel() {
+        const panel = document.getElementById('ab-panel');
+        if (!panel) return;
+        if (panel.style.display !== 'none' && document.getElementById('ab-panel-title')?.textContent.includes('Sleep')) {
+            this._abClosePanel(); return;
+        }
+        const sleepActive = !!this._abSleepInterval;
+        const remaining = this._abSleepRemaining || 0;
+        const opts = sleepActive
+            ? `<div class="ab-sleep-countdown">${this.t('ab.sleepIn','Sleep in')} ${Math.ceil(remaining / 60)}m &mdash; <button class="ab-sleep-btn" onclick="App._abCancelSleep()">${this.t('ab.cancelSleep','Cancel')}</button></div>`
+            : `<div class="ab-sleep-options">
+                ${[15,30,45,60].map(m => `<button class="ab-sleep-btn" onclick="App._abSetSleepTimer(${m})">${m} ${this.t('ab.minutes','min')}</button>`).join('')}
+               </div>`;
+        document.getElementById('ab-panel-title').textContent = this.t('ab.sleepTimer','Sleep Timer');
+        document.getElementById('ab-panel-body').innerHTML = opts;
+        panel.style.display = 'flex';
+    },
+
+    _abSetSleepTimer(minutes) {
+        this._abCancelSleep();
+        this._abSleepRemaining = minutes * 60;
+        this._abSleepInterval = setInterval(() => {
+            this._abSleepRemaining -= 1;
+            if (this._abSleepRemaining <= 0) {
+                this._abCancelSleep();
+                this.audioPlayer.pause();
+                this.isPlaying = false;
+                const btn = document.getElementById('btn-play');
+                if (btn) btn.innerHTML = '<svg style="width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-play"/></svg>';
+                const sleepBtn = document.getElementById('btn-ab-sleep');
+                if (sleepBtn) sleepBtn.style.opacity = '1';
+            }
+            // Dim the sleep button as countdown nears
+            const sleepBtn = document.getElementById('btn-ab-sleep');
+            if (sleepBtn) {
+                const pct = this._abSleepRemaining / (minutes * 60);
+                sleepBtn.style.color = `rgba(${Math.round(255*(1-pct))},${Math.round(200*pct)},${Math.round(50*pct)},1)`;
+            }
+        }, 1000);
+        const sleepBtn = document.getElementById('btn-ab-sleep');
+        if (sleepBtn) { sleepBtn.style.color = 'var(--accent)'; sleepBtn.title = `${minutes}m`; }
+        this._abClosePanel();
+    },
+
+    _abCancelSleep() {
+        if (this._abSleepInterval) { clearInterval(this._abSleepInterval); this._abSleepInterval = null; }
+        this._abSleepRemaining = 0;
+        const sleepBtn = document.getElementById('btn-ab-sleep');
+        if (sleepBtn) { sleepBtn.style.color = ''; sleepBtn.title = 'Sleep timer'; }
+    },
+
+    // ─── AudioBook Player — Chapters ─────────────────────────────────
+    _abToggleChapters() {
+        const panel = document.getElementById('ab-panel');
+        if (!panel) return;
+        if (panel.style.display !== 'none' && document.getElementById('ab-panel-title')?.textContent.includes('Chapter')) {
+            this._abClosePanel(); return;
+        }
+        const chapters = this._abChapters || [];
+        if (chapters.length < 2) { this._abClosePanel(); return; }
+        const currentTime = this.audioPlayer.currentTime || 0;
+        let activeIdx = 0;
+        for (let i = 0; i < chapters.length; i++) {
+            if (chapters[i].start <= currentTime) activeIdx = i;
+        }
+        let html = '';
+        chapters.forEach((ch, i) => {
+            const active = i === activeIdx ? ' ab-ch-active' : '';
+            html += `<div class="ab-chapter-item${active}" onclick="App._abJumpToChapter(${ch.start})">
+                <span class="ab-chapter-num">${i + 1}</span>
+                <span style="flex:1">${this.esc(ch.title)}</span>
+                <span class="ab-chapter-time">${this.formatDuration(Math.floor(ch.start))}</span>
+            </div>`;
+        });
+        document.getElementById('ab-panel-title').textContent = `${this.t('ab.chapters','Chapters')} (${chapters.length})`;
+        document.getElementById('ab-panel-body').innerHTML = html;
+        panel.style.display = 'flex';
+        // Scroll active chapter into view
+        setTimeout(() => {
+            const active = panel.querySelector('.ab-ch-active');
+            if (active) active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }, 50);
+    },
+
+    _abJumpToChapter(start) {
+        this.audioPlayer.currentTime = start;
+        this._abClosePanel();
+    },
+
+    // ─── AudioBook Player — Bookmarks ─────────────────────────────────
+    _abToggleBookmarks() {
+        const panel = document.getElementById('ab-panel');
+        if (!panel) return;
+        if (panel.style.display !== 'none' && document.getElementById('ab-panel-title')?.textContent.includes('Bookmark')) {
+            this._abClosePanel(); return;
+        }
+        const id = this._currentAudioBookId;
+        if (!id) return;
+        this.api(`audiobooks/${id}/bookmarks`).then(bms => {
+            let html = `<div style="padding:8px 12px 0">
+                <button class="ab-sleep-btn" style="width:100%;margin-bottom:8px" onclick="App._abAddBookmarkAtCurrent()">+ ${this.t('ab.addBookmark','Add bookmark here')}</button>
+            </div>`;
+            if (!bms || !bms.length) {
+                html += `<div style="padding:8px 16px;font-size:13px;color:var(--text-muted)">${this.t('ab.noBookmarks','No bookmarks yet.')}</div>`;
+            } else {
+                bms.forEach(bm => {
+                    const bmTitle = this.esc(bm.title || this.formatDuration(Math.round(bm.position)));
+                    html += `<div class="ab-bookmark-item">
+                        <div class="ab-bookmark-info" onclick="App._abJumpToChapter(${bm.position}); App._abClosePanel()">
+                            <div class="ab-bookmark-title">${bmTitle}</div>
+                            <div class="ab-bookmark-pos">${this.formatDuration(Math.round(bm.position))}</div>
+                            ${bm.note ? `<div class="ab-bookmark-note">${this.esc(bm.note)}</div>` : ''}
+                        </div>
+                        <button class="ab-bookmark-del" onclick="App._abDeleteBookmarkFromPanel(${id},${bm.id},this)" title="Delete">&#215;</button>
+                    </div>`;
+                });
+            }
+            document.getElementById('ab-panel-title').textContent = this.t('ab.bookmarks','Bookmarks');
+            document.getElementById('ab-panel-body').innerHTML = html;
+            panel.style.display = 'flex';
+        });
+    },
+
+    async _abAddBookmarkAtCurrent() {
+        const id = this._currentAudioBookId;
+        if (!id) return;
+        const pos = this.audioPlayer.currentTime || 0;
+        const title = this.formatDuration(Math.round(pos));
+        const res = await this.apiPost(`audiobooks/${id}/bookmarks`, { position: pos, title, note: '' });
+        if (res?.id) {
+            // Green toast confirmation
+            this._abShowBookmarkToast(title);
+            // Flash bookmark button
+            const btn = document.getElementById('btn-ab-bookmark');
+            if (btn) { btn.style.color = '#16a34a'; setTimeout(() => btn.style.color = '', 1500); }
+            // Refresh bookmarks panel if open
+            if (document.getElementById('ab-panel')?.style.display !== 'none' &&
+                document.getElementById('ab-panel-title')?.textContent.includes('Bookmark'))
+                this._abToggleBookmarks();
+            // Refresh detail page bookmarks section if open
+            if (document.getElementById('ab-detail-bookmarks-wrap')) {
+                const bookApi = await this.api(`audiobooks/${id}`);
+                if (bookApi) this._abRefreshDetailBookmarks(id, bookApi);
+            }
+        }
+    },
+
+    _abShowBookmarkToast(timeStr) {
+        document.querySelectorAll('.ab-bm-toast').forEach(t => t.remove());
+        const toast = document.createElement('div');
+        toast.className = 'ab-bm-toast';
+        toast.innerHTML = `<svg style="width:16px;height:16px;stroke:#fff;fill:none;stroke-width:2.5;flex-shrink:0" viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg> Bookmark saved at ${this.esc(timeStr)}`;
+        document.body.appendChild(toast);
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 320);
+        }, 2500);
+    },
+
+    _abDeleteBookmarkFromPanel(audiobookId, bookmarkId, btn) {
+        fetch(`/api/audiobooks/${audiobookId}/bookmarks/${bookmarkId}`, { method: 'DELETE' });
+        btn.closest('.ab-bookmark-item')?.remove();
+    },
+
+    _abClosePanel() {
+        const p = document.getElementById('ab-panel');
+        if (p) p.style.display = 'none';
+    },
+
+    // Fallback when cover fails to load in the detail page
+    _abCoverError(img) {
+        const ph = document.createElement('div');
+        ph.className = 'ab-detail-cover-ph';
+        ph.innerHTML = '<svg style="width:42px;height:42px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
+        img.replaceWith(ph);
+    },
+
+    // Fallback when cover fails to load in the player bar
+    _abPlayerCoverError(img, container) {
+        const el = container || (img && img.parentNode);
+        if (!el) return;
+        el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%"><svg style="width:22px;height:22px;stroke:var(--text-muted);fill:none;stroke-width:1.5" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></div>';
     },
 
     _onNewRoleChange() {
@@ -8806,24 +12108,34 @@ const App = {
         this.mvPage = 1;
         this.mvSort = 'recent';
         this.mvArtist = null;
-        this._mvArtistPage = 0;
         await this.loadMvPage(el);
     },
 
-    async loadMvPage(el) {
-        const target = el || document.getElementById('main-content');
-        let url = `musicvideos?limit=${this.mvPerPage}&page=${this.mvPage}&sort=${this.mvSort}`;
-        if (this.mvArtist) url += `&artist=${encodeURIComponent(this.mvArtist)}`;
+    _mvArtistCardHtml(a) {
+        const imgHtml = a.imagePath
+            ? `<img src="/singerphoto/${a.imagePath}" class="artist-portrait" loading="lazy"
+                   onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
+               <div class="artist-portrait-fallback" style="display:none">
+                   <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-video"/></svg></div>`
+            : `<div class="artist-portrait-fallback">
+                   <svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-video"/></svg></div>`;
+        return `<div class="card" onclick="App.openMvArtist('${this.esc(a.name).replace(/'/g, "\\'")}')">
+            <div class="card-cover artist-cover">${imgHtml}</div>
+            <div class="card-info">
+                <div class="card-title">${this.esc(a.name)}</div>
+                <div class="card-subtitle">${a.count} video${a.count !== 1 ? 's' : ''}</div>
+            </div>
+        </div>`;
+    },
 
-        const [data, artists, stats] = await Promise.all([
-            this.api(url),
+    async _renderMvArtistsGrid(el) {
+        const target = el || document.getElementById('main-content');
+        const [artists, stats] = await Promise.all([
             this.api('musicvideos/artists'),
             this.api('musicvideos/stats')
         ]);
-
-        if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load music videos.'); return; }
-        this.mvTotal = data.total;
-        const totalPages = Math.ceil(data.total / this.mvPerPage);
+        if (!artists) { target.innerHTML = this.emptyState('Error', 'Could not load artists.'); return; }
+        this._mvArtists = artists;
 
         let html = `<div class="page-header"><h1>${this.t('page.musicVideos')}</h1>
             <div class="filter-bar">
@@ -8832,7 +12144,103 @@ const App = {
             </button>`;
         const sortLabels = { recent: this.t('sort.recent'), title: this.t('sort.title'), artist: this.t('sort.artist'), year: this.t('sort.year'), size: this.t('sort.size'), duration: this.t('sort.duration') };
         for (const [key, label] of Object.entries(sortLabels)) {
-            html += `<button class="filter-chip${this.mvSort === key ? ' active' : ''}" onclick="App.changeMvSort('${key}')">${label}</button>`;
+            if (key === 'artist') {
+                html += `<button class="filter-chip active">${label}</button>`;
+            } else {
+                html += `<button class="filter-chip" onclick="App.changeMvSort('${key}')">${label}</button>`;
+            }
+        }
+        html += `</div></div>`;
+        if (stats && stats.totalVideos > 0) {
+            html += `<div class="mv-stats-bar">
+                <span>${stats.totalVideos} videos</span>
+                <span>${stats.totalArtists} artists</span>
+            </div>`;
+        }
+
+        if (artists.length === 0) {
+            html += this.emptyState(this.t('empty.noMusicVideos.title'), this.t('empty.noMusicVideos.desc'));
+            target.innerHTML = html;
+            return;
+        }
+
+        const ALL_LETTERS = ['#','A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'];
+        const groups = new Map();
+        artists.forEach(a => {
+            const letter = this._actorFirstLetter(a.name);
+            if (!groups.has(letter)) groups.set(letter, []);
+            groups.get(letter).push(a);
+        });
+        const activeLetters = new Set(groups.keys());
+
+        let scrubHtml = `<div class="vid-scrubber" id="mv-artist-scrubber">`;
+        ALL_LETTERS.forEach(l => {
+            scrubHtml += `<div class="vid-scrubber-item${activeLetters.has(l) ? '' : ' empty'}" data-key="${l}" onclick="App._vidScrollToAnchor('mv-artist-letter-${l}')">${l}</div>`;
+        });
+        scrubHtml += `</div>`;
+
+        html += `<div class="vid-timeline-wrapper">`;
+        ALL_LETTERS.forEach(l => {
+            if (!groups.has(l)) return;
+            html += `<div class="vid-letter-anchor" id="mv-artist-letter-${l}" data-key="${l}"></div>`;
+            html += `<div class="vid-letter-header">${l}</div>`;
+            html += `<div class="card-grid" style="margin-bottom:28px">`;
+            groups.get(l).forEach(a => { html += this._mvArtistCardHtml(a); });
+            html += `</div>`;
+        });
+        html += `</div>`;
+
+        target.innerHTML = html + scrubHtml;
+        const activeKeys = ALL_LETTERS.filter(l => activeLetters.has(l));
+        this._setupVidScrubber(activeKeys, 'mv-artist-letter-');
+    },
+
+    openMvArtist(name) {
+        this.mvArtist = name;
+        this.mvPage = 1;
+        this.loadMvPage();
+    },
+
+    openMvAllVideos() {
+        this.mvArtist = null;
+        this.mvPage = 1;
+        this.loadMvPage();
+    },
+
+    async loadMvPage(el) {
+        const target = el || document.getElementById('main-content');
+        let url = `musicvideos?limit=${this.mvPerPage}&page=${this.mvPage}&sort=${this.mvSort}`;
+        if (this.mvArtist) url += `&artist=${encodeURIComponent(this.mvArtist)}`;
+
+        const [data, stats] = await Promise.all([
+            this.api(url),
+            this.api('musicvideos/stats')
+        ]);
+
+        if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load music videos.'); return; }
+        this.mvTotal = data.total;
+        const totalPages = Math.ceil(data.total / this.mvPerPage);
+
+        const artistHeader = this.mvArtist
+            ? `<div style="display:flex;align-items:center;gap:12px">
+                <button class="filter-chip" onclick="App._renderMvArtistsGrid()">
+                    <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;vertical-align:middle;margin-right:2px"><use href="#icon-arrow-left"/></svg>${this.t('filter.allArtists')}
+                </button>
+                <h1 style="margin:0">${this.esc(this.mvArtist)}</h1>
+               </div>`
+            : `<h1>${this.t('page.musicVideos')}</h1>`;
+        let html = `<div class="page-header">${artistHeader}
+            <div class="filter-bar">
+            <button class="mv-shuffle-btn" onclick="App.shuffleMusicVideo()" title="Play a random music video">
+                <svg><use href="#icon-shuffle"/></svg> ${this.t('btn.shufflePlay')}
+            </button>`;
+        const sortLabels = { recent: this.t('sort.recent'), title: this.t('sort.title'), artist: this.t('sort.artist'), year: this.t('sort.year'), size: this.t('sort.size'), duration: this.t('sort.duration') };
+        for (const [key, label] of Object.entries(sortLabels)) {
+            if (key === 'artist') {
+                html += `<button class="filter-chip" onclick="App._renderMvArtistsGrid()">${label}</button>`;
+            } else {
+                html += `<button class="filter-chip${this.mvSort === key ? ' active' : ''}" onclick="App.changeMvSort('${key}')">${label}</button>`;
+            }
         }
         html += `</div></div>`;
 
@@ -8843,14 +12251,10 @@ const App = {
                 <span>${this.formatSize(stats.totalSize)}</span>
                 <span>${this.formatDuration(stats.totalDuration)}</span>
                 <span>${stats.totalArtists} artists</span>
-                ${stats.needsOptimization > 0 ? `<span class="mv-stat-warn">${stats.needsOptimization} need optimization</span>` : ''}
+                ${stats.needsOptimization > 0 ? `<span class="mv-stat-warn">${stats.needsOptimization} ${this.t('analysis.needOptimization')}</span>` : ''}
                 ${!stats.ffmpegAvailable ? '<span class="mv-stat-warn">FFmpeg not found</span>' : ''}
             </div>`;
         }
-
-        // Artist filter chips
-        this._mvArtists = artists || [];
-        html += this._buildMvArtistChips();
 
         if (data.videos && data.videos.length > 0) {
             if (totalPages > 1) {
@@ -8868,10 +12272,7 @@ const App = {
                 const mvFavClass = v.isFavourite ? 'active' : '';
                 html += `<div class="mv-card" onclick="App.openMvDetail(${v.id})" data-mv-id="${v.id}">
                     <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none">&#127909;</span>`
-                            : `<span class="mv-card-placeholder">&#127909;</span>`}
+                        ${this._videoThumbHtml(thumbSrc, '&#127909;')}
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="mv-format-badge ${formatClass}">${this.esc(v.format)}</span>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.playMusicVideo(${v.id})">&#9654;</button>
@@ -9012,9 +12413,17 @@ const App = {
             <div>
                 <button class="filter-chip" onclick="App.stopMvShuffle(); App.navigate('musicvideos')" style="margin-bottom:8px">&laquo; Back to Music Videos</button>
                 <h1>${this.esc(video.title)}</h1>
-                <div style="color:var(--text-secondary);font-size:14px;margin-top:4px">
-                    ${this.esc(video.artist)}${video.year ? ' &middot; ' + video.year : ''}
-                    &middot; ${this.formatDuration(video.duration)} &middot; ${this.formatSize(video.sizeBytes)}
+                <div class="mv-ratings-row" style="display:flex">
+                    ${video.artist ? `<span class="mv-rating-chip mv-meta-artist">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
+                        ${this.esc(video.artist)}</span>` : ''}
+                    <span class="mv-rating-chip mv-meta-duration">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+                        ${this.formatDuration(video.duration)}</span>
+                    <span class="mv-rating-chip mv-meta-size">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z"/></svg>
+                        ${this.formatSize(video.sizeBytes)}</span>
+                    ${video.year ? `<span class="mv-rating-chip mv-meta-year">${video.year}</span>` : ''}
                 </div>
             </div>
             ${mvActionsAndPopup}
@@ -9036,10 +12445,11 @@ const App = {
 
         // Video player
         html += `<div class="mv-player-container">
-            <video id="mv-player" controls autoplay class="mv-player">
+            <video id="mv-player" autoplay playsinline class="mv-player">
                 <source src="/api/stream-musicvideo/${video.id}" type="video/mp4">
                 Your browser does not support the video tag.
             </video>
+            ${this._videoControlsBarHtml(video.id, 'musicvideo', false)}
             <div class="vp-thumb-tooltip" id="vp-thumb-tooltip" style="display:none">
                 <div class="vp-thumb-img" id="vp-thumb-img"></div>
                 <div class="vp-thumb-time" id="vp-thumb-time"></div>
@@ -9049,9 +12459,12 @@ const App = {
         el.innerHTML = html;
 
         // Connect EQ to the music video player
+        this._castVideoMeta = { title: video.title || video.artist || 'Music Video', posterPath: video.posterPath };
+        this._castUpdateButtons();
         const player = document.getElementById('mv-player');
         if (player) {
             this.connectEQToElement(player);
+            this._setupCustomControls(player);
             player.addEventListener('ended', () => {
                 if (this._mvShuffleMode) this._playNextShuffleMv();
             });
@@ -9247,10 +12660,7 @@ const App = {
             const emptyDesc  = hasFilters
                 ? `No eBooks match the selected filters. <a href="#" onclick="App.renderEBooks()" style="color:var(--accent)">Clear all filters</a>`
                 : this.t('empty.noEbooks.desc');
-            html += `<div class="empty-state">
-                <div class="empty-icon"><svg style="width:52px;height:52px;stroke:var(--text-muted);fill:none;stroke-width:1.2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-book"/></svg></div>
-                <h2>${emptyTitle}</h2><p>${emptyDesc}</p>
-            </div>`;
+            html += this.emptyState(emptyTitle, emptyDesc);
         }
 
         target.innerHTML = html;
@@ -9318,69 +12728,84 @@ const App = {
 
         const formatBadge = ebook.format ? ebook.format.toLowerCase() : 'epub';
         const isComic = ebook.format === 'CBZ' || ebook.format === 'CBR';
-        const readLabel = isComic ? '&#128366; Read Comic' : `&#128214; Read ${ebook.format}`;
-        let html = `<div class="page-header">
-            <div><h1>${this.esc(ebook.title)}</h1>
-                <div style="color:var(--text-secondary);font-size:14px;margin-top:4px">
-                    ${this.esc(ebook.author || 'Unknown Author')}
-                    ${ebook.pageCount > 0 ? ' &middot; ' + ebook.pageCount + ' pages' : ''}
-                    &middot; ${this.formatSize(ebook.fileSize)}
+        const _svgRead = '<svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-book-open"/></svg>';
+        const _svgDl   = '<svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-download"/></svg>';
+        const _svgEdit = '<svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-tool"/></svg>';
+        const _svgBookPh = '<svg style="width:42px;height:42px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
+
+        // ── Page header ──
+        let html = `<div class="page-header" style="margin-bottom:14px">
+            <div style="flex:1;min-width:0">
+                <h1 style="margin:0;font-size:clamp(14px,2vw,20px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.esc(ebook.title)}</h1>
+                <div style="color:var(--text-muted);font-size:12px;margin-top:3px">
+                    ${this.esc(ebook.author || 'Unknown')}${ebook.pageCount > 0 ? ' &middot; ' + ebook.pageCount + ' pages' : ''} &middot; ${this.formatSize(ebook.fileSize)}
                 </div>
             </div>
-            <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
-                <button class="btn-primary" onclick="App.openEBookReader(${ebook.id})">${readLabel}</button>
-                <a href="/api/ebooks/${ebook.id}/download" class="btn-primary" style="text-decoration:none;background:var(--bg-surface);color:var(--text-secondary)" target="_blank">&#128229; Download</a>
-                <button class="btn-primary" style="background:var(--bg-surface);color:var(--text-secondary)" onclick="App.openEBookMetadataEditor(${ebook.id})" title="Edit Metadata">
-                    <svg style="width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;vertical-align:middle;margin-right:4px"><use href="#icon-tool"/></svg>Edit
-                </button>
-            </div>
         </div>`;
 
+        // ── Two-column layout (reuse audiobook classes) ──
+        html += `<div class="ab-detail-grid">`;
+
+        // Left column — cover + buttons
+        html += `<div class="ab-detail-left">`;
         if (ebook.coverImage) {
-            html += `<div style="margin-bottom:20px;text-align:center">
-                <img src="/ebookcover/${ebook.coverImage}" style="max-width:300px;max-height:450px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3)" onerror="this.style.display='none'" alt="Cover">
-            </div>`;
+            html += `<img class="ab-detail-cover-img" src="/ebookcover/${ebook.coverImage}" alt="" onerror="App._ebCoverError(this)" style="aspect-ratio:2/3;object-fit:cover">`;
+        } else {
+            html += `<div class="ab-detail-cover-ph" style="aspect-ratio:2/3">${_svgBookPh}</div>`;
         }
+        html += `<div class="ab-detail-btns">
+            <button class="btn-primary" onclick="App.openEBookReader(${ebook.id})">${_svgRead} ${isComic ? 'Read Comic' : 'Read ' + ebook.format}</button>
+            <a href="/api/ebooks/${ebook.id}/download" class="btn-primary" style="text-decoration:none;background:var(--bg-surface);color:var(--text-secondary)" target="_blank">${_svgDl} Download</a>
+            <button class="btn-primary" style="background:var(--bg-surface);color:var(--text-secondary)" onclick="App.openEBookMetadataEditor(${ebook.id})">${_svgEdit} Edit</button>
+        </div>`;
+        html += `</div>`; // end left
 
-        // Community Rating
+        // Right column — compact metadata
+        const row = (label, value, rawHtml = false) =>
+            `<span class="ab-meta-lbl">${label}</span><span class="ab-meta-val">${rawHtml ? value : this.esc(value)}</span>`;
+        html += `<div class="ab-meta-grid">`;
+        html += row('Format', `<span class="ebook-format-badge ebook-format-${formatBadge}" style="position:static;font-size:10px">${ebook.format}</span>`, true);
+        html += row('Size', this.formatSize(ebook.fileSize), true);
+        if (ebook.pageCount > 0) html += row('Pages', String(ebook.pageCount), true);
+        if (ebook.author)        html += row(this.t('label.author','Author'), ebook.author);
+        if (ebook.publisher)     html += row('Publisher', ebook.publisher);
+        if (ebook.language)      html += row(this.t('label.language','Language'), ebook.language);
+        if (ebook.isbn)          html += row('ISBN', ebook.isbn);
+        if (ebook.subject)       html += row('Subject', ebook.subject);
+        if (ebook.category)      html += row(this.t('label.category','Category'), ebook.category);
+        html += row(this.t('label.added','Added'), new Date(ebook.dateAdded).toLocaleDateString(), true);
+        html += `</div>`; // end meta grid
+
+        html += `</div>`; // end ab-detail-grid
+
+        // Community Rating (below the grid)
         const ebookRatingSum = await this.api(`ratings/summary/ebook/${ebookId}`);
-        html += `<div class="settings-section">
-            <div class="setting-row">
-                <span class="setting-label">Community Rating</span>
-                <span class="setting-value">${this.buildRatingWidget(ebookRatingSum, 'ebook', ebookId)}</span>
+        html += `<div class="settings-section" style="margin-top:12px;padding:10px 14px">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                <span style="font-size:12px;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:.5px">Community Rating</span>
+                <span>${this.buildRatingWidget(ebookRatingSum, 'ebook', ebookId)}</span>
             </div>
         </div>`;
 
-        html += '<div class="settings-section">';
-        html += '<h3>eBook Details</h3>';
-        html += `<div class="setting-row setting-row-col"><span class="setting-label">Filename</span><span class="setting-value" style="word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4">${this.esc(ebook.fileName)}</span></div>`;
-        html += `<div class="setting-row"><span class="setting-label">Format</span><span class="setting-value"><span class="ebook-format-badge ebook-format-${formatBadge}" style="position:static;font-size:11px">${ebook.format}</span></span></div>`;
-        html += `<div class="setting-row"><span class="setting-label">Size</span><span class="setting-value">${this.formatSize(ebook.fileSize)}</span></div>`;
-        if (ebook.pageCount > 0)
-            html += `<div class="setting-row"><span class="setting-label">Pages</span><span class="setting-value">${ebook.pageCount}</span></div>`;
-        if (ebook.author)
-            html += `<div class="setting-row"><span class="setting-label">Author</span><span class="setting-value">${this.esc(ebook.author)}</span></div>`;
-        if (ebook.publisher)
-            html += `<div class="setting-row"><span class="setting-label">Publisher</span><span class="setting-value">${this.esc(ebook.publisher)}</span></div>`;
-        if (ebook.language)
-            html += `<div class="setting-row"><span class="setting-label">Language</span><span class="setting-value">${this.esc(ebook.language)}</span></div>`;
-        if (ebook.isbn)
-            html += `<div class="setting-row"><span class="setting-label">ISBN</span><span class="setting-value">${this.esc(ebook.isbn)}</span></div>`;
-        if (ebook.subject)
-            html += `<div class="setting-row"><span class="setting-label">Subject</span><span class="setting-value">${this.esc(ebook.subject)}</span></div>`;
-        if (ebook.category)
-            html += `<div class="setting-row"><span class="setting-label">Category</span><span class="setting-value">${this.esc(ebook.category)}</span></div>`;
-        html += `<div class="setting-row"><span class="setting-label">Added</span><span class="setting-value">${new Date(ebook.dateAdded).toLocaleString()}</span></div>`;
-        html += `<div class="setting-row"><span class="setting-label">File Modified</span><span class="setting-value">${new Date(ebook.lastModified).toLocaleString()}</span></div>`;
+        // Description
         if (ebook.description) {
-            html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.03)">
-                <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Description</div>
-                <div style="font-size:13px;color:var(--text-secondary);line-height:1.6">${this.esc(ebook.description)}</div>
+            const long = ebook.description.length > 250;
+            html += `<div class="ab-desc-box">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">Description</div>
+                <div id="eb-desc-text" class="${long ? 'ab-desc-collapsed' : ''}">${this.esc(ebook.description)}</div>
+                ${long ? `<button class="ab-desc-toggle" onclick="this.previousElementSibling.classList.toggle('ab-desc-collapsed');this.textContent=this.textContent.includes('more')?'Show less ↑':'Show more ↓'">Show more ↓</button>` : ''}
             </div>`;
         }
-        html += '</div>';
 
         el.innerHTML = html;
+    },
+
+    _ebCoverError(img) {
+        const ph = document.createElement('div');
+        ph.className = 'ab-detail-cover-ph';
+        ph.style.aspectRatio = '2/3';
+        ph.innerHTML = '<svg style="width:42px;height:42px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
+        img.replaceWith(ph);
     },
 
     // ─── eBook Metadata Editor ───────────────────────────
@@ -9390,6 +12815,14 @@ const App = {
         'Law & Politics','Art & Design','Music','Cooking & Food',
         'Travel & Geography','Religion & Philosophy','Comics & Manga',
         'Paranormal & UFO','General'
+    ],
+
+    _abCategories: [
+        'Fiction','Science Fiction & Fantasy','Mystery & Thriller','Romance',
+        'Horror','Historical Fiction','Biographies & Memoirs','Business & Finance',
+        'Self-Help','Science & Nature','History','Technology & Computing',
+        'Religion & Spirituality','Health & Wellness','Children & Young Adult',
+        'Comics & Manga / Light Novels','Language Learning','Travel','True Crime','General'
     ],
 
     async openEBookMetadataEditor(ebookId) {
@@ -9461,6 +12894,104 @@ const App = {
     _epubRendition: null,
     _ebookReaderOpen: false,
     _ebookPopstateHandler: null,
+
+    // ─── AudioBook Metadata Editor ────────────────────────────────────
+    async openAudioBookMetadataEditor(audiobookId) {
+        const book = await this.api(`audiobooks/${audiobookId}`);
+        if (!book) return;
+
+        const el = document.getElementById('main-content');
+        document.getElementById('page-title').innerHTML = `<span>Edit: ${this.esc(book.title)}</span>`;
+
+        // Build category options — predefined list + current category if custom
+        const allCats = [...this._abCategories];
+        if (book.category && !allCats.includes(book.category)) allCats.unshift(book.category);
+        const catOptions = allCats.map(c =>
+            `<option value="${this.esc(c)}"${book.category === c ? ' selected' : ''}>${this.esc(c)}</option>`
+        ).join('');
+
+        el.innerHTML = `
+        <div class="page-header">
+            <div><h1>${this.t('ab.editMetadata','Edit Metadata')}</h1>
+                <div style="color:var(--text-secondary);font-size:13px;margin-top:4px">${this.esc(book.fileName)}</div>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center">
+                <button class="btn-primary" onclick="App.saveAudioBookMetadata(${book.id})">&#10003; Save</button>
+                <button class="btn-primary" style="background:var(--bg-surface);color:var(--text-secondary)" onclick="App.openAudioBookDetail(${book.id})">Cancel</button>
+            </div>
+        </div>
+        <div class="settings-section">
+            <h3>${this.t('ab.editMetadata','Edit Metadata')}</h3>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">Title</label>
+                <input class="video-edit-input" id="ab-edit-title" value="${this.esc(book.title)}" placeholder="Book title">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('label.author','Author')}</label>
+                <input class="video-edit-input" id="ab-edit-author" value="${this.esc(book.author || '')}" placeholder="Author name">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('label.narrator','Narrator')}</label>
+                <input class="video-edit-input" id="ab-edit-narrator" value="${this.esc(book.narrator || '')}" placeholder="Narrator name">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('label.category','Category')}</label>
+                <select class="video-edit-select" id="ab-edit-category" onchange="App._abCatSelectChange()">
+                    <option value="">-- No category --</option>
+                    ${catOptions}
+                    <option value="__custom__">Custom...</option>
+                </select>
+                <input class="video-edit-input" id="ab-edit-category-custom" placeholder="Type custom category"
+                    style="margin-top:6px;display:${(book.category && !allCats.slice(0,-1).includes(book.category)) ? '' : 'none'}"
+                    value="${(!book.category || allCats.includes(book.category)) ? '' : this.esc(book.category)}">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('label.series','Series')}</label>
+                <input class="video-edit-input" id="ab-edit-series" value="${this.esc(book.series || '')}" placeholder="Series name (optional)">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('label.year','Year')}</label>
+                <input class="video-edit-input" id="ab-edit-year" type="number" value="${book.year || ''}" placeholder="Publication year" style="width:120px">
+            </div>
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('label.description','Description')}</label>
+                <textarea class="video-edit-input" id="ab-edit-desc" rows="5" style="resize:vertical;font-family:inherit">${this.esc(book.description || '')}</textarea>
+            </div>
+        </div>
+        <div class="settings-section" style="color:var(--text-muted);font-size:12px">
+            Category changes take effect immediately. Manual category assignments are preserved across library rescans.
+        </div>`;
+    },
+
+    _abCatSelectChange() {
+        const sel = document.getElementById('ab-edit-category');
+        const custom = document.getElementById('ab-edit-category-custom');
+        if (!sel || !custom) return;
+        custom.style.display = sel.value === '__custom__' ? '' : 'none';
+    },
+
+    async saveAudioBookMetadata(audiobookId) {
+        const title    = document.getElementById('ab-edit-title')?.value?.trim();
+        const author   = document.getElementById('ab-edit-author')?.value?.trim() ?? '';
+        const narrator = document.getElementById('ab-edit-narrator')?.value?.trim() ?? '';
+        const series   = document.getElementById('ab-edit-series')?.value?.trim() ?? '';
+        const year     = parseInt(document.getElementById('ab-edit-year')?.value) || 0;
+        const desc     = document.getElementById('ab-edit-desc')?.value?.trim() ?? '';
+
+        let catSel = document.getElementById('ab-edit-category')?.value ?? '';
+        if (catSel === '__custom__') catSel = document.getElementById('ab-edit-category-custom')?.value?.trim() ?? '';
+
+        if (!title) { alert('Title cannot be empty.'); return; }
+
+        const res = await this.apiPut(`audiobooks/${audiobookId}`, {
+            title, author, narrator, category: catSel, series, description: desc, year
+        });
+        if (res?.success) {
+            await this.openAudioBookDetail(audiobookId);
+        } else {
+            alert('Save failed. Please try again.');
+        }
+    },
 
     async openEBookReader(ebookId) {
         const ebook = await this.api(`ebooks/${ebookId}`);
@@ -9748,11 +13279,12 @@ const App = {
     async loadAudioBooksPage(el) {
         const target = el || document.getElementById('main-content');
         let url = `audiobooks?limit=${this.audioBooksPerPage}&page=${this.audioBooksPage}&sort=${this.audioBooksSort}`;
-        if (this.audioBooksCategory) url += `&category=${encodeURIComponent(this.audioBooksCategory)}`;
+        if (this.audioBooksCategory) url += `&category=${encodeURIComponent(this.audioBooksCategory === '__none__' ? '__none__' : this.audioBooksCategory)}`;
 
-        const [data, categories] = await Promise.all([
+        const [data, categories, progressMap] = await Promise.all([
             this.api(url),
-            this.api('audiobooks/categories')
+            this.api('audiobooks/categories'),
+            this.api('audiobooks/all-progress').catch(() => ({}))
         ]);
 
         if (!data) { target.innerHTML = this.emptyState('Error', 'Could not load Audio Books.'); return; }
@@ -9771,9 +13303,10 @@ const App = {
             html += '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">';
             html += `<button class="filter-chip${!this.audioBooksCategory ? ' active' : ''}" onclick="App.filterAudioBookCategory(null)">${this.t('filter.allAudioBooks')}</button>`;
             categories.forEach(c => {
-                const isActive = this.audioBooksCategory === c.name;
+                const filterVal = c.name || '__none__';
+                const isActive = this.audioBooksCategory === filterVal;
                 const displayName = c.name || 'Uncategorized';
-                html += `<button class="filter-chip${isActive ? ' active' : ''}" onclick="App.filterAudioBookCategory('${this.esc(c.name)}')">${this.esc(displayName)} <span style="opacity:.6">${c.count}</span></button>`;
+                html += `<button class="filter-chip${isActive ? ' active' : ''}" onclick="App.filterAudioBookCategory('${filterVal}')">${this.esc(displayName)} <span style="opacity:.6">${c.count}</span></button>`;
             });
             html += '</div>';
         }
@@ -9787,9 +13320,10 @@ const App = {
             html += '<div class="audiobooks-grid">';
             data.audioBooks.forEach(book => {
                 const fmt = (book.format || 'MP3').toUpperCase();
-                const fmtClass = fmt === 'M4B' ? 'm4b' : 'mp3';
+                const fmtClass = fmt.toLowerCase();
                 const author = book.author || 'Unknown Author';
                 const dur = book.duration > 0 ? this.formatDuration(Math.round(book.duration)) : fmt;
+                const cardPct = Math.min(100, Math.max(0, progressMap?.[book.id] || 0));
                 html += `<div class="ebook-card audiobook-card" onclick="App.openAudioBookDetail(${book.id})" data-audiobook-id="${book.id}">
                     <div class="ebook-card-cover">
                         ${book.coverImage
@@ -9797,6 +13331,7 @@ const App = {
                                <span class="ebook-card-placeholder" style="display:none">&#127911;</span>`
                             : `<span class="ebook-card-placeholder">&#127911;</span>`}
                         <span class="ebook-format-badge ebook-format-${fmtClass}">${fmt}</span>
+                        ${cardPct > 0 ? `<div class="cw-progress-bar"><div class="cw-progress-fill" style="width:${cardPct}%"></div></div>` : ''}
                     </div>
                     <div class="ebook-card-info">
                         <div class="ebook-card-title">${this.esc(book.title)}</div>
@@ -9867,86 +13402,246 @@ const App = {
         document.getElementById('page-title').innerHTML = `<span>${this.esc(book.title)}</span>`;
 
         const fmt = (book.format || 'MP3').toUpperCase();
-        const fmtClass = fmt === 'M4B' ? 'm4b' : 'mp3';
+        const fmtClass = fmt.toLowerCase();
         const dur = book.duration > 0 ? this.formatDuration(Math.round(book.duration)) : '';
+        const coverArg = book.coverImage ? `'${this.esc(book.coverImage)}'` : 'null';
+        const playCall = `App.playAudioBook(${book.id},'${this.esc(book.title)}','${this.esc(book.author||'')}',${!!book.isFavourite},${coverArg})`;
 
-        let html = `<div class="page-header">
-            <div><h1>${this.esc(book.title)}</h1>
-                <div style="color:var(--text-secondary);font-size:14px;margin-top:4px">
-                    ${this.esc(book.author || 'Unknown Author')}
-                    ${dur ? ' &middot; ' + dur : ''}
-                    &middot; ${this.formatSize(book.fileSize)}
-                </div>
+        // ── Page header ──
+        let html = `<div class="page-header" style="margin-bottom:14px">
+            <div style="flex:1;min-width:0">
+                <h1 style="margin:0;font-size:clamp(14px,2vw,20px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${this.esc(book.title)}</h1>
+                <div style="color:var(--text-muted);font-size:12px;margin-top:3px">${this.esc(book.author||'Unknown Author')}${dur ? ' &middot; ' + dur : ''} &middot; ${this.formatSize(book.fileSize)}</div>
             </div>
-            <div style="display:flex;gap:10px;align-items:center;flex-shrink:0">
-                <button class="btn-primary" onclick="App.playAudioBook(${book.id}, '${this.esc(book.title)}', '${this.esc(book.author || '')}', ${!!book.isFavourite})">&#9654; ${this.t('btn.playAudioBook')}</button>
-                <button class="song-card-fav${book.isFavourite ? ' active' : ''}" style="position:static;font-size:18px" onclick="App.toggleAudioBookFav(${book.id}, this)" title="${this.t('btn.favourite', 'Favorite')}">&#10084;</button>
-                <a href="/api/audiobooks/${book.id}/download" class="btn-primary" style="text-decoration:none;background:var(--bg-surface);color:var(--text-secondary)" target="_blank">&#128229; Download</a>
-            </div>
+            <button class="song-card-fav${book.isFavourite ? ' active' : ''}" style="position:static;flex-shrink:0" onclick="App.toggleAudioBookFav(${book.id},this)" title="${this.t('btn.favourite','Favorite')}"><svg class="player-fav-icon" style="width:18px;height:18px;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-heart"/></svg></button>
         </div>`;
 
+        // ── Two-column layout ──
+        html += `<div class="ab-detail-grid">`;
+
+        // Left column — cover + buttons + live progress
+        html += `<div class="ab-detail-left">`;
+        const _svgPlay = '<svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-play"/></svg>';
+        const _svgDl   = '<svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-download"/></svg>';
+        const _svgBook = '<svg style="width:42px;height:42px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
+
         if (book.coverImage) {
-            html += `<div style="margin-bottom:20px;text-align:center">
-                <img src="/audiobookcover/${book.coverImage}" style="max-width:300px;max-height:300px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3)" onerror="this.style.display='none'" alt="Cover">
+            html += `<img class="ab-detail-cover-img" src="/audiobookcover/${book.coverImage}" alt="" onerror="App._abCoverError(this)">`;
+        } else {
+            html += `<div class="ab-detail-cover-ph">${_svgBook}</div>`;
+        }
+        const _svgEdit = '<svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-tool"/></svg>';
+        html += `<div class="ab-detail-btns">
+            <button class="btn-primary" onclick="${playCall}">${_svgPlay} ${this.t('btn.playAudioBook','Play')}</button>
+            <a href="/api/audiobooks/${book.id}/download" class="btn-primary" style="text-decoration:none;background:var(--bg-surface);color:var(--text-secondary)" target="_blank">${_svgDl} Download</a>
+            <button class="btn-primary" style="background:var(--bg-surface);color:var(--text-secondary)" onclick="App.openAudioBookMetadataEditor(${book.id})">${_svgEdit} Edit</button>
+        </div>
+        <div class="ab-live-progress" id="ab-live-progress-wrap" style="display:none">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">${this.t('ab.progress','Progress')}</div>
+            <div class="ab-live-bar-bg"><div class="ab-live-bar-fill" id="ab-live-bar"></div></div>
+            <div class="ab-live-pct">
+                <span id="ab-live-pct-txt">0%</span>
+                <span id="ab-live-pos-txt"></span>
+            </div>
+        </div>`;
+        html += `</div>`; // end left
+
+        // Right column — compact metadata
+        html += `<div class="ab-meta-grid">`;
+        const row = (label, value, rawHtml = false) =>
+            `<span class="ab-meta-lbl">${label}</span><span class="ab-meta-val">${rawHtml ? value : this.esc(value)}</span>`;
+        html += row('Format', `<span class="ebook-format-badge ebook-format-${fmtClass}" style="position:static;font-size:10px">${fmt}</span>`, true);
+        html += row('Size', this.formatSize(book.fileSize), true);
+        if (dur) html += row(this.t('label.duration','Duration'), dur, true);
+        if (book.author) html += row(this.t('label.author','Author'), book.author);
+        if (book.narrator) html += row(this.t('label.narrator','Narrator'), book.narrator);
+        if (book.series) html += row(this.t('label.series','Series'), book.series);
+        if (book.year) html += row(this.t('label.year','Year'), String(book.year), true);
+        if (book.publisher) html += row(this.t('label.publisher','Publisher'), book.publisher);
+        if (book.language) html += row(this.t('label.language','Language'), book.language);
+        if (book.category) html += row(this.t('label.category','Category'), book.category);
+        html += row(this.t('label.added','Added'), new Date(book.dateAdded).toLocaleDateString(), true);
+        html += `</div>`; // end meta grid
+
+        html += `</div>`; // end ab-detail-grid
+
+        // Description (collapsed if long)
+        if (book.description) {
+            const long = book.description.length > 250;
+            html += `<div class="ab-desc-box">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:5px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">${this.t('label.description','Description')}</div>
+                <div id="ab-desc-text" class="${long ? 'ab-desc-collapsed' : ''}">${this.esc(book.description)}</div>
+                ${long ? `<button class="ab-desc-toggle" onclick="this.previousElementSibling.classList.toggle('ab-desc-collapsed');this.textContent=this.textContent.includes('more')?'Show less ↑':'Show more ↓'">Show more ↓</button>` : ''}
             </div>`;
         }
 
-        html += '<div class="settings-section">';
-        html += `<h3>${this.t('page.audioBooks')}</h3>`;
-        html += `<div class="setting-row setting-row-col"><span class="setting-label">Filename</span><span class="setting-value" style="word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4">${this.esc(book.fileName)}</span></div>`;
-        html += `<div class="setting-row"><span class="setting-label">Format</span><span class="setting-value"><span class="ebook-format-badge ebook-format-${fmtClass}" style="position:static;font-size:11px">${fmt}</span></span></div>`;
-        html += `<div class="setting-row"><span class="setting-label">Size</span><span class="setting-value">${this.formatSize(book.fileSize)}</span></div>`;
-        if (dur) html += `<div class="setting-row"><span class="setting-label">${this.t('label.duration')}</span><span class="setting-value">${dur}</span></div>`;
-        if (book.author) html += `<div class="setting-row"><span class="setting-label">${this.t('label.author')}</span><span class="setting-value">${this.esc(book.author)}</span></div>`;
-        if (book.narrator) html += `<div class="setting-row"><span class="setting-label">${this.t('label.narrator')}</span><span class="setting-value">${this.esc(book.narrator)}</span></div>`;
-        if (book.series) html += `<div class="setting-row"><span class="setting-label">${this.t('label.series')}</span><span class="setting-value">${this.esc(book.series)}</span></div>`;
-        if (book.year) html += `<div class="setting-row"><span class="setting-label">${this.t('label.year')}</span><span class="setting-value">${book.year}</span></div>`;
-        if (book.publisher) html += `<div class="setting-row"><span class="setting-label">${this.t('label.publisher')}</span><span class="setting-value">${this.esc(book.publisher)}</span></div>`;
-        if (book.language) html += `<div class="setting-row"><span class="setting-label">${this.t('label.language')}</span><span class="setting-value">${this.esc(book.language)}</span></div>`;
-        if (book.category) html += `<div class="setting-row"><span class="setting-label">${this.t('label.category')}</span><span class="setting-value">${this.esc(book.category)}</span></div>`;
-        html += `<div class="setting-row"><span class="setting-label">${this.t('label.added')}</span><span class="setting-value">${new Date(book.dateAdded).toLocaleString()}</span></div>`;
-        if (book.description) {
-            html += `<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.03)">
-                <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${this.t('label.description')}</div>
-                <div style="font-size:13px;color:var(--text-secondary);line-height:1.6">${this.esc(book.description)}</div>
-            </div>`;
-        }
-        html += '</div>';
+        // Async placeholders
+        html += `<div id="ab-detail-bookmarks-wrap" style="margin-top:0"></div>`;
 
         el.innerHTML = html;
+
+        // If this book is currently playing, show live progress immediately
+        if (this.isAudioBookPlaying && this._currentAudioBookId === book.id) {
+            this._abShowLiveProgress();
+        } else {
+            // Load saved progress and display static bar
+            this.api(`audiobooks/${audiobookId}/progress`).then(prog => {
+                if (!prog || prog.position < 5) return;
+                const wrap = document.getElementById('ab-live-progress-wrap');
+                if (!wrap) return;
+                // Use book.duration as authoritative fallback — stored duration may be 0 if
+                // the audio hadn't loaded fully when progress was first saved.
+                const useDur = prog.duration > 0 ? prog.duration : book.duration;
+                const pct = useDur > 0
+                    ? Math.min(100, (prog.position / useDur) * 100).toFixed(1)
+                    : (prog.percent > 0 ? prog.percent.toFixed(1) : '0.0');
+                wrap.style.display = '';
+                const fill = document.getElementById('ab-live-bar');
+                const pctTxt = document.getElementById('ab-live-pct-txt');
+                const posTxt = document.getElementById('ab-live-pos-txt');
+                if (fill) fill.style.width = pct + '%';
+                if (pctTxt) pctTxt.textContent = pct + '%';
+                if (posTxt) posTxt.textContent = `${this.formatDuration(Math.round(prog.position))}${prog.completed ? ' ✓' : ''}`;
+            });
+        }
+
+        // Load bookmarks async
+        this._abRefreshDetailBookmarks(audiobookId, book);
     },
 
-    playAudioBook(id, title, author, isFavourite = false) {
-        // Stop any playing video
+    _abShowLiveProgress() {
+        const wrap = document.getElementById('ab-live-progress-wrap');
+        if (!wrap) return;
+        wrap.style.display = '';
+        this._abUpdateDetailProgress();
+    },
+
+    _abUpdateDetailProgress() {
+        const fill = document.getElementById('ab-live-bar');
+        const pctTxt = document.getElementById('ab-live-pct-txt');
+        const posTxt = document.getElementById('ab-live-pos-txt');
+        if (!fill && !pctTxt) return;
+        const pos = this.audioPlayer.currentTime;
+        const dur = this.audioPlayer.duration;
+        if (!dur || !isFinite(dur)) return;
+        const pct = Math.min(100, (pos / dur) * 100).toFixed(1);
+        if (fill) fill.style.width = pct + '%';
+        if (pctTxt) pctTxt.textContent = pct + '%';
+        if (posTxt) posTxt.textContent = this.formatDuration(Math.round(pos));
+    },
+
+    _abRefreshDetailBookmarks(audiobookId, book) {
+        const coverArg = book.coverImage ? `'${this.esc(book.coverImage)}'` : 'null';
+        this.api(`audiobooks/${audiobookId}/bookmarks`).then(bms => {
+            const wrap = document.getElementById('ab-detail-bookmarks-wrap');
+            if (!wrap) return;
+            if (!bms || !bms.length) { wrap.innerHTML = ''; return; }
+            let html = `<div class="settings-section" style="padding:10px 14px;margin-top:10px">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.5px">${this.t('ab.bookmarks','Bookmarks')} (${bms.length})</div>`;
+            bms.forEach(bm => {
+                const bmTitle = this.esc(bm.title || this.formatDuration(Math.round(bm.position)));
+                const playAndSeek = `App.playAudioBook(${audiobookId},'${this.esc(book.title)}','${this.esc(book.author||'')}',${!!book.isFavourite},${coverArg});setTimeout(()=>{App.audioPlayer.currentTime=${bm.position};},800)`;
+                html += `<div class="ab-bookmark-item">
+                    <div class="ab-bookmark-info" onclick="${playAndSeek}">
+                        <div class="ab-bookmark-title">${bmTitle}</div>
+                        <div class="ab-bookmark-pos">${this.formatDuration(Math.round(bm.position))}</div>
+                        ${bm.note ? `<div class="ab-bookmark-note">${this.esc(bm.note)}</div>` : ''}
+                    </div>
+                    <button class="ab-bookmark-del" onclick="App._abDeleteBookmarkFromDetail(${audiobookId},${bm.id},this)" title="Delete">&#215;</button>
+                </div>`;
+            });
+            html += '</div>';
+            wrap.innerHTML = html;
+        });
+    },
+
+    _abDeleteBookmarkFromDetail(audiobookId, bookmarkId, btn) {
+        fetch(`/api/audiobooks/${audiobookId}/bookmarks/${bookmarkId}`, { method: 'DELETE' });
+        btn.closest('.ab-bookmark-item')?.remove();
+    },
+
+    async playAudioBook(id, title, author, isFavourite = false, coverImage = null) {
+        // Stop any playing video / music
         document.querySelectorAll('video').forEach(v => { v.pause(); v.removeAttribute('src'); v.load(); });
-        // Clear playlist so prev/next don't step into unrelated tracks
+        this._abStopProgressSave();
+        this._abClosePanel();
         this.playlist = [];
         this.playIndex = -1;
         this.currentTrack = null;
         this.isRadioPlaying = false;
         this.isAudioBookPlaying = true;
         this._currentAudioBookId = id;
+        this._abChapters = [];
+        this._abCurrentSpeed = this._abCurrentSpeed || 1;
+
         document.getElementById('player-bar').classList.remove('radio-mode', 'player-hidden');
-        // Hide controls that don't apply to a single audiobook file
-        document.getElementById('btn-player-add-playlist').style.display = 'none';
-        document.getElementById('btn-player-lyrics').style.display = 'none';
-        document.getElementById('btn-shuffle').style.display = 'none';
-        document.getElementById('btn-repeat').style.display = 'none';
-        document.getElementById('btn-eq').style.display = 'none';
-        document.getElementById('btn-prev').style.display = 'none';
-        document.getElementById('btn-next').style.display = 'none';
+        // Hide music controls
+        ['btn-player-add-playlist','btn-player-lyrics','btn-shuffle','btn-repeat','btn-eq','btn-android-player']
+            .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+        // Repurpose prev/next as ±30s skip
+        const prevBtn = document.getElementById('btn-prev');
+        const nextBtn = document.getElementById('btn-next');
+        if (prevBtn) { prevBtn.style.display = ''; prevBtn.title = '−30 seconds'; prevBtn.innerHTML = '<span style="font-size:11px;font-weight:700;letter-spacing:-.5px">−30s</span>'; }
+        if (nextBtn) { nextBtn.style.display = ''; nextBtn.title = '+30 seconds'; nextBtn.innerHTML = '<span style="font-size:11px;font-weight:700;letter-spacing:-.5px">+30s</span>'; }
         document.getElementById('progress-bar').style.display = '';
-        // Show and configure the fav button
+        // Show audiobook controls
+        ['btn-ab-speed','btn-ab-sleep','btn-ab-bookmark'].forEach(id => {
+            const el = document.getElementById(id); if (el) el.style.display = '';
+        });
         const favBtn = document.getElementById('btn-player-fav');
         favBtn.style.display = '';
         favBtn.classList.toggle('active', !!isFavourite);
+
+        // Cover image
+        const coverEl = document.getElementById('player-cover');
+        if (coverImage) {
+            coverEl.innerHTML = `<img src="/audiobookcover/${coverImage}" style="width:100%;height:100%;object-fit:cover;border-radius:4px" onerror="App._abPlayerCoverError(this)">`;
+        } else {
+            this._abPlayerCoverError(null, coverEl);
+        }
+
+        document.getElementById('player-title').textContent = title || this.t('misc.audioBook');
+        document.getElementById('player-artist').textContent = author || '';
+        this._clearPlayerMeta();
+
+        // Set speed button label
+        const speedBtn = document.getElementById('btn-ab-speed');
+        if (speedBtn) speedBtn.textContent = this._abCurrentSpeed === 1 ? '1×' : `${this._abCurrentSpeed}×`;
+
+        // Set audio source
         this.audioPlayer.src = `/api/audiobooks/${id}/stream`;
+        this.audioPlayer.playbackRate = this._abCurrentSpeed || 1;
+
+        // Store duration on metadata load (used as fallback in progress saves)
+        this.audioPlayer.addEventListener('loadedmetadata', () => {
+            if (this.isAudioBookPlaying && isFinite(this.audioPlayer.duration) && this.audioPlayer.duration > 0)
+                this._abBookDuration = this.audioPlayer.duration;
+        });
+
+        // Restore saved progress (seek after metadata loads)
+        this.api(`audiobooks/${id}/progress`).then(prog => {
+            if (prog && prog.position > 10 && !prog.completed) {
+                this.audioPlayer.addEventListener('loadedmetadata', () => {
+                    if (this._currentAudioBookId === id)
+                        this.audioPlayer.currentTime = prog.position;
+                }, { once: true });
+            }
+        });
+
+        // Load chapters
+        this.api(`audiobooks/${id}/chapters`).then(data => {
+            this._abChapters = data?.chapters || [];
+            const chapBtn = document.getElementById('btn-ab-chapters');
+            if (chapBtn) chapBtn.style.display = this._abChapters.length >= 2 ? '' : 'none';
+        });
+
         this.audioPlayer.play().catch(() => {});
         this.isPlaying = true;
         document.getElementById('btn-play').innerHTML = '<svg style="width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-pause"/></svg>';
-        document.getElementById('player-title').textContent = title || this.t('misc.audioBook');
-        document.getElementById('player-artist').textContent = author || '';
-        document.getElementById('player-cover').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:22px;color:#666">&#127911;</div>';
+
+        this._abStartProgressSave(id);
+        // Show live bar on detail page if it's already open for this book
+        if (document.getElementById('ab-live-bar')) this._abShowLiveProgress();
     },
 
     // ─── Movies ──────────────────────────────────────────────────
@@ -10109,18 +13804,18 @@ const App = {
                         ${stats.totalTvSeries > 0 ? `<span>${stats.totalTvSeries} series</span>` : ''}
                         <span>${stats.totalTvEpisodes} episodes</span>
                         ${stats.totalDocumentaries > 0 ? `<span>${stats.totalDocumentaries} documentaries</span>` : ''}
-                        <span>${this.formatSize(stats.totalSize)}</span>
-                        <span>${this.formatDuration(stats.totalDuration)}</span>
-                        ${stats.needsOptimization > 0 ? `<span class="mv-stat-warn">${stats.needsOptimization} need optimization</span>` : ''}
+                        <span>${this.formatSize(stats.tvTotalSize)}</span>
+                        <span>${this.formatDuration(stats.tvTotalDuration)}</span>
+                        ${stats.tvNeedsOptimization > 0 ? `<span class="mv-stat-warn">${stats.tvNeedsOptimization} ${this.t('analysis.needOptimization')}</span>` : ''}
                     </div>`;
                 }
             } else {
                 if (stats.totalMovies > 0) {
                     html += `<div class="mv-stats-bar">
                         <span>${stats.totalMovies} movies</span>
-                        <span>${this.formatSize(stats.totalSize)}</span>
-                        <span>${this.formatDuration(stats.totalDuration)}</span>
-                        ${stats.needsOptimization > 0 ? `<span class="mv-stat-warn">${stats.needsOptimization} need optimization</span>` : ''}
+                        <span>${this.formatSize(stats.movieTotalSize)}</span>
+                        <span>${this.formatDuration(stats.movieTotalDuration)}</span>
+                        ${stats.movieNeedsOptimization > 0 ? `<span class="mv-stat-warn">${stats.movieNeedsOptimization} ${this.t('analysis.needOptimization')}</span>` : ''}
                     </div>`;
                 }
             }
@@ -10447,9 +14142,7 @@ const App = {
             const allWatched = c.totalCount > 0 && c.ownedCount >= c.totalCount;
             html += `<div class="collection-card" onclick="App.openCollectionDetail(${c.id})">
                 <div class="collection-card-thumb">
-                    ${posterSrc
-                        ? `<img src="${posterSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="collection-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`
-                        : `<span class="collection-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`}
+                    ${this._videoThumbHtml(posterSrc, null, 'collection-card-placeholder')}
                     <span class="collection-count-badge">${c.ownedCount} owned</span>
                     ${allWatched ? `<span class="mv-watched-badge" style="top:8px;left:8px;right:auto"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>COMPLETE</span>` : ''}
                 </div>
@@ -10512,9 +14205,7 @@ const App = {
             const notOwnedOverlay = !owned ? `<div class="collection-not-owned-overlay"><span>Not in Library</span></div>` : '';
             html += `<div class="mv-card mv-card-poster${!owned ? ' collection-not-owned' : ''}" ${cardClick}>
                 <div class="mv-card-thumb mv-poster-thumb">
-                    ${imgSrc
-                        ? `<img src="${imgSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                        : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                    ${this._videoThumbHtml(imgSrc)}
                     ${notOwnedOverlay}
                     ${watchedBadge}
                     ${resLabel ? `<span class="mv-format-badge mv-format-ok">${resLabel}</span>` : ''}
@@ -10647,6 +14338,26 @@ const App = {
         return /[A-Z]/.test(c) ? c : '#';
     },
 
+    // ── Video thumbnail helpers (Point 2 + 3 dedup) ────────────────────────
+    _FILM_SVG: '<svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg>',
+
+    // ── Shared inline icon SVGs (Point 5 + 6 dedup) ─────────────────────────
+    _WARN_SVG: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    _WARN_SVG_SM: '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    _COPY_SVG: '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>',
+
+    _cardSvg(icon) {
+        return `<svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-${icon}"/></svg>`;
+    },
+
+    _videoThumbHtml(url, iconHtml, cls) {
+        const icon = iconHtml ?? this._FILM_SVG;
+        const ph = `<span class="${cls ?? 'mv-card-placeholder'}"${url ? ' style="display:none"' : ''}>${icon}</span>`;
+        return url
+            ? `<img src="${url}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">${ph}`
+            : ph;
+    },
+
     _renderVideoCardHtml(v) {
         const thumbSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : '');
         const hasPoster = !!v.posterPath;
@@ -10656,9 +14367,7 @@ const App = {
         const hdrCls = hdr === 'Dolby Vision' ? 'mv-hdr-dv' : hdr === 'HDR10+' ? 'mv-hdr-plus' : hdr === 'HLG' ? 'mv-hdr-hlg' : '';
         const hdrBadge = hdr ? `<span class="mv-hdr-badge ${hdrCls}">${this.esc(hdr)}</span>` : '';
         const ratingBadge = v.rating > 0 ? `<span class="mv-rating-badge" style="background:${v.rating >= 7 ? 'rgba(39,174,96,.85)' : v.rating >= 5 ? 'rgba(241,196,15,.85)' : 'rgba(231,76,60,.85)'}">${v.rating.toFixed(1)}</span>` : '';
-        const imgHtml = thumbSrc
-            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`
-            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-film"/></svg></span>`;
+        const imgHtml = this._videoThumbHtml(thumbSrc);
         if (v.type === 'series') {
             const epLabel = `${v.episodeCount} Episode${v.episodeCount !== 1 ? 's' : ''}`;
             const seasonLabel = `${v.seasonCount} Season${v.seasonCount !== 1 ? 's' : ''}`;
@@ -10709,9 +14418,7 @@ const App = {
         const hdrCls = hdr === 'Dolby Vision' ? 'mv-hdr-dv' : hdr === 'HDR10+' ? 'mv-hdr-plus' : hdr === 'HLG' ? 'mv-hdr-hlg' : '';
         const hdrBadge = hdr ? `<span class="mv-hdr-badge ${hdrCls}">${this.esc(hdr)}</span>` : '';
         const ratingBadge = v.rating > 0 ? `<span class="mv-rating-badge" style="background:${v.rating >= 7 ? 'rgba(39,174,96,.85)' : 'rgba(241,196,15,.85)'}">${v.rating.toFixed(1)}</span>` : '';
-        const imgHtml = thumbSrc
-            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt=""><span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`;
+        const imgHtml = this._videoThumbHtml(thumbSrc);
         if (v.type === 'series') {
             const epLabel = `${v.episodeCount} Ep${v.episodeCount !== 1 ? 's' : ''}`;
             return `<div class="mv-card mv-card-series${hasPoster ? ' mv-card-poster' : ''}" onclick="App.openSeriesDetail('${this.esc(v.seriesName).replace(/'/g, "\\'")}', 'anime')" data-series="${this.esc(v.seriesName)}">
@@ -10744,6 +14451,33 @@ const App = {
                 <button class="mv-card-menu-btn" onclick="event.stopPropagation(); App.showVideoMenu(${v.id}, 'anime', event)" title="More options">&#8942;</button>
             </div>`;
         }
+    },
+
+    // ── Insights home-card helper (Point 4 dedup) ───────────────────────────
+    _insightsCard(v, opts = {}) {
+        const {
+            imgSrc = v.posterPath ? `/videometa/${v.posterPath}` : (v.thumbnailPath ? `/videothumb/${v.thumbnailPath}` : ''),
+            thumbIcon,
+            thumbCls = 'mv-card-thumb',
+            ratingBadge = '',
+            typeBadge,
+            title = this.esc(v.title || ''),
+            artist = String(v.year || ''),
+            extraInfo = '',
+            extraStyle = ''
+        } = opts;
+        const thumb = this._videoThumbHtml(imgSrc, thumbIcon);
+        const tBadge = typeBadge ?? `<span class="video-type-badge video-type-${v.mediaType}">${
+            v.mediaType === 'tv' ? this.t('insights.tv') : v.mediaType === 'documentary' ? this.t('insights.doc') : v.mediaType === 'anime' ? 'Anime' : this.t('insights.movie')
+        }</span>`;
+        return `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})"${extraStyle ? ` style="${extraStyle}"` : ''}>
+            <div class="${thumbCls}">${thumb}${ratingBadge}${tBadge}
+            </div>
+            <div class="mv-card-info">
+                <div class="mv-card-title">${title}</div>
+                <div class="mv-card-artist">${artist}</div>${extraInfo}
+            </div>
+        </div>`;
     },
 
     // ─── Video: Letter (By Name) view ────────────────────────────────────────
@@ -10891,6 +14625,83 @@ const App = {
             if (s.isScanning) setTimeout(poll, 1000);
         };
         poll();
+    },
+
+    // ─── Dynamic Library Cleanup ─────────────────────────────
+    _buildCleanBreakdown(r) {
+        const parts = [];
+        if (r.tracksRemoved      > 0) parts.push(`${r.tracksRemoved} Music`);
+        if (r.videosRemoved      > 0) parts.push(`${r.videosRemoved} Movies/TV`);
+        if (r.musicVideosRemoved > 0) parts.push(`${r.musicVideosRemoved} Music Videos`);
+        if (r.eBooksRemoved      > 0) parts.push(`${r.eBooksRemoved} eBooks`);
+        if (r.audioBooksRemoved  > 0) parts.push(`${r.audioBooksRemoved} Audiobooks`);
+        if (r.picturesRemoved    > 0) parts.push(`${r.picturesRemoved} Pictures`);
+        return parts.length ? ` (${parts.join(', ')})` : '';
+    },
+
+    async _dynamicCleanRunNow() {
+        const btn = document.getElementById('dynamic-clean-run-btn');
+        const statusEl = document.getElementById('dynamic-clean-status');
+        if (btn) btn.disabled = true;
+        if (statusEl) statusEl.textContent = this.t('settings.dynamicCleanRunning');
+
+        const result = await this.apiPost('dynamic-clean/run-now');
+        if (!result) {
+            if (btn) btn.disabled = false;
+            if (statusEl) statusEl.textContent = '';
+            return;
+        }
+
+        if (result.message === 'already_running') {
+            if (statusEl) statusEl.textContent = this.t('settings.dynamicCleanRunning');
+            this._dynamicCleanPoll();
+            return;
+        }
+
+        this._dynamicCleanPoll();
+    },
+
+    _dynamicCleanPoll() {
+        const poll = async () => {
+            const s = await this.api('dynamic-clean/status');
+            const btn = document.getElementById('dynamic-clean-run-btn');
+            const statusEl = document.getElementById('dynamic-clean-status');
+            if (!s) { if (btn) btn.disabled = false; return; }
+            if (s.isRunning) {
+                if (statusEl) statusEl.textContent = this.t('settings.dynamicCleanRunning');
+                setTimeout(poll, 1500);
+                return;
+            }
+            if (btn) btn.disabled = false;
+            if (statusEl) {
+                if (s.lastResult) {
+                    const r = s.lastResult;
+                    const dt = s.lastRunTime ? new Date(s.lastRunTime).toLocaleTimeString() : '';
+                    const errPart = r.lastError ? ` ⚠ ${r.lastError}` : '';
+                    statusEl.textContent = `${this.t('settings.dynamicCleanLastRun')} ${dt} · ${r.totalRemoved} removed / ${r.totalChecked} checked${this._buildCleanBreakdown(r)} (${r.durationSeconds.toFixed(1)}s)${errPart}`;
+                } else {
+                    statusEl.textContent = this.t('settings.dynamicCleanNeverRun');
+                }
+            }
+        };
+        poll();
+    },
+
+    async _dynamicCleanLoadStatus() {
+        const s = await this.api('dynamic-clean/status');
+        const statusEl = document.getElementById('dynamic-clean-status');
+        if (!s || !statusEl) return;
+        if (s.isRunning) {
+            statusEl.textContent = this.t('settings.dynamicCleanRunning');
+            this._dynamicCleanPoll();
+        } else if (s.lastResult) {
+            const r = s.lastResult;
+            const dt = s.lastRunTime ? new Date(s.lastRunTime).toLocaleTimeString() : '';
+            const errPart2 = r.lastError ? ` ⚠ ${r.lastError}` : '';
+            statusEl.textContent = `${this.t('settings.dynamicCleanLastRun')} ${dt} · ${r.totalRemoved} removed / ${r.totalChecked} checked${this._buildCleanBreakdown(r)} (${r.durationSeconds.toFixed(1)}s)${errPart2}`;
+        } else {
+            statusEl.textContent = this.t('settings.dynamicCleanNeverRun');
+        }
     },
 
     _langCodeToName(code) {
@@ -11203,16 +15014,64 @@ const App = {
                 <svg style="width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-2px;margin-right:5px"><use href="#icon-file-text"/></svg>${this.t('subtitle.fetchSubtitles')}
             </button>
             <span id="subtitle-active-label-${video.id}" class="subtitle-active-label"></span>
+            <span id="subtitle-sync-${video.id}" style="display:none;align-items:center;gap:3px;font-size:11px">
+                <button class="subtitle-sync-btn" onclick="App._adjustSubtitleOffset(${video.id}, -0.5)" title="−0.5s">−½s</button>
+                <span id="subtitle-offset-${video.id}" style="min-width:34px;text-align:center;color:var(--text-secondary)">0.0s</span>
+                <button class="subtitle-sync-btn" onclick="App._adjustSubtitleOffset(${video.id}, 0.5)" title="+0.5s">+½s</button>
+                <button class="subtitle-sync-btn" onclick="App._adjustSubtitleOffset(${video.id}, 0)" title="Reset sync" style="font-size:13px">↺</button>
+            </span>
             <button id="subtitle-off-${video.id}" class="subtitle-off-btn" onclick="App.disableSubtitles(${video.id})" title="Disable subtitles" style="display:none"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="7" cy="7" r="6"/><line x1="4.5" y1="4.5" x2="9.5" y2="9.5"/><line x1="9.5" y1="4.5" x2="4.5" y2="9.5"/></svg></button>
             <div id="subtitle-panel-${video.id}" class="subtitle-panel" style="display:none">
                 <div id="subtitle-embedded-${video.id}" style="display:none">
                     <div class="subtitle-section-label">${this.t('subtitle.builtIn')}</div>
                     <div id="subtitle-embedded-list-${video.id}" class="subtitle-results"></div>
                 </div>
+                <div id="subtitle-sidecar-${video.id}" style="display:none">
+                    <div class="subtitle-section-label">Local Files</div>
+                    <div id="subtitle-sidecar-list-${video.id}" class="subtitle-results"></div>
+                </div>
+                <div id="subtitle-custom-section-${video.id}">
+                    <div class="subtitle-section-label" style="display:flex;align-items:center;justify-content:space-between">
+                        <span>Imported</span>
+                        <button class="subtitle-upload-toggle-btn" onclick="App._toggleCustomUploadForm(${video.id})" style="font-size:11px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-hover);color:var(--text-secondary);cursor:pointer">+ Import SRT</button>
+                    </div>
+                    <div id="subtitle-upload-form-${video.id}" style="display:none;padding:8px 0 4px">
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+                            <input type="file" id="subtitle-file-${video.id}" accept=".srt,.vtt" style="flex:1;min-width:0;font-size:12px">
+                            <select id="subtitle-upload-lang-${video.id}" class="subtitle-lang-select" style="width:auto">
+                                <option value="und">Unknown</option>
+                                <option value="en">English</option>
+                                <option value="id">Indonesian</option>
+                                <option value="fr">Français</option>
+                                <option value="de">Deutsch</option>
+                                <option value="es">Español</option>
+                                <option value="it">Italiano</option>
+                                <option value="pt">Português</option>
+                                <option value="ru">Русский</option>
+                                <option value="pl">Polski</option>
+                                <option value="nl">Nederlands</option>
+                                <option value="sv">Svenska</option>
+                                <option value="ro">Română</option>
+                                <option value="uk">Українська</option>
+                                <option value="ar">العربية</option>
+                                <option value="zh-hans">中文</option>
+                                <option value="ja">日本語</option>
+                                <option value="ko">한국어</option>
+                                <option value="hi">हिन्दी</option>
+                                <option value="th">ภาษาไทย</option>
+                                <option value="vi">Tiếng Việt</option>
+                            </select>
+                            <button class="subtitle-search-btn" onclick="App._uploadCustomSubtitle(${video.id})">Upload</button>
+                        </div>
+                        <div id="subtitle-upload-status-${video.id}" style="font-size:11px;margin-top:4px;color:var(--text-secondary)"></div>
+                    </div>
+                    <div id="subtitle-custom-list-${video.id}" class="subtitle-results"></div>
+                </div>
                 <div class="subtitle-section-label">${this.t('subtitle.online')}</div>
                 <div class="subtitle-panel-inner">
                     <select id="subtitle-lang-${video.id}" class="subtitle-lang-select">
                         <option value="en">English</option>
+                        <option value="id">Indonesian</option>
                         <option value="fr">Français</option>
                         <option value="de">Deutsch</option>
                         <option value="es">Español</option>
@@ -11239,14 +15098,16 @@ const App = {
 
         // ── Video player ──
         html += `<div class="mv-player-container">
-            <video id="video-player" controls autoplay class="mv-player">
+            <video id="video-player" autoplay playsinline class="mv-player">
                 ${!isHLS ? `<source src="/api/stream-video/${video.id}${audioTrack > 0 ? '?audioTrack=' + audioTrack : ''}" type="video/mp4">` : ''}
                 Your browser does not support the video tag.
             </video>
             ${isHLS && streamInfo && streamInfo.transcodeId ? `<div id="transcode-stats-overlay" class="tc-overlay" style="display:none"><div id="tc-stats-text">Starting...</div></div>` : ''}
             ${(video.mediaType === 'tv' || video.mediaType === 'anime') ? `<div id="video-up-next" class="video-up-next"></div>` : ''}
             ${video.mediaType === 'tv' && video.season && video.episode ? `<div id="ep-play-overlay" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:10;text-align:center;transition:opacity .6s"><span style="font-size:44px;font-weight:700;color:#39ff14;text-shadow:0 0 12px rgba(0,0,0,1),0 2px 8px rgba(0,0,0,.9),0 0 24px rgba(57,255,20,.4);letter-spacing:.04em">${this.t('misc.season')} ${video.season}, ${this.t('misc.episode')} ${video.episode}</span></div>` : ''}
-            <button id="skip-intro-btn" class="skip-intro-btn" style="display:none" onclick="App.skipIntro()">${this.t('btn.skipIntro')}</button>`;
+            <button id="skip-intro-btn" class="skip-intro-btn" style="display:none" onclick="App.skipIntro()">${this.t('btn.skipIntro')}</button>
+            <div id="chapters-menu" class="chapters-menu" style="display:none"></div>
+            ${this._videoControlsBarHtml(video.id, video.mediaType, true)}`;
         if (isHLS && streamInfo.transcodeId) {
             this._currentTranscodeId = streamInfo.transcodeId;
         }
@@ -11264,9 +15125,12 @@ const App = {
         el.innerHTML = html;
 
         // Connect EQ to the video player
+        this._castVideoMeta = { title: video.title || 'NexusM', posterPath: video.posterPath };
+        this._castUpdateButtons();
         const videoEl = document.getElementById('video-player');
         if (videoEl) {
             this.connectEQToElement(videoEl);
+            this._setupCustomControls(videoEl);
             if (this._initCfg?.videoThumbnailsEnabled && this._initCfg?.ffmpegAvailable) {
                 this._setupVideoThumbnailPreview(video.id, 'video', videoEl);
             }
@@ -11328,6 +15192,9 @@ const App = {
             this._setupIntroSkipper(video.id);
         }
 
+        // Chapters menu — fetch embedded chapters and set up the jump menu
+        this._setupChapters(video.id);
+
         // If TV or Anime episode, set up "Up Next" auto-play when finished
         if ((video.mediaType === 'tv' || video.mediaType === 'anime') && video.seriesName) {
             this._setupNextEpisode(video);
@@ -11376,21 +15243,23 @@ const App = {
         videoEl.addEventListener('ended', this._traktOnEnded);
     },
 
-    _stopTraktScrobble() {
+    _stopTraktScrobble(videoId) {
         const videoEl = document.getElementById('video-player');
         if (videoEl) {
             if (this._traktOnPlay)  videoEl.removeEventListener('play',  this._traktOnPlay);
             if (this._traktOnPause) videoEl.removeEventListener('pause', this._traktOnPause);
             if (this._traktOnEnded) videoEl.removeEventListener('ended', this._traktOnEnded);
         }
-        // Send a final "stop" if video was playing when we tear down
-        if (this._traktOnPlay) {
+        // Send a final "stop" if video was playing when we tear down.
+        // Use the explicitly passed videoId (from _stopVideoProgressTracking, which saves it
+        // before clearing _progressVideoId) or fall back to _progressVideoId if called directly.
+        const idToScrobble = videoId ?? this._progressVideoId;
+        if (this._traktOnPlay && idToScrobble) {
             const el = document.getElementById('video-player');
             if (el && !el.paused && !el.ended) {
                 const pct = el.duration > 0 && isFinite(el.duration) ? (el.currentTime / el.duration) * 100 : 0;
                 // Fire-and-forget — we're navigating away
-                if (this._progressVideoId)
-                    this.apiPost('trakt/scrobble', { videoId: this._progressVideoId, action: 'stop', progress: Math.round(pct * 10) / 10 }).catch(() => {});
+                this.apiPost('trakt/scrobble', { videoId: idToScrobble, action: 'stop', progress: Math.round(pct * 10) / 10 }).catch(() => {});
             }
         }
         this._traktOnPlay = null;
@@ -11438,6 +15307,340 @@ const App = {
         if (videoEl && this._introEnd) videoEl.currentTime = this._introEnd;
         const btn = document.getElementById('skip-intro-btn');
         if (btn) { btn.style.opacity = '0'; setTimeout(() => { btn.style.display = 'none'; }, 300); }
+    },
+
+    async _setupChapters(videoId) {
+        // Reset any leftover state from a previous video
+        this._chapters = null;
+        const menu = document.getElementById('chapters-menu');
+        if (menu) { menu.style.display = 'none'; menu.innerHTML = ''; }
+        const btn = document.getElementById('chapters-btn');
+        if (btn) btn.style.display = 'none';
+
+        const data = await this.api(`videos/${videoId}/chapters`).catch(() => null);
+        if (!data || !data.hasChapters || !Array.isArray(data.chapters) || data.chapters.length === 0) return;
+
+        this._chapters = data.chapters;
+        if (btn) btn.style.display = '';
+        // Reveal the control bar now that the Chapters button has appeared in it
+        if (this._vpControlsReveal) this._vpControlsReveal();
+
+        // Close the menu when clicking elsewhere
+        if (this._chaptersOutsideHandler) document.removeEventListener('click', this._chaptersOutsideHandler);
+        this._chaptersOutsideHandler = (e) => {
+            const m = document.getElementById('chapters-menu');
+            const b = document.getElementById('chapters-btn');
+            if (m && m.style.display === 'block' && !m.contains(e.target) && b && !b.contains(e.target)) {
+                m.style.display = 'none';
+            }
+        };
+        document.addEventListener('click', this._chaptersOutsideHandler);
+    },
+
+    // Builds the custom control bar markup, shared by the main video player and the
+    // music-video player. `includeChapters` is false for music videos (no chapters).
+    // The cast button id is derived from mediaType so toggleCastVideo() finds it.
+    _videoControlsBarHtml(videoId, mediaType, includeChapters) {
+        const castBtnId = mediaType === 'musicvideo' ? 'mv-cast-btn' : 'video-cast-btn';
+        const chaptersBtn = includeChapters ? `
+                    <button id="chapters-btn" class="vp-ctrl-btn" style="display:none" onclick="App.toggleChaptersMenu()" title="${this.t('player.chapters','Chapters')}">
+                        <svg viewBox="0 0 24 24" width="20" height="20"><use href="#icon-list"/></svg>
+                    </button>` : '';
+        return `<div id="vp-controls" class="vp-controls">
+                <div id="vp-seek" class="vp-seek">
+                    <div class="vp-seek-rail">
+                        <div id="vp-seek-buffered" class="vp-seek-buffered"></div>
+                        <div id="vp-seek-played" class="vp-seek-played"></div>
+                        <div id="vp-seek-handle" class="vp-seek-handle"></div>
+                    </div>
+                </div>
+                <div class="vp-ctrl-row">
+                    <button id="vp-play" class="vp-ctrl-btn" title="${this.t('player.play','Play')}/${this.t('player.pause','Pause')}">
+                        <svg viewBox="0 0 24 24" width="22" height="22"><use href="#icon-play"/></svg>
+                    </button>
+                    <span id="vp-time" class="vp-time">0:00 / 0:00</span>
+                    <div class="vp-ctrl-spacer"></div>
+                    <div class="vp-volume">
+                        <button id="vp-mute" class="vp-ctrl-btn" title="${this.t('player.mute','Mute')}">
+                            <svg viewBox="0 0 24 24" width="20" height="20"><use href="#icon-volume"/></svg>
+                        </button>
+                        <input type="range" id="vp-vol" class="vp-vol-slider" min="0" max="1" step="0.01" value="1" title="${this.t('player.volume','Volume')}">
+                    </div>${chaptersBtn}
+                    <button id="${castBtnId}" class="vp-ctrl-btn cast-btn" style="display:none" onclick="App.toggleCastVideo(${videoId}, '${mediaType}')" title="${this.t('player.cast','Cast')}">
+                        <svg viewBox="0 0 24 24" width="20" height="20"><use href="#icon-cast"/></svg>
+                    </button>
+                    <button id="vp-pip" class="vp-ctrl-btn" style="display:none" title="${this.t('player.pip','Picture in picture')}">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor"/></svg>
+                    </button>
+                    <button id="vp-fs" class="vp-ctrl-btn" title="${this.t('player.fullscreen','Fullscreen')}">
+                        <svg viewBox="0 0 24 24" width="20" height="20"><use href="#icon-maximize"/></svg>
+                    </button>
+                    <div class="vp-more-wrap">
+                        <button id="vp-more" class="vp-ctrl-btn" title="${this.t('player.more','More')}">
+                            <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="12" cy="5" r="1.8" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.8" fill="currentColor" stroke="none"/></svg>
+                        </button>
+                        <div id="vp-more-menu" class="vp-more-menu" style="display:none"></div>
+                    </div>
+                </div>
+            </div>`;
+    },
+
+    // ── Custom video control bar (#vp-controls) ──────────────────────────────
+    // Replaces the browser's native <video controls> so Chapters + Cast can live
+    // inline with play / seek / volume / PiP / fullscreen on a single bar.
+    _setupCustomControls(video) {
+        this._teardownCustomControls();
+        const container = document.querySelector('.mv-player-container');
+        const bar   = document.getElementById('vp-controls');
+        if (!container || !bar || !video) return;
+
+        const $ = (id) => document.getElementById(id);
+        const playBtn = $('vp-play'), playIcon = playBtn && playBtn.querySelector('use');
+        const timeLbl = $('vp-time');
+        const seek = $('vp-seek'), played = $('vp-seek-played'), buffered = $('vp-seek-buffered'), handle = $('vp-seek-handle');
+        const muteBtn = $('vp-mute'), volSlider = $('vp-vol');
+        const pipBtn = $('vp-pip'), fsBtn = $('vp-fs'), fsIcon = fsBtn && fsBtn.querySelector('use');
+        const moreBtn = $('vp-more'), moreMenu = $('vp-more-menu');
+        const fmt = (s) => this.formatDuration(Math.max(0, Math.floor(s || 0)));
+
+        // ── auto-hide (fades the whole bar with the cursor) ──
+        const HIDE_MS = 3000;
+        const reveal = (sticky) => {
+            bar.classList.remove('vp-controls-hidden');
+            container.classList.remove('vp-cursor-hidden');
+            if (this._vpHideTimer) { clearTimeout(this._vpHideTimer); this._vpHideTimer = null; }
+            if (sticky === true) return; // caller wants it pinned (e.g. a menu is open)
+            const menuOpen = (document.getElementById('chapters-menu')?.style.display === 'block') ||
+                             (moreMenu && moreMenu.style.display === 'block');
+            if (video.paused || menuOpen || this._vpSeeking) return;
+            this._vpHideTimer = setTimeout(() => {
+                if (video.paused || this._vpSeeking) return;
+                if (document.getElementById('chapters-menu')?.style.display === 'block') return;
+                if (moreMenu && moreMenu.style.display === 'block') return;
+                bar.classList.add('vp-controls-hidden');
+                container.classList.add('vp-cursor-hidden');
+            }, HIDE_MS);
+        };
+        this._vpControlsReveal = reveal;
+
+        // ── play / pause ──
+        const syncPlayIcon = () => { if (playIcon) playIcon.setAttribute('href', video.paused ? '#icon-play' : '#icon-pause'); };
+        const togglePlay = () => { if (video.paused) video.play().catch(() => {}); else video.pause(); };
+        playBtn && playBtn.addEventListener('click', togglePlay);
+        // Click on the video toggles play/pause (like the native control)
+        const onVideoClick = () => togglePlay();
+        video.addEventListener('click', onVideoClick);
+
+        // ── time + seek bar ──
+        const renderProgress = () => {
+            const d = video.duration;
+            if (d && isFinite(d)) {
+                const pct = (video.currentTime / d) * 100;
+                if (played) played.style.width = pct + '%';
+                if (handle) handle.style.left = pct + '%';
+            }
+            if (timeLbl) timeLbl.textContent = `${fmt(video.currentTime)} / ${(video.duration && isFinite(video.duration)) ? fmt(video.duration) : '0:00'}`;
+        };
+        const renderBuffered = () => {
+            const d = video.duration;
+            if (buffered && d && isFinite(d) && video.buffered.length) {
+                buffered.style.width = Math.min(100, (video.buffered.end(video.buffered.length - 1) / d) * 100) + '%';
+            }
+        };
+        const seekToClientX = (clientX) => {
+            const d = video.duration;
+            if (!d || !isFinite(d) || !seek) return;
+            const r = seek.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+            video.currentTime = pct * d;
+            renderProgress();
+        };
+        const onSeekDown = (e) => {
+            this._vpSeeking = true;
+            seekToClientX(e.touches ? e.touches[0].clientX : e.clientX);
+            const move = (ev) => seekToClientX(ev.touches ? ev.touches[0].clientX : ev.clientX);
+            const up = () => {
+                this._vpSeeking = false;
+                document.removeEventListener('mousemove', move);
+                document.removeEventListener('mouseup', up);
+                document.removeEventListener('touchmove', move);
+                document.removeEventListener('touchend', up);
+                reveal();
+            };
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+            document.addEventListener('touchmove', move, { passive: false });
+            document.addEventListener('touchend', up);
+            e.preventDefault();
+        };
+        seek && seek.addEventListener('mousedown', onSeekDown);
+        seek && seek.addEventListener('touchstart', onSeekDown, { passive: false });
+
+        // ── volume ──
+        const VOL_KEY = 'nexusm_video_volume';
+        const savedVol = parseFloat(localStorage.getItem(VOL_KEY));
+        if (!isNaN(savedVol)) { video.volume = savedVol; if (volSlider) volSlider.value = savedVol; }
+        const syncVolUI = () => {
+            const m = video.muted || video.volume === 0;
+            muteBtn && muteBtn.classList.toggle('vp-muted', m);
+            if (volSlider) volSlider.value = video.muted ? 0 : video.volume;
+        };
+        muteBtn && muteBtn.addEventListener('click', () => { video.muted = !video.muted; syncVolUI(); });
+        volSlider && volSlider.addEventListener('input', () => {
+            video.muted = false;
+            video.volume = parseFloat(volSlider.value);
+            localStorage.setItem(VOL_KEY, video.volume);
+            syncVolUI();
+        });
+
+        // ── Picture-in-Picture (hidden when unsupported) ──
+        if (pipBtn && document.pictureInPictureEnabled && typeof video.requestPictureInPicture === 'function') {
+            pipBtn.style.display = '';
+            pipBtn.addEventListener('click', async () => {
+                try {
+                    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+                    else await video.requestPictureInPicture();
+                } catch (_) {}
+            });
+        }
+
+        // ── fullscreen ──
+        const syncFsIcon = () => { if (fsIcon) fsIcon.setAttribute('href', document.fullscreenElement ? '#icon-x' : '#icon-maximize'); };
+        fsBtn && fsBtn.addEventListener('click', () => {
+            if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+            else container.requestFullscreen().catch(() => {});
+        });
+        this._vpFsHandler = syncFsIcon;
+        document.addEventListener('fullscreenchange', syncFsIcon);
+
+        // ── overflow menu (playback speed) ──
+        const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+        const buildMoreMenu = () => {
+            if (!moreMenu) return;
+            moreMenu.innerHTML = `<div class="vp-more-head">${this.t('player.speed', 'Playback speed')}</div>` +
+                RATES.map(r => `<button class="vp-more-item${video.playbackRate === r ? ' active' : ''}" onclick="App._vpSetRate(${r})">${r === 1 ? this.t('player.normal', 'Normal') : r + '×'}</button>`).join('');
+        };
+        moreBtn && moreBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!moreMenu) return;
+            if (moreMenu.style.display === 'block') { moreMenu.style.display = 'none'; reveal(); return; }
+            buildMoreMenu();
+            moreMenu.style.display = 'block';
+            reveal(true);
+        });
+        this._vpBuildMoreMenu = buildMoreMenu;
+        // close the overflow menu on an outside click
+        this._vpDocClick = (e) => {
+            if (moreMenu && moreMenu.style.display === 'block' &&
+                !moreMenu.contains(e.target) && moreBtn && !moreBtn.contains(e.target)) {
+                moreMenu.style.display = 'none';
+                reveal();
+            }
+        };
+        document.addEventListener('click', this._vpDocClick);
+
+        // ── activity / state listeners ──
+        this._vpOnTimeUpdate = renderProgress;
+        this._vpOnProgress = renderBuffered;
+        this._vpOnPlayPause = () => { syncPlayIcon(); reveal(); };
+        this._vpOnVolChange = syncVolUI;
+        video.addEventListener('timeupdate', renderProgress);
+        video.addEventListener('progress', renderBuffered);
+        video.addEventListener('loadedmetadata', renderProgress);
+        video.addEventListener('durationchange', renderProgress);
+        video.addEventListener('play', this._vpOnPlayPause);
+        video.addEventListener('pause', this._vpOnPlayPause);
+        video.addEventListener('volumechange', syncVolUI);
+
+        this._vpReveal = reveal;
+        this._vpContainer = container;
+        this._vpVideo = video;
+        container.addEventListener('mousemove', reveal);
+        container.addEventListener('touchstart', reveal, { passive: true });
+
+        // ── keyboard (only when the player has focus, never while typing or in a modal) ──
+        this._vpKeyHandler = (e) => {
+            if (!document.getElementById('vp-controls')) return;
+            const tag = (e.target.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
+            // Only react when the keypress targets the player (body = nothing focused, or inside the
+            // player container). This avoids hijacking Space/arrows while a modal button is focused.
+            if (e.target !== document.body && !container.contains(e.target)) return;
+            switch (e.key) {
+                case ' ': case 'k': e.preventDefault(); togglePlay(); break;
+                case 'ArrowRight': video.currentTime = Math.min((video.duration || 0), video.currentTime + 5); reveal(); break;
+                case 'ArrowLeft':  video.currentTime = Math.max(0, video.currentTime - 5); reveal(); break;
+                case 'f': if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else container.requestFullscreen().catch(() => {}); break;
+                case 'm': video.muted = !video.muted; syncVolUI(); break;
+                default: return;
+            }
+        };
+        document.addEventListener('keydown', this._vpKeyHandler);
+
+        // initial paint
+        syncPlayIcon(); syncVolUI(); syncFsIcon(); renderProgress(); renderBuffered();
+        reveal();
+    },
+
+    _vpSetRate(rate) {
+        // use whichever element the bar currently controls (main video OR music video)
+        const v = this._vpVideo || document.getElementById('video-player');
+        if (v) v.playbackRate = rate;
+        if (this._vpBuildMoreMenu) this._vpBuildMoreMenu();
+        const menu = document.getElementById('vp-more-menu');
+        if (menu) menu.style.display = 'none';
+        if (this._vpControlsReveal) this._vpControlsReveal();
+    },
+
+    _teardownCustomControls() {
+        if (this._vpHideTimer) { clearTimeout(this._vpHideTimer); this._vpHideTimer = null; }
+        if (this._vpFsHandler) { document.removeEventListener('fullscreenchange', this._vpFsHandler); this._vpFsHandler = null; }
+        if (this._vpKeyHandler) { document.removeEventListener('keydown', this._vpKeyHandler); this._vpKeyHandler = null; }
+        if (this._vpDocClick) { document.removeEventListener('click', this._vpDocClick); this._vpDocClick = null; }
+        if (this._vpContainer && this._vpReveal) {
+            this._vpContainer.removeEventListener('mousemove', this._vpReveal);
+            this._vpContainer.removeEventListener('touchstart', this._vpReveal);
+        }
+        this._vpContainer = null; this._vpVideo = null; this._vpReveal = null;
+        this._vpControlsReveal = null; this._vpBuildMoreMenu = null; this._vpSeeking = false;
+    },
+
+    _fmtChapterTime(sec) {
+        sec = Math.max(0, Math.floor(sec));
+        const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+        const pad = (n) => String(n).padStart(2, '0');
+        return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    },
+
+    toggleChaptersMenu() {
+        const menu = document.getElementById('chapters-menu');
+        if (!menu || !this._chapters) return;
+        if (menu.style.display === 'block') { menu.style.display = 'none'; return; }
+
+        const videoEl = document.getElementById('video-player');
+        const cur = videoEl ? videoEl.currentTime : 0;
+        // Highlight the chapter currently playing (last chapter whose start <= cur)
+        let activeIdx = -1;
+        this._chapters.forEach((c, i) => { if (cur >= c.start) activeIdx = i; });
+
+        menu.innerHTML = this._chapters.map((c, i) => `
+            <button class="chapters-menu-item${i === activeIdx ? ' active' : ''}" onclick="App.jumpToChapter(${i})">
+                <span class="chapters-menu-time">${this._fmtChapterTime(c.start)}</span>
+                <span class="chapters-menu-title">${this.esc(c.title || (this.t('player.chapters','Chapters') + ' ' + (i + 1)))}</span>
+            </button>`).join('');
+        menu.style.display = 'block';
+        // Keep the control bar visible while the menu is open
+        if (this._vpControlsReveal) this._vpControlsReveal(true);
+    },
+
+    jumpToChapter(idx) {
+        const videoEl = document.getElementById('video-player');
+        if (videoEl && this._chapters && this._chapters[idx]) {
+            videoEl.currentTime = this._chapters[idx].start;
+            videoEl.play().catch(() => {});
+        }
+        const menu = document.getElementById('chapters-menu');
+        if (menu) menu.style.display = 'none';
     },
 
     _renderEpisodeNavBar(prev, next) {
@@ -11532,8 +15735,10 @@ const App = {
         if (!panel) return;
         const isOpen = panel.style.display !== 'none';
         panel.style.display = isOpen ? 'none' : 'block';
-        if (!isOpen && hasEmbedded) {
-            this._loadEmbeddedSubtitles(videoId);
+        if (!isOpen) {
+            if (hasEmbedded) this._loadEmbeddedSubtitles(videoId);
+            this._loadSidecarSubtitles(videoId);
+            this._loadCustomSubtitles(videoId);
         }
     },
 
@@ -11571,23 +15776,7 @@ const App = {
         if (rowEl) rowEl.innerHTML = `<span>${this.t('subtitle.downloading')}</span>`;
 
         const vttUrl = `/api/subtitles/embedded/${videoId}/${trackIndex}`;
-        const videoEl = document.getElementById('video-player');
-        if (videoEl) {
-            videoEl.querySelectorAll('track[data-nexusm]').forEach(t => t.remove());
-            const track = document.createElement('track');
-            track.kind = 'subtitles';
-            track.srclang = 'und';
-            track.label = label;
-            track.setAttribute('data-nexusm', '1');
-            videoEl.appendChild(track);
-            const tt = videoEl.textTracks[videoEl.textTracks.length - 1];
-            if (tt) tt.mode = 'showing';
-            track.src = vttUrl + '?t=' + Date.now();
-        }
-        const labelEl = document.getElementById(`subtitle-active-label-${videoId}`);
-        if (labelEl) labelEl.textContent = label;
-        const offBtn = document.getElementById(`subtitle-off-${videoId}`);
-        if (offBtn) offBtn.style.display = '';
+        await this._injectSubtitleTrack(videoId, vttUrl, label, 'und');
         const panel = document.getElementById(`subtitle-panel-${videoId}`);
         if (panel) panel.style.display = 'none';
         if (rowEl) { rowEl.innerHTML = prevText; rowEl.classList.remove('loading'); }
@@ -11639,32 +15828,7 @@ const App = {
             return;
         }
 
-        // Inject or replace <track> in the video player
-        const videoEl = document.getElementById('video-player');
-        if (videoEl) {
-            // Remove existing managed tracks
-            videoEl.querySelectorAll('track[data-nexusm]').forEach(t => t.remove());
-
-            const track = document.createElement('track');
-            track.kind = 'subtitles';
-            track.srclang = language;
-            track.label = language.toUpperCase();
-            track.setAttribute('data-nexusm', '1');
-            videoEl.appendChild(track);
-
-            // Set mode immediately (before src so track is in textTracks list)
-            const tt = videoEl.textTracks[videoEl.textTracks.length - 1];
-            if (tt) tt.mode = 'showing';
-
-            // Now set src — browser loads the VTT; mode is already 'showing'
-            track.src = data.vttUrl + '?t=' + Date.now();
-        }
-
-        // Update the active label and close panel
-        const labelEl = document.getElementById(`subtitle-active-label-${videoId}`);
-        if (labelEl) labelEl.textContent = language.toUpperCase();
-        const offBtn = document.getElementById(`subtitle-off-${videoId}`);
-        if (offBtn) offBtn.style.display = '';
+        await this._injectSubtitleTrack(videoId, data.vttUrl, language.toUpperCase(), language);
         const panel = document.getElementById(`subtitle-panel-${videoId}`);
         if (panel) panel.style.display = 'none';
         if (rowEl) { rowEl.innerHTML = prevText; rowEl.classList.remove('loading'); }
@@ -11673,13 +15837,206 @@ const App = {
     disableSubtitles(videoId) {
         const videoEl = document.getElementById('video-player');
         if (videoEl) {
-            videoEl.querySelectorAll('track[data-nexusm]').forEach(t => t.remove());
+            videoEl.querySelectorAll('track[data-nexusm]').forEach(t => {
+                if (t.src && t.src.startsWith('blob:')) URL.revokeObjectURL(t.src);
+                t.remove();
+            });
             for (const track of videoEl.textTracks) track.mode = 'disabled';
         }
+        this._subCurrentVttUrl = null;
+        this._subOffsetSec = 0;
         const labelEl = document.getElementById(`subtitle-active-label-${videoId}`);
         if (labelEl) labelEl.textContent = '';
         const offBtn = document.getElementById(`subtitle-off-${videoId}`);
         if (offBtn) offBtn.style.display = 'none';
+        const syncEl = document.getElementById(`subtitle-sync-${videoId}`);
+        if (syncEl) syncEl.style.display = 'none';
+        const offsetEl = document.getElementById(`subtitle-offset-${videoId}`);
+        if (offsetEl) offsetEl.textContent = '0.0s';
+    },
+
+    // ── Subtitle core: inject track with optional time offset ────────────────
+    async _injectSubtitleTrack(videoId, vttUrl, label, srclang) {
+        this._subCurrentVttUrl = vttUrl;
+        this._subCurrentLabel = label;
+        this._subCurrentSrclang = srclang || 'und';
+        this._subCurrentVideoId = videoId;
+        if (!this._subOffsetSec) this._subOffsetSec = 0;
+
+        let trackSrc;
+        if (this._subOffsetSec !== 0) {
+            try {
+                const resp = await fetch(vttUrl + (vttUrl.includes('?') ? '&' : '?') + 't=' + Date.now());
+                const vttText = await resp.text();
+                const shifted = this._shiftVttTimestamps(vttText, this._subOffsetSec);
+                const blob = new Blob([shifted], { type: 'text/vtt' });
+                trackSrc = URL.createObjectURL(blob);
+            } catch (e) {
+                trackSrc = vttUrl + '?t=' + Date.now();
+            }
+        } else {
+            trackSrc = vttUrl + '?t=' + Date.now();
+        }
+
+        const videoEl = document.getElementById('video-player');
+        if (videoEl) {
+            videoEl.querySelectorAll('track[data-nexusm]').forEach(t => {
+                if (t.src && t.src.startsWith('blob:')) URL.revokeObjectURL(t.src);
+                t.remove();
+            });
+            const track = document.createElement('track');
+            track.kind = 'subtitles';
+            track.srclang = srclang || 'und';
+            track.label = label;
+            track.setAttribute('data-nexusm', '1');
+            videoEl.appendChild(track);
+            const tt = videoEl.textTracks[videoEl.textTracks.length - 1];
+            if (tt) tt.mode = 'showing';
+            track.src = trackSrc;
+        }
+        const labelEl = document.getElementById(`subtitle-active-label-${videoId}`);
+        if (labelEl) labelEl.textContent = label;
+        const offBtn = document.getElementById(`subtitle-off-${videoId}`);
+        if (offBtn) offBtn.style.display = '';
+        const syncEl = document.getElementById(`subtitle-sync-${videoId}`);
+        if (syncEl) syncEl.style.display = 'flex';
+    },
+
+    async _adjustSubtitleOffset(videoId, offsetSecOrReset) {
+        if (offsetSecOrReset === 0) {
+            this._subOffsetSec = 0;
+        } else {
+            this._subOffsetSec = (this._subOffsetSec || 0) + offsetSecOrReset;
+        }
+        const offsetEl = document.getElementById(`subtitle-offset-${videoId}`);
+        if (offsetEl) offsetEl.textContent = (this._subOffsetSec >= 0 ? '+' : '') + this._subOffsetSec.toFixed(1) + 's';
+        if (this._subCurrentVttUrl)
+            await this._injectSubtitleTrack(videoId, this._subCurrentVttUrl, this._subCurrentLabel, this._subCurrentSrclang);
+    },
+
+    _shiftVttTimestamps(vttText, offsetSec) {
+        const offsetMs = Math.round(offsetSec * 1000);
+        return vttText.replace(/(\d{2}:)?(\d{2}):(\d{2})\.(\d{3})/g, (_, h, m, s, ms) => {
+            let total = ((h ? parseInt(h) * 3600 : 0) + parseInt(m) * 60 + parseInt(s)) * 1000 + parseInt(ms);
+            total = Math.max(0, total + offsetMs);
+            const nh = Math.floor(total / 3600000);
+            const nm = Math.floor((total % 3600000) / 60000);
+            const ns = Math.floor((total % 60000) / 1000);
+            const nms = total % 1000;
+            const p = (n, w) => String(n).padStart(w, '0');
+            return nh > 0
+                ? `${p(nh,2)}:${p(nm,2)}:${p(ns,2)}.${p(nms,3)}`
+                : `${p(nm,2)}:${p(ns,2)}.${p(nms,3)}`;
+        });
+    },
+
+    // ── Sidecar subtitle detection ───────────────────────────────────────────
+    async _loadSidecarSubtitles(videoId) {
+        const listEl = document.getElementById(`subtitle-sidecar-list-${videoId}`);
+        const sectionEl = document.getElementById(`subtitle-sidecar-${videoId}`);
+        if (!listEl || !sectionEl || listEl.dataset.loaded) return;
+        const data = await this.api(`videos/${videoId}/subtitles/sidecar`).catch(() => null);
+        if (!data || !data.sidecars || data.sidecars.length === 0) return;
+        listEl.dataset.loaded = '1';
+        sectionEl.style.display = 'block';
+        let html = '';
+        for (const s of data.sidecars) {
+            html += `<div class="subtitle-result-row" onclick="App._applySidecarSubtitle(${videoId}, '${this.esc(s.fileName)}', '${this.esc(s.label)}', this)">
+                <span class="subtitle-prov-tag">SRT</span>
+                <span class="subtitle-filename">${this.esc(s.label)}</span>
+            </div>`;
+        }
+        listEl.innerHTML = html;
+    },
+
+    async _applySidecarSubtitle(videoId, fileName, label, rowEl) {
+        document.querySelectorAll('.subtitle-result-row').forEach(r => r.classList.remove('selected'));
+        if (rowEl) rowEl.classList.add('selected', 'loading');
+        const prev = rowEl ? rowEl.innerHTML : '';
+        if (rowEl) rowEl.innerHTML = `<span>${this.t('subtitle.downloading')}</span>`;
+        this._subOffsetSec = 0;
+        await this._injectSubtitleTrack(videoId, `/api/subtitles/sidecar/${videoId}/${encodeURIComponent(fileName)}`, label, 'und');
+        const panel = document.getElementById(`subtitle-panel-${videoId}`);
+        if (panel) panel.style.display = 'none';
+        if (rowEl) { rowEl.innerHTML = prev; rowEl.classList.remove('loading'); }
+    },
+
+    // ── Custom (uploaded) subtitle management ────────────────────────────────
+    async _loadCustomSubtitles(videoId) {
+        const listEl = document.getElementById(`subtitle-custom-list-${videoId}`);
+        if (!listEl) return;
+        const data = await this.api(`videos/${videoId}/subtitles/custom`).catch(() => null);
+        if (!data) return;
+        if (!data.subtitles || data.subtitles.length === 0) { listEl.innerHTML = ''; return; }
+        let html = '';
+        for (const s of data.subtitles) {
+            html += `<div class="subtitle-result-row" style="display:flex;align-items:center;gap:4px">
+                <span style="flex:1;display:flex;align-items:center;gap:4px;cursor:pointer" onclick="App._applyCustomSubtitle(${videoId}, '${this.esc(s.vttUrl)}', '${this.esc(s.label)}', this.closest('.subtitle-result-row'))">
+                    <span class="subtitle-prov-tag">${s.language.toUpperCase()}</span>
+                    <span class="subtitle-filename">${this.esc(s.label)}</span>
+                </span>
+                <button onclick="App._deleteCustomSubtitle(${videoId}, ${s.id}, this.closest('.subtitle-result-row'))" title="Remove" style="flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--text-secondary);padding:2px 4px;font-size:13px">✕</button>
+            </div>`;
+        }
+        listEl.innerHTML = html;
+    },
+
+    async _applyCustomSubtitle(videoId, vttUrl, label, rowEl) {
+        document.querySelectorAll('.subtitle-result-row').forEach(r => r.classList.remove('selected'));
+        if (rowEl) rowEl.classList.add('selected');
+        this._subOffsetSec = 0;
+        await this._injectSubtitleTrack(videoId, vttUrl, label, 'und');
+        const panel = document.getElementById(`subtitle-panel-${videoId}`);
+        if (panel) panel.style.display = 'none';
+    },
+
+    async _deleteCustomSubtitle(videoId, subtitleId, rowEl) {
+        if (rowEl) rowEl.style.opacity = '0.4';
+        const ok = await this.apiDelete(`videos/${videoId}/subtitles/custom/${subtitleId}`).catch(() => null);
+        if (ok) {
+            if (rowEl) rowEl.remove();
+        } else {
+            if (rowEl) rowEl.style.opacity = '';
+        }
+    },
+
+    _toggleCustomUploadForm(videoId) {
+        const form = document.getElementById(`subtitle-upload-form-${videoId}`);
+        if (form) form.style.display = form.style.display === 'none' ? 'block' : 'none';
+    },
+
+    async _uploadCustomSubtitle(videoId) {
+        const fileInput = document.getElementById(`subtitle-file-${videoId}`);
+        const langSelect = document.getElementById(`subtitle-upload-lang-${videoId}`);
+        const statusEl = document.getElementById(`subtitle-upload-status-${videoId}`);
+        if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+            if (statusEl) statusEl.textContent = 'Please select a file first.';
+            return;
+        }
+        const file = fileInput.files[0];
+        if (statusEl) statusEl.textContent = 'Uploading…';
+
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('language', langSelect ? langSelect.value : 'und');
+        fd.append('label', langSelect ? (langSelect.options[langSelect.selectedIndex]?.text || '') : '');
+
+        try {
+            const resp = await fetch(`/api/videos/${videoId}/subtitles/custom`, {
+                method: 'POST',
+                body: fd,
+                credentials: 'include'
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            if (statusEl) statusEl.textContent = 'Uploaded successfully.';
+            fileInput.value = '';
+            // Reload the custom list
+            const listEl = document.getElementById(`subtitle-custom-list-${videoId}`);
+            if (listEl) delete listEl.dataset.loaded;
+            await this._loadCustomSubtitles(videoId);
+        } catch (e) {
+            if (statusEl) statusEl.textContent = 'Upload failed. ' + e.message;
+        }
     },
 
     async _setupVideoProgressTracking(videoId) {
@@ -11737,14 +16094,18 @@ const App = {
     _stopVideoProgressTracking() {
         clearInterval(this._videoProgressInterval);
         this._videoProgressInterval = null;
+        // Save the video ID before clearing it — _stopTraktScrobble() needs it to send
+        // the final "stop" scrobble, but it checks _progressVideoId which would already
+        // be null by the time it runs.
+        const savedVideoId = this._progressVideoId;
         const player = document.getElementById('video-player');
         if (player) {
             // Final save before stopping so navigation never loses the current position
-            if (this._progressVideoId) {
+            if (savedVideoId) {
                 const pos = player.currentTime;
                 const dur = player.duration;
                 if (pos > 0 && isFinite(dur) && dur > 0) {
-                    fetch(`/api/videos/${this._progressVideoId}/progress`, {
+                    fetch(`/api/videos/${savedVideoId}/progress`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ position: pos, duration: dur })
@@ -11757,8 +16118,120 @@ const App = {
         this._onVideoProgressPause = null;
         this._onVideoProgressEnded = null;
         this._progressVideoId = null;
-        // Also clean up Trakt scrobble listeners
-        this._stopTraktScrobble();
+        // Pass the saved video ID so the final Trakt "stop" can still be sent
+        this._stopTraktScrobble(savedVideoId);
+    },
+
+    // ── Hero Video Preview methods ───────────────────────────────────────
+
+    _vpreviewPollTimer: null,
+
+    async _vpreviewStartScan() {
+        const startBtn  = document.getElementById('vpreview-start-btn');
+        const stopBtn   = document.getElementById('vpreview-stop-btn');
+        const statusText = document.getElementById('vpreview-status-text');
+        const statusRow  = document.getElementById('vpreview-status-row');
+        if (startBtn) { startBtn.disabled = true; startBtn.textContent = this.t('settings.videoPreviewsScanning'); }
+        if (statusRow)  statusRow.style.display = '';
+        if (statusText) statusText.textContent = this.t('settings.videoPreviewsScanning');
+        try {
+            await this.apiPost('vpreviews/start', {});
+            if (startBtn) startBtn.style.display = 'none';
+            if (stopBtn)  stopBtn.style.display  = '';
+            this._vpreviewStartPolling();
+        } catch(e) {
+            if (startBtn) {
+                startBtn.disabled = false;
+                startBtn.textContent = this.t('settings.videoPreviewsStartScan');
+            }
+            const msg = e?.responseJSON?.error || e?.message || 'Failed to start scan';
+            if (statusText) statusText.textContent = `Error: ${msg}`;
+            this.showToast(msg, 'error');
+        }
+    },
+
+    async _vpreviewStopScan() {
+        const stopBtn = document.getElementById('vpreview-stop-btn');
+        if (stopBtn) stopBtn.disabled = true;
+        try { await this.apiPost('vpreviews/stop', {}); } catch(e) { /* ignore */ }
+        this._vpreviewStopPolling();
+        const startBtn = document.getElementById('vpreview-start-btn');
+        if (startBtn) { startBtn.style.display = ''; startBtn.disabled = false; startBtn.textContent = this.t('settings.videoPreviewsStartScan'); }
+        if (stopBtn)  { stopBtn.style.display = 'none'; stopBtn.disabled = false; }
+        this._vpreviewPollStatus();
+    },
+
+    async _vpreviewClearAll() {
+        const clearBtn = document.getElementById('vpreview-clear-btn');
+        if (!confirm(this.t('settings.videoPreviewsClearConfirm', 'Delete all generated preview clips? This cannot be undone.'))) return;
+        if (clearBtn) { clearBtn.disabled = true; clearBtn.textContent = '...'; }
+        try {
+            const r = await this.apiDelete('vpreviews/all');
+            if (!r) throw new Error('Delete failed');
+            this._vpreviewStopPolling();
+            this._vpreviewPollStatus();
+            this.showToast(`${r.deleted} preview clip${r.deleted === 1 ? '' : 's'} deleted`, 'success');
+        } catch(e) {
+            this.showToast('Failed to clear previews', 'error');
+        } finally {
+            if (clearBtn) { clearBtn.disabled = false; clearBtn.textContent = this.t('settings.videoPreviewsClearAll', 'Clear All'); }
+        }
+    },
+
+    _vpreviewStartPolling() {
+        this._vpreviewStopPolling();
+        this._vpreviewPollTimer = setInterval(() => this._vpreviewPollStatus(), 3000);
+        this._vpreviewPollStatus();
+    },
+
+    _vpreviewStopPolling() {
+        if (this._vpreviewPollTimer) {
+            clearInterval(this._vpreviewPollTimer);
+            this._vpreviewPollTimer = null;
+        }
+    },
+
+    async _vpreviewPollStatus() {
+        try {
+            const s = await this.api('vpreviews/status');
+            const statusRow  = document.getElementById('vpreview-status-row');
+            const statusText = document.getElementById('vpreview-status-text');
+            const startBtn   = document.getElementById('vpreview-start-btn');
+            const stopBtn    = document.getElementById('vpreview-stop-btn');
+
+            // Always show the status row so the user sees what's happening
+            if (statusRow) statusRow.style.display = '';
+
+            if (statusText) {
+                if (s.scanning) {
+                    const pct = s.total > 0 ? Math.round(s.generated / s.total * 100) : 0;
+                    const fname = s.currentItem ? s.currentItem.replace(/^.*[\\/]/, '') : '';
+                    const detail = fname ? ` — ${fname}` : '';
+                    const errHint = s.lastError ? ` ⚠ ${s.lastError}` : '';
+                    statusText.textContent = `${this.t('settings.videoPreviewsScanning')} ${s.generated} / ${s.total} (${pct}%)${detail}${errHint}`;
+                } else if (s.lastError) {
+                    statusText.textContent = `Error: ${s.lastError}`;
+                } else if (!s.ffmpegAvailable) {
+                    statusText.textContent = 'FFmpeg not available';
+                } else if (s.total > 0) {
+                    statusText.textContent = `${s.generated} / ${s.total} ${this.t('settings.videoPreviewsGenerated')}`;
+                } else {
+                    statusText.textContent = this.t('settings.videoPreviewsNotStarted');
+                }
+            }
+
+            if (!s.scanning) {
+                this._vpreviewStopPolling();
+                if (startBtn) { startBtn.style.display = ''; startBtn.disabled = false; startBtn.textContent = this.t('settings.videoPreviewsStartScan'); }
+                if (stopBtn)  { stopBtn.style.display = 'none'; stopBtn.disabled = false; }
+            } else {
+                if (startBtn) startBtn.style.display = 'none';
+                if (stopBtn)  { stopBtn.style.display = ''; stopBtn.disabled = false; }
+                // Keep polling while scanning
+                if (!this._vpreviewPollTimer)
+                    this._vpreviewStartPolling();
+            }
+        } catch(e) { /* ignore transient network errors */ }
     },
 
     // ── Video seek-preview thumbnail methods ────────────────────────────
@@ -11796,20 +16269,25 @@ const App = {
         const totalSpriteW = cols * frameW;
         const totalSpriteH = rows * frameH;
 
-        this._thumbMouseMove = (e) => {
-            const rect = container.getBoundingClientRect();
-            const relX = e.clientX - rect.left;
-            const relY = e.clientY - rect.top;
+        // Custom control bar (#vp-seek) → track the seek bar precisely.
+        // Native-controls players (music video) → fall back to the bottom-60px zone.
+        const seekBar = document.getElementById('vp-seek');
+        const hoverTarget = seekBar || container;
 
-            // Only show tooltip when cursor is in the native controls zone (bottom 60px)
-            if (relY < rect.height - 60) {
-                tooltip.style.display = 'none';
-                return;
-            }
-
+        const showAt = (clientX) => {
+            const cRect = container.getBoundingClientRect();
             if (!videoEl.duration || !isFinite(videoEl.duration)) return;
 
-            const pct      = Math.max(0, Math.min(1, relX / rect.width));
+            let pct, relX;
+            if (seekBar) {
+                const sRect = seekBar.getBoundingClientRect();
+                pct  = Math.max(0, Math.min(1, (clientX - sRect.left) / sRect.width));
+                relX = (sRect.left - cRect.left) + pct * sRect.width;
+            } else {
+                relX = clientX - cRect.left;
+                pct  = Math.max(0, Math.min(1, relX / cRect.width));
+            }
+
             const t        = pct * videoEl.duration;
             const frameIdx = Math.min(Math.floor(t / interval), totalFrames - 1);
             const col      = frameIdx % cols;
@@ -11822,16 +16300,25 @@ const App = {
 
             // Clamp so tooltip (160px wide + 4px padding each side = ~168px) stays inside container
             const half   = 84;
-            const leftPx = Math.max(half, Math.min(rect.width - half, relX));
+            const leftPx = Math.max(half, Math.min(cRect.width - half, relX));
             tooltip.style.left    = leftPx + 'px';
             tooltip.style.display = '';
         };
 
+        this._thumbMouseMove = (e) => {
+            // For native-controls players, only show in the bottom control zone
+            if (!seekBar) {
+                const rect = container.getBoundingClientRect();
+                if ((e.clientY - rect.top) < rect.height - 60) { tooltip.style.display = 'none'; return; }
+            }
+            showAt(e.clientX);
+        };
+
         this._thumbMouseLeave = () => { if (tooltip) tooltip.style.display = 'none'; };
 
-        container.addEventListener('mousemove',  this._thumbMouseMove);
-        container.addEventListener('mouseleave', this._thumbMouseLeave);
-        this._thumbBarWrap = container;
+        hoverTarget.addEventListener('mousemove',  this._thumbMouseMove);
+        hoverTarget.addEventListener('mouseleave', this._thumbMouseLeave);
+        this._thumbBarWrap = hoverTarget;
     },
 
     _teardownVideoThumbnailPreview() {
@@ -11967,7 +16454,8 @@ const App = {
             } catch(e) { return ''; }
         };
 
-        const seriesBackBtn = `<button class="filter-chip" onclick="App.navigate('tvshows')">&laquo; ${this.t('btn.backToTvShows')}</button>`;
+        const _isAnime = mediaType === 'anime';
+        const seriesBackBtn = `<button class="filter-chip" onclick="App.navigate('${_isAnime ? 'anime' : 'tvshows'}')">&laquo; ${_isAnime ? this.t('btn.backToAnime', 'Back to Anime') : this.t('btn.backToTvShows')}</button>`;
         const seriesSubInfo = `${seasonNums.length} Season${seasonNums.length !== 1 ? 's' : ''} &middot; ${episodes.length} Episode${episodes.length !== 1 ? 's' : ''} &middot; ${this.formatDuration(totalDuration)}`;
 
         let html = '';
@@ -12215,12 +16703,15 @@ const App = {
             case 'albums':   await this._renderAlbumsPage(el); break;
             case 'timeline': await this._renderPicturesTimeline(el); break;
             case 'map':      await this._renderPicturesMap(el); break;
+            case 'places':   await this._renderPicturesPlaces(el); break;
+            case 'memories': await this._renderPicturesMemories(el); break;
             default:         await this.loadPicturesPage(el); break;
         }
     },
 
     setPicturesView(view) {
         this._currentAlbumId = null;
+        this._picturesPlace = null;
         const prev = this.picturesView;
         this.picturesView = view;
         // Cleanup map
@@ -12244,16 +16735,20 @@ const App = {
             case 'albums':   this._renderAlbumsPage(mc); break;
             case 'timeline': this._renderPicturesTimeline(mc); break;
             case 'map':      this._renderPicturesMap(mc); break;
+            case 'places':   this._renderPicturesPlaces(mc); break;
+            case 'memories': this._renderPicturesMemories(mc); break;
             default:         this.loadPicturesPage(mc); break;
         }
     },
 
     _picViewTabsHtml() {
         const tabs = [
-            { view: 'grid',     icon: 'icon-image',   label: this.t('pictures.viewGrid') },
-            { view: 'albums',   icon: 'icon-folder',  label: this.t('pictures.albums') },
-            { view: 'timeline', icon: 'icon-clock',   label: this.t('pictures.viewTimeline') },
-            { view: 'map',      icon: 'icon-map-pin', label: this.t('pictures.viewMap') },
+            { view: 'grid',     icon: 'icon-image',    label: this.t('pictures.viewGrid') },
+            { view: 'albums',   icon: 'icon-folder',   label: this.t('pictures.albums') },
+            { view: 'timeline', icon: 'icon-clock',    label: this.t('pictures.viewTimeline') },
+            { view: 'map',      icon: 'icon-map-pin',  label: this.t('pictures.viewMap') },
+            { view: 'places',   icon: 'icon-globe',    label: this.t('pictures.viewPlaces', 'Places') },
+            { view: 'memories', icon: 'icon-star',     label: this.t('pictures.viewMemories') },
         ];
         const active = this._currentAlbumId != null ? 'albums' : (this.picturesView || 'grid');
         return `<div class="pic-view-tabs">`
@@ -12262,8 +16757,8 @@ const App = {
     },
 
     _picSortIconsHtml(hasCategories) {
-        const sortIcons = { recent: 'clock', name: 'az', date: 'calendar', size: 'layers' };
-        const sortTitles = { recent: this.t('sort.recent'), name: this.t('sort.name'), date: this.t('sort.dateTaken'), size: this.t('sort.size') };
+        const sortIcons = { recent: 'clock', name: 'az', size: 'layers' };
+        const sortTitles = { recent: this.t('sort.recent'), name: this.t('sort.name'), size: this.t('sort.size') };
         let h = Object.entries(sortTitles).map(([key, label]) =>
             `<button class="vid-sort-icon${this.picturesSort === key ? ' active' : ''}" title="${label}" onclick="App.changePicturesSort('${key}')"><svg><use href="#icon-${sortIcons[key]}"/></svg></button>`
         ).join('');
@@ -12512,6 +17007,30 @@ const App = {
         await this._renderAlbumView(document.getElementById('main-content'), albumId);
     },
 
+    _picRawExts: new Set(['cr2','cr3','crw','nef','nrw','arw','srf','sr2','dng','orf','rw2','raf','srw','pef','x3f','3fr','mef','mrw','dcr','kdc','raw']),
+
+    _picRawExtension(fileName) {
+        const ext = (fileName || '').split('.').pop().toLowerCase();
+        return this._picRawExts.has(ext) ? ext.toUpperCase() : null;
+    },
+
+    _picRawBadgeColor(ext) {
+        const map = {
+            CR2:'#c53030', CR3:'#c53030', CRW:'#c53030',
+            NEF:'#b7791f', NRW:'#b7791f',
+            ARW:'#2b6cb0', SRF:'#2b6cb0', SR2:'#2b6cb0',
+            DNG:'#0694a2',
+            RAF:'#276749',
+            ORF:'#c05621',
+            RW2:'#553c9a',
+            SRW:'#0987a0',
+            PEF:'#2c7a7b',
+            X3F:'#744210',
+            RAW:'#1a365d',
+        };
+        return map[ext] || '#4a5568';
+    },
+
     _picDragStart(event, mediaId, mediaType) {
         event.dataTransfer.setData('text/plain', JSON.stringify({ mediaId, mediaType }));
         event.currentTarget.classList.add('dragging');
@@ -12589,10 +17108,14 @@ const App = {
             data-pic-id="${mediaId}" data-pic-type="picture"
             ondragstart="App._picDragStart(event,${mediaId},'picture')"
             ondragend="this.classList.remove('dragging')"
-            onclick="App.openPictureViewer(${mediaId})">
+            onclick="App.openPictureViewer(${mediaId})"
+            ${pic.isLivePhoto ? `onmouseenter="App._picLiveThumbPlay(this)" onmouseleave="App._picLiveThumbStop(this)"` : ''}>
             <div class="picture-card-thumb">
                 <img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
                 <span class="picture-card-placeholder" style="display:none">&#128247;</span>
+                ${pic.is360 ? `<span class="pic-360-badge">360°</span>` : ''}
+                ${pic.isLivePhoto ? `<span class="pic-live-badge">LIVE</span><video class="pic-live-hover-video" muted loop playsinline style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover"></video>` : ''}
+                ${(() => { const r = this._picRawExtension(pic.fileName); return r ? `<span class="pic-raw-badge" style="background:${this._picRawBadgeColor(r)}">${r}</span>` : ''; })()}
             </div>
             <div class="picture-card-info">
                 <div class="picture-card-name">${this.esc(pic.fileName)}</div>
@@ -12808,15 +17331,16 @@ const App = {
         // null = no filter, "" = uncategorized sentinel (__none__), string = exact match
         const _catParamVal = this.picturesCategory === '' ? '__none__' : this.picturesCategory;
         const _catParam = this.picturesCategory !== null ? `&category=${encodeURIComponent(_catParamVal)}` : '';
-        const picUrl = `pictures?limit=${this.picturesPerPage}&page=${this.picturesPage}&sort=${this.picturesSort}` + _catParam;
+        const _placeParam = this._picturesPlace ? `&place=${encodeURIComponent(this._picturesPlace)}` : '';
+        const picUrl = `pictures?limit=${this.picturesPerPage}&page=${this.picturesPage}&sort=${this.picturesSort}` + _catParam + _placeParam;
         const vidUrl = `picture-videos?limit=${this.picturesPerPage}&page=${this.picturesPage}&sort=${this.picturesSort}` + _catParam;
 
         const mt = this.picturesMediaType;
         const [picData, vidData, picCats, vidCats] = await Promise.all([
-            mt !== 'videos'   ? this.api(picUrl)                       : Promise.resolve({ pictures: [], total: 0 }),
-            mt !== 'pictures' ? this.api(vidUrl)                       : Promise.resolve({ videos: [],   total: 0 }),
-            mt !== 'videos'   ? this.api('pictures/categories')        : Promise.resolve([]),
-            mt !== 'pictures' ? this.api('picture-videos/categories')  : Promise.resolve([]),
+            mt !== 'videos'                        ? this.api(picUrl)                       : Promise.resolve({ pictures: [], total: 0 }),
+            mt !== 'pictures' && !this._picturesPlace ? this.api(vidUrl)                    : Promise.resolve({ videos: [],   total: 0 }),
+            mt !== 'videos'                        ? this.api('pictures/categories')        : Promise.resolve([]),
+            mt !== 'pictures' && !this._picturesPlace ? this.api('picture-videos/categories') : Promise.resolve([]),
         ]);
 
         if (!picData && !vidData) { target.innerHTML = this.emptyState('Error', 'Could not load media.'); return; }
@@ -12843,10 +17367,21 @@ const App = {
 
         // ── Controls panel (never scrolls) ────────────────────────────
         let ctrl = `<div class="pic-controls-panel">`;
-        ctrl += `<div class="page-header" style="margin-bottom:10px"><h1>${this.t('page.pictures')}</h1>
-            <div style="display:flex;align-items:center;gap:6px;margin-left:auto">`;
-        ctrl += this._picMediaTypeChipsHtml();
-        ctrl += `<span style="width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`;
+        if (this._picturesPlace) {
+            ctrl += `<div class="page-header" style="margin-bottom:10px">
+                <div style="display:flex;align-items:center;gap:10px">
+                    <button class="btn-secondary" style="padding:4px 10px;font-size:12px;display:flex;align-items:center;gap:4px" onclick="App._clearPlaceFilter()">
+                        <svg style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.5"><use href="#icon-chevron-left"/></svg>${this.t('pictures.backToPlaces','Back to Places')}
+                    </button>
+                    <h1>${this.esc(this._picturesPlace)}</h1>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;margin-left:auto">`;
+        } else {
+            ctrl += `<div class="page-header" style="margin-bottom:10px"><h1>${this.t('page.pictures')}</h1>
+                <div style="display:flex;align-items:center;gap:6px;margin-left:auto">`;
+            ctrl += this._picMediaTypeChipsHtml();
+            ctrl += `<span style="width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`;
+        }
         ctrl += this._picSortIconsHtml(categories.length > 0);
         ctrl += `<span style="width:1px;height:18px;background:var(--border);margin:0 2px;flex-shrink:0"></span>`;
         ctrl += this._picViewTabsHtml();
@@ -12981,10 +17516,14 @@ const App = {
                     data-pic-id="${pic.id}" data-pic-type="picture"
                     ondragstart="App._picDragStart(event,${pic.id},'picture')"
                     ondragend="this.classList.remove('dragging')"
-                    onclick="App.openPictureViewer(${pic.id})">
+                    onclick="App.openPictureViewer(${pic.id})"
+                    ${pic.isLivePhoto ? `onmouseenter="App._picLiveThumbPlay(this)" onmouseleave="App._picLiveThumbStop(this)"` : ''}>
                     <div class="picture-card-thumb">
                         <img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
                         <span class="picture-card-placeholder" style="display:none">&#128247;</span>
+                        ${pic.is360 ? `<span class="pic-360-badge">360°</span>` : ''}
+                        ${pic.isLivePhoto ? `<span class="pic-live-badge">LIVE</span><video class="pic-live-hover-video" muted loop playsinline style="display:none;position:absolute;inset:0;width:100%;height:100%;object-fit:cover"></video>` : ''}
+                        ${(() => { const r = this._picRawExtension(pic.fileName); return r ? `<span class="pic-raw-badge" style="background:${this._picRawBadgeColor(r)}">${r}</span>` : ''; })()}
                     </div>
                     <div class="picture-card-info">
                         <div class="picture-card-name">${this.esc(pic.fileName)}</div>
@@ -13274,6 +17813,99 @@ const App = {
         mc.addEventListener('scroll', this._picScrollHandler, { passive: true });
     },
 
+    // ─── Pictures: Places View ───────────────────────────────
+    async _renderPicturesPlaces(target) {
+        target = target || document.getElementById('main-content');
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
+        target.innerHTML = `<div style="text-align:center;padding:60px"><div class="spinner"></div></div>`;
+
+        const [places, status] = await Promise.all([
+            this.api('pictures/places'),
+            this.api('pictures/resolve-places/status'),
+        ]);
+
+        const busy = status?.inProgress || status?.geoDownloading;
+
+        let ctrl = `<div class="pic-controls-panel" style="padding:16px 24px">`;
+        ctrl += `<div class="page-header" style="margin-bottom:0"><h1>${this.t('page.pictures')}</h1>`;
+        ctrl += `<div style="margin-left:auto;display:flex;align-items:center;gap:8px">`;
+        if (busy) {
+            const msg = status?.geoDownloading
+                ? (status.geoStatus || 'Downloading geodata…')
+                : `${this.t('pictures.resolving','Resolving…')} ${status.resolved}/${status.total}`;
+            ctrl += `<span id="places-resolve-status" style="font-size:12px;color:var(--text-secondary)">${this.esc(msg)}</span>`;
+        } else {
+            ctrl += `<button class="btn-secondary" style="font-size:12px;padding:5px 10px;display:flex;align-items:center;gap:5px" title="Offline geodata bundled — no internet required" onclick="App._resolvePlaces()">
+                <svg style="width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2"><use href="#icon-globe"/></svg>${this.t('pictures.resolve','Resolve Locations')}
+            </button>`;
+        }
+        ctrl += this._picViewTabsHtml();
+        ctrl += `</div></div></div>`;
+
+        let grid = `<div class="pic-grid-panel">`;
+        if (!places || places.length === 0) {
+            grid += this.emptyState(
+                this.t('pictures.noPlaces', 'No places found'),
+                this.t('pictures.noPlacesDesc', "Photos with GPS data will be grouped by city. Click 'Resolve Locations' to start.")
+            );
+        } else {
+            grid += `<div class="places-grid">`;
+            places.forEach(place => {
+                const thumb = place.thumbnailPath ? `/picthumb/${place.thumbnailPath}` : null;
+                const safeName = this.esc(place.name).replace(/'/g, "\\'");
+                grid += `<div class="place-card" onclick="App._openPlace('${safeName}')">`;
+                if (thumb) {
+                    grid += `<img class="place-card-img" src="${thumb}" alt="${this.esc(place.name)}" loading="lazy">`;
+                } else {
+                    grid += `<div class="place-card-fallback"><svg style="width:36px;height:36px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-map-pin"/></svg></div>`;
+                }
+                grid += `<div class="place-card-overlay">
+                    <div class="place-card-name">${this.esc(place.name)}</div>
+                    <div class="place-card-count">${place.count} photo${place.count === 1 ? '' : 's'}</div>
+                </div></div>`;
+            });
+            grid += `</div>`;
+        }
+        grid += `</div>`;
+
+        target.innerHTML = ctrl + grid;
+
+        if (busy) this._pollResolvePlaces();
+    },
+
+    _openPlace(name) {
+        this._picturesPlace = name;
+        this.picturesView = 'grid';
+        this.picturesPage = 1;
+        this.loadPicturesPage(document.getElementById('main-content'));
+    },
+
+    _clearPlaceFilter() {
+        this._picturesPlace = null;
+        this.picturesView = 'places';
+        this._renderPicturesPlaces(document.getElementById('main-content'));
+    },
+
+    async _resolvePlaces() {
+        await this.apiPost('pictures/resolve-places', {});
+        this._renderPicturesPlaces(document.getElementById('main-content'));
+    },
+
+    async _pollResolvePlaces() {
+        const status = await this.api('pictures/resolve-places/status');
+        if (!status) return;
+        const el = document.getElementById('places-resolve-status');
+        if (status.geoDownloading) {
+            if (el) el.textContent = status.geoStatus || 'Downloading geodata…';
+            setTimeout(() => this._pollResolvePlaces(), 3000);
+        } else if (status.inProgress) {
+            if (el) el.textContent = `${this.t('pictures.resolving', 'Resolving…')} ${status.resolved}/${status.total}`;
+            setTimeout(() => this._pollResolvePlaces(), 2000);
+        } else {
+            this._renderPicturesPlaces(document.getElementById('main-content'));
+        }
+    },
+
     // ─── Pictures: Map View ───────────────────────────────
     async _renderPicturesMap(target) {
         target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
@@ -13333,6 +17965,137 @@ const App = {
         try { map.fitBounds(cluster.getBounds().pad(0.1)); } catch(e) {}
     },
 
+    // ─── Pictures: 360° Pannellum Viewer ─────────────────
+    async _loadPannellumScripts() {
+        if (window.pannellum) return;
+        const addCSS = href => {
+            if (!document.querySelector(`link[href="${href}"]`)) {
+                const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = href;
+                document.head.appendChild(l);
+            }
+        };
+        const loadJS = src => new Promise((res, rej) => {
+            const s = document.createElement('script'); s.src = src;
+            s.onload = res; s.onerror = () => rej(new Error('Failed to load ' + src));
+            document.head.appendChild(s);
+        });
+        addCSS('/css/pannellum.css');
+        await loadJS('/js/pannellum.js');
+    },
+
+    async _initPannellum(pictureId) {
+        const container = document.getElementById('pic-pannellum-container');
+        if (!container) return;
+        // Destroy existing viewer
+        if (this._pannellumViewer) {
+            try { this._pannellumViewer.destroy(); } catch(e) {}
+            this._pannellumViewer = null;
+            container.innerHTML = '';
+        }
+        // Show container, hide flat image; enlarge modal for panorama
+        container.style.display = '';
+        const img = document.getElementById('picture-modal-img');
+        if (img) img.style.display = 'none';
+        document.querySelector('.picture-modal')?.classList.add('pic-360-mode');
+
+        try {
+            await this._loadPannellumScripts();
+        } catch(e) {
+            container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-secondary);font-size:13px;text-align:center;padding:20px">Could not load 360° viewer.<br>Check internet connection.</div>`;
+            return;
+        }
+
+        this._pannellumViewer = window.pannellum.viewer(container, {
+            type: 'equirectangular',
+            panorama: `/api/image/${pictureId}`,
+            autoLoad: true,
+            showFullscreenCtrl: false,
+            showZoomCtrl: false,
+            compass: false,
+            mouseZoom: true,
+        });
+    },
+
+    _destroyPannellum() {
+        if (!this._pannellumViewer) return;
+        try { this._pannellumViewer.destroy(); } catch(e) {}
+        this._pannellumViewer = null;
+        const container = document.getElementById('pic-pannellum-container');
+        if (container) { container.innerHTML = ''; container.style.display = 'none'; }
+        const img = document.getElementById('picture-modal-img');
+        if (img) img.style.display = '';
+        document.querySelector('.picture-modal')?.classList.remove('pic-360-mode');
+    },
+
+    // ─── Pictures: Memories View ─────────────────────────
+    async _renderPicturesMemories(target) {
+        target = target || document.getElementById('main-content');
+        target.style.cssText = 'display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0';
+
+        const ctrl = `<div class="pic-controls-panel" style="padding:16px 24px">
+            <div class="page-header" style="margin-bottom:0"><h1>${this.t('page.pictures')}</h1><div style="margin-left:auto">${this._picViewTabsHtml()}</div></div>
+        </div>`;
+
+        target.innerHTML = ctrl + `<div class="pic-grid-panel" id="pic-grid-panel"><div style="display:flex;align-items:center;gap:10px;padding:32px 0;color:var(--text-secondary);font-size:13px">
+            <span class="spinner" style="width:18px;height:18px;border-width:2px"></span> ${this.t('pictures.viewMemories')}&hellip;</div></div>`;
+
+        const data = await this.api('pictures/memories');
+        const panel = document.getElementById('pic-grid-panel');
+        if (!panel) return;
+
+        if (!data || !data.groups || data.groups.length === 0) {
+            panel.innerHTML = this.emptyState(this.t('pictures.memoriesNone'), this.t('pictures.memoriesNoneDesc'));
+            return;
+        }
+
+        let html = '';
+        data.groups.forEach(group => {
+            let groupLabel;
+            if (group.bracket === 1) {
+                groupLabel = `${group.year} &middot; ${this.t('pictures.memories1Year')}`;
+            } else if (group.bracket === 0) {
+                groupLabel = this.t('pictures.memoriesOlder');
+            } else {
+                groupLabel = `${group.year} &middot; ${this.t('pictures.memoriesYears').replace('{n}', group.bracket)}`;
+            }
+            const shown = group.pictures.length;
+            const extra = group.count - shown;
+
+            html += `<div class="pic-memories-group">`;
+            html += `<div class="pic-memories-group-header">
+                <span class="pic-memories-group-title">${groupLabel}</span>
+                <span class="pic-memories-group-count">${group.count} photo${group.count === 1 ? '' : 's'}</span>
+            </div>`;
+            html += `<div class="pic-memories-strip">`;
+            group.pictures.forEach(pic => {
+                const thumb = pic.thumbnailPath ? `/picthumb/${pic.thumbnailPath}` : `/api/picthumb/${pic.id}`;
+                const dt = pic.dateTaken ? new Date(pic.dateTaken) : null;
+                const dateStr = dt ? dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+                html += `<div class="pic-memories-card" onclick="App.openPictureViewer('${pic.id}')" title="${this.esc(pic.fileName)}">
+                    <img src="${thumb}" alt="${this.esc(pic.fileName)}" loading="lazy">
+                    ${dateStr ? `<div class="pic-memories-card-date">${dateStr}</div>` : ''}
+                </div>`;
+            });
+            if (extra > 0) {
+                html += `<div class="pic-memories-card pic-memories-more" onclick="App._openMemoriesYear(${group.year}, ${group.bracket})">
+                    <span>+${extra}</span>
+                </div>`;
+            }
+            html += `</div></div>`;
+        });
+
+        panel.innerHTML = html;
+    },
+
+    _openMemoriesYear(year, bracket) {
+        this.picturesView = 'timeline';
+        this.picturesCategory = null;
+        this._memoriesYear = year;
+        this._memoriesBracket = bracket;
+        const mc = document.getElementById('main-content');
+        this._renderPicturesTimeline(mc);
+    },
+
     async _loadLeafletScripts() {
         if (window.L && window.L.markerClusterGroup) return;
         const addCSS = href => {
@@ -13360,9 +18123,13 @@ const App = {
     _picIds: [],
     _picCurrentIndex: -1,
     _picCurrentMeta: null,
+    _pannellumViewer: null,
 
     _buildPicDetailRows(metadata) {
         return [
+            metadata.is360 ? `<div class="setting-row"><span class="setting-label">Type</span><span class="setting-value" style="display:flex;align-items:center;gap:5px"><span class="pic-360-badge" style="position:static;font-size:11px">360°</span> Photosphere</span></div>` : '',
+            metadata.isLivePhoto ? `<div class="setting-row"><span class="setting-label">Type</span><span class="setting-value" style="display:flex;align-items:center;gap:5px"><span class="pic-live-badge" style="position:static;font-size:11px">LIVE</span> Live Photo</span></div>` : '',
+            (() => { const r = this._picRawExtension(metadata.fileName); return r ? `<div class="setting-row"><span class="setting-label">Type</span><span class="setting-value" style="display:flex;align-items:center;gap:5px"><span class="pic-raw-badge" style="position:static;font-size:11px;background:${this._picRawBadgeColor(r)}">${r}</span> RAW Camera File</span></div>` : ''; })(),
             `<div class="setting-row setting-row-col"><span class="setting-label">Filename</span><span class="setting-value" style="word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.4">${this.esc(metadata.fileName)}</span></div>`,
             `<div class="setting-row"><span class="setting-label">Dimensions</span><span class="setting-value">${metadata.width} x ${metadata.height}</span></div>`,
             `<div class="setting-row"><span class="setting-label">Size</span><span class="setting-value">${this.formatSize(metadata.sizeBytes)}</span></div>`,
@@ -13381,6 +18148,118 @@ const App = {
             (metadata.gpsLat != null && metadata.gpsLon != null) ? `<div class="setting-row"><span class="setting-label">Location</span><span class="setting-value" style="display:flex;align-items:center;gap:6px">${metadata.gpsLat.toFixed(5)}, ${metadata.gpsLon.toFixed(5)} <a href="https://www.openstreetmap.org/?mlat=${metadata.gpsLat}&mlon=${metadata.gpsLon}#map=15/${metadata.gpsLat}/${metadata.gpsLon}" target="_blank" rel="noopener" style="color:var(--accent);font-size:11px;text-decoration:none;flex-shrink:0">&nearr; OSM</a></span></div>` : '',
             `<div class="setting-row"><span class="setting-label">Added</span><span class="setting-value">${new Date(metadata.dateAdded).toLocaleString()}</span></div>`
         ].filter(Boolean).join('');
+    },
+
+    _picShowExifEdit() {
+        const meta = this._picCurrentMeta;
+        if (!meta) return;
+        // Ensure sidebar is open
+        const sidebar = document.getElementById('pic-sidebar');
+        if (sidebar) sidebar.classList.remove('collapsed');
+        const body = document.getElementById('pic-metadata-body');
+        if (!body) return;
+        if (body.style.display === 'none') body.style.display = '';
+
+        // Format dateTaken for datetime-local input (no timezone conversion — EXIF is local time)
+        let dtValue = '';
+        if (meta.dateTaken) {
+            const s = meta.dateTaken.replace('Z', '').replace(/\.\d+$/, '');
+            dtValue = s.substring(0, 16); // "YYYY-MM-DDTHH:MM"
+        }
+
+        const inp = (id, label, type, val, extra = '') =>
+            `<div class="pic-exif-row">
+                <label class="pic-exif-label">${label}</label>
+                <input id="${id}" type="${type}" class="pic-exif-input" value="${this.esc(String(val ?? ''))}" ${extra}>
+            </div>`;
+
+        body.innerHTML = `
+            <div class="pic-exif-edit-section">${this.t('pictures.editExifDateLoc', 'Date & Location')}</div>
+            ${inp('pef-dateTaken', 'Date Taken', 'datetime-local', dtValue)}
+            ${inp('pef-gpsLat', 'GPS Latitude', 'number', meta.gpsLat ?? '', 'step="0.000001" min="-90" max="90" placeholder="e.g. 48.8566"')}
+            ${inp('pef-gpsLon', 'GPS Longitude', 'number', meta.gpsLon ?? '', 'step="0.000001" min="-180" max="180" placeholder="e.g. 2.3522"')}
+            <div class="pic-exif-row">
+                <label class="pic-exif-label"></label>
+                <button class="pic-exif-clear-gps" onclick="App._picClearGpsFields()">${this.t('pictures.editExifClearGps', 'Clear GPS')}</button>
+            </div>
+            <div class="pic-exif-edit-section" style="margin-top:10px">${this.t('pictures.editExifCamera', 'Camera Info')}</div>
+            ${inp('pef-cameraMake',  'Make',      'text', meta.cameraMake  ?? '')}
+            ${inp('pef-cameraModel', 'Model',     'text', meta.cameraModel ?? '')}
+            ${inp('pef-lensModel',   'Lens',      'text', meta.lensModel   ?? '')}
+            ${inp('pef-isoSpeed',    'ISO Speed', 'number', meta.isoSpeed ?? '', 'min="0" max="65535"')}
+            ${inp('pef-software',    'Software',  'text', meta.software    ?? '')}
+            <div class="pic-exif-edit-actions">
+                <button class="btn-secondary" onclick="App._picCancelExifEdit()">${this.t('pictures.editExifCancel')}</button>
+                <button class="btn-primary" id="pef-save-btn" onclick="App._picSaveExifEdit()">${this.t('pictures.editExifSave')}</button>
+            </div>
+            <div id="pef-status" style="font-size:11px;margin-top:8px;min-height:16px"></div>`;
+    },
+
+    _picClearGpsFields() {
+        const lat = document.getElementById('pef-gpsLat');
+        const lon = document.getElementById('pef-gpsLon');
+        if (lat) lat.value = '';
+        if (lon) lon.value = '';
+    },
+
+    _picCancelExifEdit() {
+        const body = document.getElementById('pic-metadata-body');
+        if (body) body.innerHTML = this._buildPicDetailRows(this._picCurrentMeta);
+    },
+
+    async _picSaveExifEdit() {
+        const meta = this._picCurrentMeta;
+        if (!meta) return;
+        const btn = document.getElementById('pef-save-btn');
+        const status = document.getElementById('pef-status');
+        if (btn) { btn.disabled = true; btn.textContent = '…'; }
+
+        const dtVal  = document.getElementById('pef-dateTaken')?.value;
+        const latVal = document.getElementById('pef-gpsLat')?.value;
+        const lonVal = document.getElementById('pef-gpsLon')?.value;
+
+        const latEmpty = latVal === '' || latVal === null;
+        const lonEmpty = lonVal === '' || lonVal === null;
+        const hadGps   = meta.gpsLat != null && meta.gpsLon != null;
+        const clearGps = hadGps && latEmpty && lonEmpty;
+
+        const payload = {
+            dateTaken:   dtVal  ? dtVal + ':00' : null,
+            gpsLat:      (!latEmpty && !lonEmpty) ? parseFloat(latVal) : null,
+            gpsLon:      (!latEmpty && !lonEmpty) ? parseFloat(lonVal) : null,
+            clearGps,
+            cameraMake:  document.getElementById('pef-cameraMake')?.value  || null,
+            cameraModel: document.getElementById('pef-cameraModel')?.value || null,
+            lensModel:   document.getElementById('pef-lensModel')?.value   || null,
+            isoSpeed:    document.getElementById('pef-isoSpeed')?.value ? parseInt(document.getElementById('pef-isoSpeed').value) : null,
+            software:    document.getElementById('pef-software')?.value    || null,
+        };
+
+        const result = await this.apiPut(`pictures/${meta.id}/metadata`, payload);
+        if (btn) btn.disabled = false;
+
+        if (!result) {
+            if (btn) btn.textContent = this.t('pictures.editExifSave');
+            if (status) { status.textContent = this.t('pictures.editExifError'); status.style.color = 'var(--color-error, #e74c3c)'; }
+            return;
+        }
+
+        // Update cached metadata and switch back to view mode
+        this._picCurrentMeta = result;
+        const body = document.getElementById('pic-metadata-body');
+        if (body) body.innerHTML = this._buildPicDetailRows(result);
+
+        // Show backup/saved notice
+        let msg = this.t('pictures.editExifSaved');
+        if (result.backupCreated && result.backupName)
+            msg += ' · ' + this.t('pictures.editExifBackup') + ': ' + result.backupName;
+        else if (!result.fileUpdated)
+            msg += ' · ' + this.t('pictures.editExifDbOnly');
+        this.showToast(msg, 4000);
+
+        // Refresh the modal title in case filename changed
+        const title = document.querySelector('.picture-modal-title');
+        if (title) title.textContent = result.fileName;
     },
 
     _updatePicNav() {
@@ -13412,20 +18291,28 @@ const App = {
 
         // If modal already open, update in-place (no flash, keeps fullscreen)
         if (existingModal) {
-            const img = document.getElementById('picture-modal-img');
-            if (img) {
-                img.src = `/api/image/${metadata.id}`;
-                img.alt = this.esc(metadata.fileName);
-                img.classList.remove('zoomed');
+            if (metadata.is360) {
+                this._initPannellum(metadata.id);
+            } else {
+                this._destroyPannellum();
+                const img = document.getElementById('picture-modal-img');
+                if (img) {
+                    img.src = `/api/image/${metadata.id}`;
+                    img.alt = this.esc(metadata.fileName);
+                    img.classList.remove('zoomed');
+                }
             }
             const title = existingModal.querySelector('.picture-modal-title');
             if (title) title.textContent = metadata.fileName;
             const metaBody = document.getElementById('pic-metadata-body');
             if (metaBody) metaBody.innerHTML = this._buildPicDetailRows(metadata);
+            const btn360 = document.getElementById('pic-btn-360');
+            if (btn360) btn360.classList.toggle('active', !!metadata.is360);
+            this._destroyLiveVideo();
+            const btnLive = document.getElementById('pic-btn-live');
+            if (btnLive) btnLive.style.display = metadata.isLivePhoto ? '' : 'none';
             this._updatePicNav();
-            // Restart autoplay timer to reset the 3s countdown
             if (this._picAutoplay) this._startPicAutoplay();
-            // Update keyboard handler
             if (this._pictureModalKeyHandler) document.removeEventListener('keydown', this._pictureModalKeyHandler);
             this._pictureModalKeyHandler = (e) => {
                 if (e.key === 'Escape') this.closePictureViewer();
@@ -13440,7 +18327,7 @@ const App = {
         const detailRows = this._buildPicDetailRows(metadata);
 
         let html = `<div class="picture-modal-overlay" onclick="App.closePictureViewer(event)">
-            <div class="picture-modal" onclick="event.stopPropagation()">
+            <div class="picture-modal${metadata.is360 ? ' pic-360-mode' : ''}" onclick="event.stopPropagation()">
                 <div class="picture-modal-header">
                     <span class="picture-modal-title">${this.esc(metadata.fileName)}</span>
                     <div class="picture-modal-actions">
@@ -13457,6 +18344,15 @@ const App = {
                         <button class="pic-action-btn" id="pic-btn-details" title="Image Details" onclick="App.togglePicDetails()">
                             <svg><use href="#icon-list"/></svg>
                         </button>
+                        <button class="pic-action-btn${metadata.isLivePhoto ? '' : ''}" id="pic-btn-live" title="Live Photo" onclick="App._picToggleLive()" style="${metadata.isLivePhoto ? '' : 'display:none'}">
+                            <span style="font-size:10px;font-weight:700;letter-spacing:.5px;color:#4ade80">LIVE</span>
+                        </button>
+                        <button class="pic-action-btn${metadata.is360 ? ' active' : ''}" id="pic-btn-360" title="Toggle 360° view" onclick="App._picToggle360()">
+                            <span style="font-size:10px;font-weight:700;letter-spacing:.5px">360°</span>
+                        </button>
+                        <button class="pic-action-btn" id="pic-btn-edit-exif" title="${this.t('pictures.editExif')}" onclick="App._picShowExifEdit()">
+                            <svg><use href="#icon-edit"/></svg>
+                        </button>
                     </div>
                     <button class="picture-modal-close" onclick="App.closePictureViewer()">&times;</button>
                 </div>
@@ -13464,7 +18360,9 @@ const App = {
                     <div class="picture-modal-image-container" id="pic-image-area">
                         <button class="picture-nav-btn picture-nav-prev" onclick="event.stopPropagation(); App.picGoPrev()" style="${currentIndex > 0 ? '' : 'display:none'}">&lsaquo;</button>
                         <img src="/api/image/${metadata.id}" class="picture-modal-image" id="picture-modal-img" alt="${this.esc(metadata.fileName)}"
-                             ondblclick="this.classList.toggle('zoomed')">
+                             ondblclick="this.classList.toggle('zoomed')" style="${metadata.is360 ? 'display:none' : ''}">
+                        <div id="pic-pannellum-container" style="position:absolute;inset:0;${metadata.is360 ? '' : 'display:none'}"></div>
+                        <video id="pic-live-video" muted loop playsinline style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none;background:#000"></video>
                         <button class="picture-nav-btn picture-nav-next" onclick="event.stopPropagation(); App.picGoNext()" style="${currentIndex < picIds.length - 1 ? '' : 'display:none'}">&rsaquo;</button>
                     </div>
                     <div class="picture-modal-sidebar collapsed" id="pic-sidebar">
@@ -13484,6 +18382,7 @@ const App = {
 
         document.body.insertAdjacentHTML('beforeend', html);
 
+        if (metadata.is360) this._initPannellum(metadata.id);
         if (this._picAutoplay) this._startPicAutoplay();
 
         if (this._pictureModalKeyHandler) {
@@ -13575,11 +18474,86 @@ const App = {
         if (event && event.target !== event.currentTarget) return;
         this._stopPicAutoplay();
         this._picAutoplay = false;
+        this._destroyPannellum();
+        this._destroyLiveVideo();
         document.querySelector('.picture-modal-overlay')?.remove();
         if (this._pictureModalKeyHandler) {
             document.removeEventListener('keydown', this._pictureModalKeyHandler);
             this._pictureModalKeyHandler = null;
         }
+    },
+
+    async _picToggle360() {
+        const meta = this._picCurrentMeta;
+        if (!meta) return;
+        const result = await this.apiPost(`pictures/${meta.id}/toggle360`, {});
+        if (!result) return;
+        meta.is360 = result.is360;
+        const btn = document.getElementById('pic-btn-360');
+        if (btn) btn.classList.toggle('active', result.is360);
+        // Update details sidebar
+        const metaBody = document.getElementById('pic-metadata-body');
+        if (metaBody) metaBody.innerHTML = this._buildPicDetailRows(meta);
+        // Switch viewer mode
+        if (result.is360) {
+            this._initPannellum(meta.id);
+        } else {
+            this._destroyPannellum();
+            const img = document.getElementById('picture-modal-img');
+            if (img) { img.src = `/api/image/${meta.id}`; img.style.display = ''; }
+        }
+    },
+
+    _picToggleLive() {
+        const video = document.getElementById('pic-live-video');
+        const img = document.getElementById('picture-modal-img');
+        const btn = document.getElementById('pic-btn-live');
+        if (!video) return;
+        const isShowing = video.style.display !== 'none';
+        if (isShowing) {
+            video.pause();
+            video.style.display = 'none';
+            if (img) img.style.display = '';
+            if (btn) btn.classList.remove('active');
+        } else {
+            const meta = this._picCurrentMeta;
+            if (meta && !video.src) video.src = `/api/pictures/${meta.id}/live-video`;
+            if (img) img.style.display = 'none';
+            video.style.display = '';
+            video.play().catch(() => {});
+            if (btn) btn.classList.add('active');
+        }
+    },
+
+    _destroyLiveVideo() {
+        const video = document.getElementById('pic-live-video');
+        if (!video) return;
+        video.pause();
+        video.src = '';
+        video.style.display = 'none';
+        const btn = document.getElementById('pic-btn-live');
+        if (btn) btn.classList.remove('active');
+        const img = document.getElementById('picture-modal-img');
+        if (img && img.style.display === 'none' && !document.getElementById('pic-pannellum-container')?.offsetParent)
+            img.style.display = '';
+    },
+
+    _picLiveThumbPlay(card) {
+        const video = card.querySelector('.pic-live-hover-video');
+        if (!video) return;
+        if (!video.src) {
+            const id = card.dataset.picId;
+            video.src = `/api/pictures/${id}/live-video`;
+        }
+        video.style.display = '';
+        video.play().catch(() => {});
+    },
+
+    _picLiveThumbStop(card) {
+        const video = card.querySelector('.pic-live-hover-video');
+        if (!video) return;
+        video.pause();
+        video.style.display = 'none';
     },
 
     // ─── Personal Video Viewer ───────────────────────────────
@@ -13749,6 +18723,12 @@ const App = {
         });
         audio.addEventListener('timeupdate', () => {
             if (!audio.duration) return;
+            // Scrobble threshold: 50% played or 4 minutes, whichever comes first (Last.fm spec)
+            if (!this._scrobbleFired && this.currentTrack && audio.duration > 30 &&
+                (audio.currentTime >= audio.duration * 0.5 || audio.currentTime >= 240)) {
+                this._scrobbleFired = true;
+                this._fireScrobble(this.currentTrack);
+            }
             const pct = ((audio.currentTime / audio.duration) * 100) + '%';
             document.getElementById('progress-fill').style.width = pct;
             const cursor = document.getElementById('progress-cursor');
@@ -13766,6 +18746,8 @@ const App = {
             if (pnpThumb) pnpThumb.style.left = pct;
             if (pnpCur) pnpCur.textContent = this.formatDuration(audio.currentTime);
             if (pnpTot) pnpTot.textContent = this.formatDuration(audio.duration);
+            // Update audiobook detail page live progress bar if open
+            if (this.isAudioBookPlaying) this._abUpdateDetailProgress();
         });
         audio.addEventListener('ended', () => {
             if (this.isRadioPlaying) {
@@ -13831,10 +18813,14 @@ const App = {
             document.getElementById('btn-repeat').style.display = '';
             document.getElementById('btn-eq').style.display = '';
         }
-        // If an audiobook was playing, restore full player controls
+        // If an audiobook was playing, save position and restore full player controls
         if (this.isAudioBookPlaying) {
+            this._abStopProgressSave();
+            this._abClosePanel();
+            this._abCancelSleep();
             this.isAudioBookPlaying = false;
             this._currentAudioBookId = null;
+            this.audioPlayer.playbackRate = 1;
             document.getElementById('btn-player-fav').style.display = '';
             document.getElementById('btn-player-add-playlist').style.display = '';
             document.getElementById('btn-player-lyrics').style.display = '';
@@ -13843,19 +18829,39 @@ const App = {
             document.getElementById('btn-shuffle').style.display = '';
             document.getElementById('btn-repeat').style.display = '';
             document.getElementById('btn-eq').style.display = '';
+            document.getElementById('btn-android-player').style.display = '';
+            ['btn-ab-speed','btn-ab-sleep','btn-ab-chapters','btn-ab-bookmark']
+                .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+            // Restore prev/next original SVG icons
+            const pb = document.getElementById('btn-prev'), nb = document.getElementById('btn-next');
+            if (pb) { pb.title = 'Previous'; pb.innerHTML = '<svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-skip-back"/></svg>'; }
+            if (nb) { nb.title = 'Next'; nb.innerHTML = '<svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-skip-forward"/></svg>'; }
         }
         // Stop any playing video before starting audio
         document.querySelectorAll('video').forEach(v => { v.pause(); v.removeAttribute('src'); v.load(); });
         this.currentTrack = track;
-        this.audioPlayer.src = `/api/stream/${track.id}`;
+        this._scrobbleFired = false;
+        this._scrobbleTimestamp = Math.floor(Date.now() / 1000);
+        this.audioPlayer.src = this._buildStreamUrl(track.id);
         this.initEqualizer();
-        this.audioPlayer.play();
+        this._applyReplayGain(track);
+        // When casting audio, route the new track to the cast device instead of local output
+        if (this._castActive && this._castMediaType === 'audio') {
+            try { this.audioPlayer.pause(); } catch (e) {}
+            this._castPlayCurrentTrack();
+        } else {
+            this.audioPlayer.play();
+        }
+        this._scrobbleNowPlaying(track);
         this.isPlaying = true;
         document.getElementById('player-bar').classList.remove('player-hidden');
         document.getElementById('btn-eq').style.display = '';
+        this._castUpdateButtons();
         document.getElementById('btn-play').innerHTML = '<svg style="width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-pause"/></svg>';
         document.getElementById('player-title').textContent = track.title || 'Unknown';
         document.getElementById('player-artist').textContent = track.artist || '';
+        this._updatePlayerMeta();
+        this._enrichTrackMeta(track);   // fill in bitrate/sampleRate/codec when the caller passed a minimal object
         const coverDiv = document.getElementById('player-cover');
         if (track.hasAlbumArt) {
             coverDiv.innerHTML = `<img src="/api/cover/track/${track.id}" onerror="this.parentElement.innerHTML='<div style=\\'display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:22px;color:#666\\'>&#9835;</div>'" alt="">`;
@@ -13900,11 +18906,21 @@ const App = {
         const bar = document.getElementById('player-bar');
         bar.classList.add('player-hidden');
         bar.classList.remove('podcast-mode');
+        this._clearPlayerMeta();
         const npPanel = document.getElementById('podcast-now-playing');
         if (npPanel) npPanel.className = 'podcast-np-hidden';
     },
 
     togglePlay() {
+        // While casting audio, play/pause controls the cast device, not the local element
+        if (this._castActive && this._castMediaType === 'audio') {
+            this._castPaused = !this._castPaused;
+            this._castServerControl(this._castPaused ? 'pause' : 'play');
+            const ic = this._castPaused ? 'play' : 'pause';
+            const bp = document.getElementById('btn-play');
+            if (bp) bp.innerHTML = `<svg style="width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-${ic}"/></svg>`;
+            return;
+        }
         if (!this.audioPlayer.src) return;
         const svgStyle = 'width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round';
         const pnpStyle = 'width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round';
@@ -13921,6 +18937,11 @@ const App = {
     },
 
     async nextTrack() {
+        if (this.isAudioBookPlaying) {
+            const dur = this.audioPlayer.duration;
+            this.audioPlayer.currentTime = Math.min(isFinite(dur) ? dur : Infinity, this.audioPlayer.currentTime + 30);
+            return;
+        }
         if (this.playlist.length === 0) return;
         if (this.shuffle) {
             if (this.playlist.length <= 2) {
@@ -13932,7 +18953,15 @@ const App = {
                     return;
                 }
             }
-            this.playIndex = Math.floor(Math.random() * this.playlist.length);
+            const curArtist = this.playlist[this.playIndex]?.artist;
+            const len = this.playlist.length;
+            let newIdx = Math.floor(Math.random() * len);
+            for (let i = 0; i < 4; i++) {
+                if (newIdx !== this.playIndex &&
+                    (!curArtist || this.playlist[newIdx]?.artist !== curArtist)) break;
+                newIdx = Math.floor(Math.random() * len);
+            }
+            this.playIndex = newIdx;
         } else {
             this.playIndex++;
             if (this.playIndex >= this.playlist.length) { if (this.repeat === 'all') this.playIndex = 0; else return; }
@@ -13941,6 +18970,10 @@ const App = {
     },
 
     prevTrack() {
+        if (this.isAudioBookPlaying) {
+            this.audioPlayer.currentTime = Math.max(0, this.audioPlayer.currentTime - 30);
+            return;
+        }
         if (this.playlist.length === 0) return;
         if (this.audioPlayer.currentTime > 3) { this.audioPlayer.currentTime = 0; return; }
         this.playIndex--;
@@ -14120,10 +19153,7 @@ const App = {
                 const dur = this.formatDuration(v.duration);
                 html += `<div class="mv-card" onclick="App.openMvDetail(${v.id})">
                     <div class="mv-card-thumb">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none">&#127909;</span>`
-                            : `<span class="mv-card-placeholder">&#127909;</span>`}
+                        ${this._videoThumbHtml(thumbSrc, '&#127909;')}
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="mv-format-badge">${this.esc(v.format)}</span>
                     </div>
@@ -14262,6 +19292,11 @@ const App = {
         const addPl   = opts.showAddPl
             ? `<button class="song-card-add-pl" onclick="App.showAddToPlaylistPopup(${t.id}, this)" title="Add to playlist">+</button>`
             : '';
+        const genrePills = t.genre
+            ? t.genre.split(';').map(g => g.trim()).filter(Boolean)
+                .map(g => `<span class="song-card-genre-pill" data-genre="${this.esc(g)}" onclick="event.stopPropagation();App.filterMusicByGenre(this.dataset.genre)">${this.esc(g)}</span>`)
+                .join('')
+            : '';
         return `<div class="song-card" onclick="App.${play}(${i})" data-track-id="${t.id}">
                     <div class="song-card-art">
                         ${artSrc
@@ -14279,6 +19314,7 @@ const App = {
                             <span>${dur}</span>
                             ${fmt ? `<span class="track-format-badge ${this.trackFormatClass(fmt)}">${fmt}</span>` : ''}
                         </div>
+                        ${genrePills ? `<div class="song-card-genres">${genrePills}</div>` : ''}
                     </div>
                     <button class="song-card-fav ${favClass}" onclick="event.stopPropagation(); App.toggleFav(${t.id}, this)">&#10084;</button>
                 </div>`;
@@ -14333,7 +19369,7 @@ const App = {
     },
 
     emptyState(title, message) {
-        return `<div class="empty-state"><div class="empty-icon">&#127925;</div><h2>${title}</h2><p>${message}</p></div>`;
+        return `<div class="empty-state"><div class="empty-icon"><svg style="width:72px;height:72px" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><use href="#icon-media-empty"/></svg></div><h2>${title}</h2><p>${message}</p></div>`;
     },
 
     // ── Video context menu & metadata editor ─────────────────────────
@@ -14481,7 +19517,7 @@ const App = {
                 <button onclick="App.saveBatchEdit()" class="batch-edit-btn batch-edit-btn-primary" id="batch-save-btn">Apply to ${n} item${n !== 1 ? 's' : ''}</button>
             </div>
             <div class="batch-edit-note">
-                <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;margin-top:1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                ${this._WARN_SVG_SM}
                 Manually edited metadata will not be overwritten by future TMDB auto-fetch.
             </div>
         </div>`;
@@ -14686,7 +19722,7 @@ const App = {
                 <div style="display:flex;align-items:center;gap:6px">
                     <input type="text" class="video-edit-input video-edit-location" value="${this.esc(mv.filePath || '')}" readonly>
                     <button type="button" class="video-edit-copy-btn" data-path="${this.esc(mv.filePath || '')}" onclick="App._copyPath(this)" title="${this.t('videoEdit.copyPath')}">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        ${this._COPY_SVG}
                     </button>
                 </div>
             </div>
@@ -14923,6 +19959,9 @@ const App = {
             <div class="video-menu-item" id="plMenuEdit">
                 <span class="video-menu-icon"><svg ${svgAttr}><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span><span>Edit Playlist</span>
             </div>
+            <div class="video-menu-item" id="plMenuExport">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span>Export M3U</span>
+            </div>
             <div class="video-menu-divider"></div>
             <div class="video-menu-item video-menu-item-danger" id="plMenuDelete">
                 <span class="video-menu-icon"><svg ${svgAttr}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg></span><span>Delete Playlist</span>
@@ -14938,6 +19977,10 @@ const App = {
         menu.querySelector('#plMenuEdit').addEventListener('click', () => {
             this.closePlaylistMenu();
             this.editPlaylist(id, p.coverImagePath || '', p.name || '');
+        });
+        menu.querySelector('#plMenuExport').addEventListener('click', () => {
+            this.closePlaylistMenu();
+            this.exportPlaylistM3u(id, p.name || 'playlist');
         });
         menu.querySelector('#plMenuDelete').addEventListener('click', () => {
             this.closePlaylistMenu();
@@ -14980,6 +20023,9 @@ const App = {
             <div class="video-menu-item" id="agpMenuEditCover">
                 <span class="video-menu-icon"><svg ${svgAttr}><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg></span><span>Edit Cover Image</span>
             </div>
+            <div class="video-menu-item" id="agpMenuExport">
+                <span class="video-menu-icon"><svg ${svgAttr}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span><span>Export M3U</span>
+            </div>
             <div class="video-menu-divider"></div>
             <div class="video-menu-item video-menu-item-danger" id="agpMenuRemove">
                 <span class="video-menu-icon"><svg ${svgAttr}><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg></span><span>Remove Playlist</span>
@@ -14995,6 +20041,11 @@ const App = {
             const m = document.getElementById('agpContextMenu');
             if (m) m.remove();
             this.openAgpEditCover(type, param);
+        });
+        menu.querySelector('#agpMenuExport').addEventListener('click', () => {
+            const m = document.getElementById('agpContextMenu');
+            if (m) m.remove();
+            this.exportAgpM3u(type, param);
         });
         menu.querySelector('#agpMenuRemove').addEventListener('click', () => {
             const m = document.getElementById('agpContextMenu');
@@ -15042,9 +20093,9 @@ const App = {
                 </div>
                 <div style="display:flex;flex-direction:column;gap:7px">
                     <button onclick="App._agpPickCover()" style="background:var(--bg-hover);border:1px solid var(--border);border-radius:7px;padding:7px 14px;color:var(--text-primary);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:7px">
-                        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                         Pick from Album Art…</button>
-                    ${currentCover ? `<button onclick="App._agpClearCover()" style="background:none;border:none;color:var(--text-secondary);font-size:12px;cursor:pointer;text-align:left;padding:0;display:flex;align-items:center;gap:5px"><svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Remove cover</button>` : ''}
+                    ${currentCover ? `<button onclick="App._agpClearCover()" style="background:none;border:none;color:var(--text-secondary);font-size:12px;cursor:pointer;text-align:left;padding:0;display:flex;align-items:center;gap:5px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> Remove cover</button>` : ''}
                 </div>
             </div>
             <div style="display:flex;justify-content:flex-end;gap:10px">
@@ -15220,7 +20271,7 @@ const App = {
 
             <div class="video-edit-form-group">
                 <label class="video-edit-label">Genre</label>
-                <input type="text" id="albumEditGenre" class="video-edit-input" value="${this.esc(album.genre || '')}" placeholder="Country, Rock, Pop…" list="albumEditGenreList" autocomplete="off">
+                <input type="text" id="albumEditGenre" class="video-edit-input" value="${this.esc(album.genre || '')}" placeholder="Rock; Electronic; Pop" list="albumEditGenreList" autocomplete="off">
                 <datalist id="albumEditGenreList">${this._genericGenreOptions()}</datalist>
             </div>
 
@@ -15250,7 +20301,7 @@ const App = {
             </div>
 
             <div class="video-edit-note">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                ${this._WARN_SVG}
                 Changes affect the album record only — individual track tags are not rewritten.
             </div>
         </div>`;
@@ -15327,6 +20378,7 @@ const App = {
         if (!t) return;
         this._trackEditCoverData = null;
         this._trackEditPickedFile = null;
+        this._musicFanartSel = null;
 
         const artSrc = t.albumArtCached ? `/albumart/${t.albumArtCached}` : (t.hasAlbumArt ? `/api/cover/track/${t.id}` : null);
         const overlay = document.createElement('div');
@@ -15367,7 +20419,7 @@ const App = {
             <div class="video-edit-row">
                 <div class="video-edit-form-group">
                     <label class="video-edit-label">Genre</label>
-                    <input type="text" id="trackEditGenre" class="video-edit-input" value="${this.esc(t.genre || '')}" placeholder="Country, Rock, Pop…" list="trackEditGenreList" autocomplete="off">
+                    <input type="text" id="trackEditGenre" class="video-edit-input" value="${this.esc(t.genre || '')}" placeholder="Rock; Electronic; Pop" list="trackEditGenreList" autocomplete="off">
                     <datalist id="trackEditGenreList">${this._genericGenreOptions()}</datalist>
                 </div>
                 <div class="video-edit-form-group">
@@ -15403,13 +20455,18 @@ const App = {
                     </div>
                     <div style="display:flex;flex-direction:column;gap:7px">
                         <button onclick="App._openMusicArtPicker('track')" style="background:var(--bg-hover);border:1px solid var(--border);border-radius:7px;padding:7px 14px;color:var(--text-primary);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:7px">
-                            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><use href="#icon-image"/></svg>
                             Pick from Library…</button>
                         <label style="background:var(--bg-hover);border:1px solid var(--border);border-radius:7px;padding:7px 14px;color:var(--text-primary);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:7px">
-                            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><use href="#icon-upload"/></svg>
                             Upload Image…
                             <input type="file" id="trackEditCoverFile" accept="image/jpeg,image/jpg,image/png" style="display:none" onchange="App.handleTrackEditCover(event)">
                         </label>
+                        ${this._initCfg?.fanartApiKey ? `
+                        <button onclick="App.openMusicFanartModal(${t.id})" style="background:var(--bg-hover);border:1px solid var(--border);border-radius:7px;padding:7px 14px;color:var(--text-primary);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:7px">
+                            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><use href="#icon-image"/></svg>
+                            ${this.t('fanart.load', 'Load images from fanart.tv')}</button>
+                        <div id="musicFanartSummary" class="fanart-summary"></div>` : ''}
                     </div>
                 </div>
                 <div id="trackEditCoverError" style="color:var(--danger);font-size:12px;display:none"></div>
@@ -15434,7 +20491,7 @@ const App = {
             </div>
 
             <div class="video-edit-note">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                ${this._WARN_SVG}
                 Changes update the library database only — audio file tags are not rewritten.
             </div>
         </div>`;
@@ -15484,6 +20541,7 @@ const App = {
             composer: document.getElementById('trackEditComposer').value,
             coverImage: this._trackEditCoverData || null,
             coverArtPath: this._trackEditPickedFile || null,
+            coverFanartUrl: this._musicFanartSel || null,
             applyGenreToArtist: applyGenre
         };
         try {
@@ -15704,6 +20762,7 @@ const App = {
 
         this._videoEditPosterData = null;
         this._videoEditId = videoId;
+        this._fanartSel = { poster: null, backdrop: null };
 
         const overlay = document.createElement('div');
         overlay.id = 'videoEditOverlay';
@@ -15721,7 +20780,13 @@ const App = {
 
             <div class="video-edit-form-group">
                 <label class="video-edit-label">Title</label>
-                <input type="text" id="videoEditTitle" class="video-edit-input" value="${this.esc(v.title || '')}">
+                <div style="display:flex;gap:6px;align-items:center">
+                    <input type="text" id="videoEditTitle" class="video-edit-input" value="${this.esc(v.title || '')}" style="flex:1;min-width:0">
+                    <button type="button" onclick="App._tmdbBrowse(${v.id})" title="Search TMDB for similar titles and apply correct metadata" style="flex-shrink:0;white-space:nowrap;padding:6px 12px;border:none;border-radius:var(--radius);background:#2563eb;color:#fff;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;letter-spacing:.01em">
+                        <svg style="width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        Browse Similar
+                    </button>
+                </div>
             </div>
 
             <div class="video-edit-row">
@@ -15815,7 +20880,7 @@ const App = {
                 <div style="display:flex;align-items:center;gap:6px">
                     <input type="text" class="video-edit-input video-edit-location" value="${this.esc(v.filePath || '')}" readonly>
                     <button type="button" class="video-edit-copy-btn" data-path="${this.esc(v.filePath || '')}" onclick="App._copyPath(this)" title="${this.t('videoEdit.copyPath')}">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                        ${this._COPY_SVG}
                     </button>
                 </div>
             </div>
@@ -15832,13 +20897,21 @@ const App = {
                 <div id="videoEditPosterError" class="video-edit-poster-error"></div>
             </div>
 
+            ${this._initCfg?.fanartApiKey ? `
+            <div class="video-edit-form-group">
+                <label class="video-edit-label">${this.t('fanart.browse','Browse fanart.tv')}</label>
+                <button type="button" class="video-edit-btn video-edit-btn-secondary" style="margin-bottom:6px" onclick="App.openFanartModal(${v.id})">${this.t('fanart.load','Load images from fanart.tv')}</button>
+                <div id="fanartSummary" class="fanart-summary"></div>
+                <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">${this.t('fanart.hint','Pick a poster and/or backdrop, then Save Changes to apply.')}</div>
+            </div>` : ''}
+
             <div class="video-edit-actions">
                 <button onclick="App.closeVideoEditModal()" class="video-edit-btn video-edit-btn-secondary">Cancel</button>
                 <button onclick="App.saveVideoMetadata()" class="video-edit-btn video-edit-btn-primary">Save Changes</button>
             </div>
 
             <div class="video-edit-note">
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:4px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                ${this._WARN_SVG}
                 Manually edited metadata will not be overwritten by TMDB auto-fetch.
             </div>
         </div>`;
@@ -15852,6 +20925,136 @@ const App = {
         const el = document.getElementById('videoEditOverlay');
         if (el) el.remove();
         this._videoEditPosterData = null;
+    },
+
+    // ─── Browse Similar Names (TMDB) ─────────────────────────────────────────
+    async _tmdbBrowse(videoId) {
+        const currentType  = document.getElementById('videoEditMediaType')?.value || 'movie';
+        const defaultType  = (currentType === 'tv') ? 'tv' : (currentType === 'movie' ? 'movie' : 'multi');
+        // For TV shows use the series name, not the episode title
+        const currentTitle = currentType === 'tv'
+            ? (document.getElementById('videoEditSeriesName')?.value || document.getElementById('videoEditTitle')?.value || '')
+            : (document.getElementById('videoEditTitle')?.value || '');
+
+        // Build overlay panel on top of the edit modal
+        const panel = document.createElement('div');
+        panel.id = 'tmdbBrowsePanel';
+        panel.style.cssText = 'position:fixed;inset:0;z-index:10001;background:var(--bg-surface);display:flex;flex-direction:column;overflow:hidden';
+        panel.innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border);flex-shrink:0">
+                <button onclick="document.getElementById('tmdbBrowsePanel').remove()" style="background:none;border:none;cursor:pointer;color:var(--text-secondary);display:flex;align-items:center;gap:4px;font-size:13px;padding:4px 8px;border-radius:6px" onmouseover="this.style.background='var(--bg-hover)'" onmouseout="this.style.background='none'">
+                    <svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round"><polyline points="15 18 9 12 15 6"/></svg> Back
+                </button>
+                <span style="font-weight:600;font-size:14px;color:var(--text-primary)">Browse Similar Names on TMDB</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:12px 18px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap">
+                <input id="tmdbBrowseQuery" type="text" value="${this.esc(currentTitle)}" placeholder="Search title…"
+                    style="flex:1;min-width:180px;padding:7px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-hover);color:var(--text-primary);font-size:13px"
+                    onkeydown="if(event.key==='Enter')App._tmdbBrowseSearch(${videoId})">
+                <div style="display:flex;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;flex-shrink:0" id="tmdbTypeBar">
+                    ${['movie','tv','multi'].map(t => `<button id="tmdbType_${t}" onclick="App._tmdbBrowseSetType('${t}',${videoId})"
+                        style="padding:6px 12px;font-size:12px;border:none;cursor:pointer;${t===defaultType?'background:var(--accent);color:#fff':'background:var(--bg-hover);color:var(--text-secondary)'}">${t==='multi'?'Both':t==='tv'?'TV Show':'Movie'}</button>`).join('')}
+                </div>
+                <button onclick="App._tmdbBrowseSearch(${videoId})" style="padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);font-size:13px;cursor:pointer;font-weight:500">Search</button>
+            </div>
+            <div id="tmdbBrowseResults" style="flex:1;overflow-y:auto;padding:20px 24px">
+                <div style="text-align:center;color:var(--text-muted);padding:40px;font-size:13px">Enter a title above and press Search</div>
+            </div>`;
+
+        panel._browseType = defaultType;
+        panel._browseVideoId = videoId;
+        document.body.appendChild(panel);
+
+        // Auto-search if we have a title
+        if (currentTitle.trim()) this._tmdbBrowseSearch(videoId);
+    },
+
+    _tmdbBrowseSetType(type, videoId) {
+        const panel = document.getElementById('tmdbBrowsePanel');
+        if (!panel) return;
+        panel._browseType = type;
+        ['movie','tv','multi'].forEach(t => {
+            const btn = document.getElementById(`tmdbType_${t}`);
+            if (!btn) return;
+            btn.style.background = t === type ? 'var(--accent)' : 'var(--bg-hover)';
+            btn.style.color      = t === type ? '#fff'          : 'var(--text-secondary)';
+        });
+        this._tmdbBrowseSearch(videoId);
+    },
+
+    async _tmdbBrowseSearch(videoId) {
+        const panel   = document.getElementById('tmdbBrowsePanel');
+        const resultsEl = document.getElementById('tmdbBrowseResults');
+        if (!panel || !resultsEl) return;
+
+        const query = (document.getElementById('tmdbBrowseQuery')?.value || '').trim();
+        if (!query) return;
+
+        resultsEl.innerHTML = `<div style="text-align:center;padding:40px"><div class="spinner"></div></div>`;
+        const type = panel._browseType || 'multi';
+
+        const data = await this.api(`tmdb/search?query=${encodeURIComponent(query)}&type=${type}`);
+
+        if (data?.noKey) {
+            resultsEl.innerHTML = `<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:13px">No TMDB API key configured. Add one in Settings → Metadata Providers.</div>`;
+            return;
+        }
+        if (!data?.results?.length) {
+            resultsEl.innerHTML = `<div style="text-align:center;color:var(--text-muted);padding:40px;font-size:13px">No results found. Try a different search term.</div>`;
+            return;
+        }
+
+        resultsEl.innerHTML = data.results.map(r => {
+            const posterUrl  = r.posterUrl ? r.posterUrl.replace('/w185/', '/w300/') : null;
+            const posterHtml = posterUrl
+                ? `<img src="${posterUrl}" alt="" style="width:94px;height:141px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--bg-hover)">`
+                : `<div style="width:94px;height:141px;border-radius:6px;background:var(--bg-hover);display:flex;align-items:center;justify-content:center;flex-shrink:0"><svg style="width:32px;height:32px;stroke:var(--text-muted);fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></div>`;
+            const ratingHtml = r.rating > 0 ? `<span style="color:#f59e0b;font-size:14px">★ ${r.rating.toFixed(1)}</span>${r.voteCount > 0 ? `<span style="color:var(--text-muted);font-size:14px"> (${r.voteCount.toLocaleString()})</span>` : ''}` : '';
+            const yearHtml  = r.year ? `<span style="color:var(--text-muted);font-size:15px">${r.year}</span>` : '';
+            const typeLabel = r.mediaType === 'tv' ? 'TV' : 'Movie';
+            const overview  = r.overview ? this.esc(r.overview).substring(0, 234) + (r.overview.length > 234 ? '…' : '') : '';
+            const safeTitle = (r.title||'').replace(/'/g,"\\'");
+            return `<div style="display:flex;gap:16px;padding:16px;border:1px solid var(--border);border-radius:10px;margin-bottom:13px;background:var(--bg-surface)">
+                ${posterHtml}
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px">
+                    <div style="display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap">
+                        <span style="font-weight:600;font-size:18px;color:var(--text-primary)">${this.esc(r.title||'')}</span>
+                        ${yearHtml}
+                        <span style="font-size:13px;padding:2px 8px;border-radius:10px;background:var(--bg-hover);color:var(--text-muted)">${typeLabel}</span>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center">${ratingHtml}</div>
+                    ${overview ? `<div style="font-size:15px;color:var(--text-secondary);line-height:1.5">${overview}</div>` : ''}
+                    <div style="margin-top:auto;padding-top:8px">
+                        <button onclick="App._tmdbApply(${videoId},${r.tmdbId},'${r.mediaType==='tv'?'tv':'movie'}','${safeTitle}',${r.year||0})"
+                            style="padding:7px 18px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);font-size:15px;cursor:pointer;font-weight:600">
+                            Use This
+                        </button>
+                    </div>
+                </div>
+            </div>`;
+        }).join('');
+    },
+
+    async _tmdbApply(videoId, tmdbId, type, title, year) {
+        const btn = event?.target;
+        if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+
+        try {
+            const res = await this.apiPost(`videos/${videoId}/apply-tmdb`, { tmdbId, type, title, year: year || null });
+            if (res?.success) {
+                // Close both the browse panel and the edit modal
+                document.getElementById('tmdbBrowsePanel')?.remove();
+                this.closeVideoEditModal();
+                // Refresh the video detail page
+                await this.openVideoDetail(videoId);
+            } else {
+                if (btn) { btn.disabled = false; btn.textContent = 'Use This'; }
+                alert('Could not apply metadata. Check your TMDB API key and try again.');
+            }
+        } catch(e) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Use This'; }
+            alert('Error applying metadata: ' + e.message);
+        }
     },
 
     _copyPath(btn) {
@@ -16060,10 +21263,7 @@ const App = {
                     : (v.year ? String(v.year) : '');
                 html += `<div class="mv-card home-card" onclick="App.openVideoDetail(${v.id})" data-video-id="${v.id}">
                     <div class="mv-card-thumb" style="position:relative">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                        ${this._videoThumbHtml(thumbSrc)}
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="video-type-badge video-type-${v.mediaType}">${typeLabel}</span>
                         <span class="mv-community-rating">&#9733; ${v.avgRating.toFixed(1)}</span>
@@ -16152,10 +21352,7 @@ const App = {
                 const dur = this.formatDuration(v.duration);
                 html += `<div class="mv-card home-card" onclick="App.openMvDetail(${v.id})" data-mv-id="${v.id}">
                     <div class="mv-card-thumb" style="position:relative">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none">&#127909;</span>`
-                            : `<span class="mv-card-placeholder">&#127909;</span>`}
+                        ${this._videoThumbHtml(thumbSrc, '&#127909;')}
                         <span class="mv-duration-badge">${dur}</span>
                         <span class="mv-community-rating">&#9733; ${v.avgRating.toFixed(1)}</span>
                         <button class="mv-card-play" onclick="event.stopPropagation(); App.playMusicVideo(${v.id})">&#9654;</button>
@@ -16183,10 +21380,7 @@ const App = {
                 const thumbSrc = p.thumbnailPath ? `/picthumb/${p.thumbnailPath}` : '';
                 html += `<div class="mv-card home-card" onclick="App.navigate('pictures')">
                     <div class="mv-card-thumb" style="position:relative">
-                        ${thumbSrc
-                            ? `<img src="${thumbSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-image"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-image"/></svg></span>`}
+                        ${this._videoThumbHtml(thumbSrc, this._cardSvg('image'))}
                         <span class="mv-community-rating">&#9733; ${p.avgRating.toFixed(1)}</span>
                     </div>
                     <div class="mv-card-info">
@@ -16213,10 +21407,7 @@ const App = {
                 const formatBadge = e.format ? e.format.toLowerCase() : 'epub';
                 html += `<div class="mv-card home-card" onclick="App.openEBookDetail(${e.id})">
                     <div class="mv-card-thumb" style="position:relative">
-                        ${coverSrc
-                            ? `<img src="${coverSrc}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'" alt="">
-                               <span class="mv-card-placeholder" style="display:none"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-book"/></svg></span>`
-                            : `<span class="mv-card-placeholder"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-book"/></svg></span>`}
+                        ${this._videoThumbHtml(coverSrc, this._cardSvg('book'))}
                         <span class="mv-community-rating">&#9733; ${e.avgRating.toFixed(1)}</span>
                         <span class="ebook-format-badge ebook-format-${formatBadge}" style="top:6px;right:6px">${e.format}</span>
                     </div>
@@ -16266,6 +21457,16 @@ const App = {
                     cgChecks.forEach(el => { if (el.checked) genreIds.push(el.value); });
                     await this.apiPost(`videos/${id}/custom-genres`, { genreIds });
                 }
+                // Apply any fanart.tv poster/backdrop the user picked
+                const fa = this._fanartSel;
+                if (fa && (fa.poster || fa.backdrop)) {
+                    try {
+                        await this.apiPost(`videos/${id}/fanart/apply`, {
+                            posterUrl: fa.poster || null,
+                            backdropUrl: fa.backdrop || null
+                        });
+                    } catch (e) { /* non-fatal — main metadata already saved */ }
+                }
                 this.closeVideoEditModal();
                 this.loadVideosPage();
             } else {
@@ -16276,6 +21477,193 @@ const App = {
         }
     },
 
+    // ─── fanart.tv artwork picker (modal) ───────────────────────────────
+
+    async openFanartModal(videoId) {
+        if (!this._fanartSel) this._fanartSel = { poster: null, backdrop: null };
+        // Work on a temp copy; only committed to _fanartSel on "Use Selection".
+        this._fanartModalSel = { poster: this._fanartSel.poster, backdrop: this._fanartSel.backdrop };
+
+        const overlay = document.createElement('div');
+        overlay.id = 'fanartModalOverlay';
+        overlay.className = 'fanart-modal-overlay';
+        overlay.innerHTML = `
+            <div class="fanart-modal">
+                <div class="fanart-modal-header">
+                    <h3>${this.t('fanart.browse', 'Browse fanart.tv')}</h3>
+                    <button class="fanart-modal-close" onclick="App.closeFanartModal()" aria-label="Close">&times;</button>
+                </div>
+                <div class="fanart-modal-body" id="fanartModalBody">
+                    <div class="fanart-empty">${this.t('fanart.loading', 'Loading…')}</div>
+                </div>
+                <div class="fanart-modal-footer">
+                    <button class="video-edit-btn video-edit-btn-secondary" onclick="App.closeFanartModal()">${this.t('common.cancel', 'Cancel')}</button>
+                    <button class="video-edit-btn video-edit-btn-primary" onclick="App._fanartCommit()">${this.t('fanart.useSelection', 'Use Selection')}</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('mousedown', e => { overlay._mousedownOnBackdrop = (e.target === overlay); });
+        overlay.addEventListener('click', e => { if (e.target === overlay && overlay._mousedownOnBackdrop) this.closeFanartModal(); });
+
+        const body = document.getElementById('fanartModalBody');
+        try {
+            const data = await this.api(`videos/${videoId}/fanart`);
+            if (!data || !data.configured) {
+                body.innerHTML = `<div class="fanart-empty">${this.t('fanart.noKey', 'Add a fanart.tv API key in Settings to use this.')}</div>`;
+                return;
+            }
+            const imgs = data.images || [];
+            if (imgs.length === 0) {
+                body.innerHTML = `<div class="fanart-empty">${this.t('fanart.none', 'No fanart.tv images found for this title.')}</div>`;
+                return;
+            }
+            const posters = imgs.filter(i => i.type === 'poster');
+            const backdrops = imgs.filter(i => i.type === 'backdrop');
+            const section = (title, list, kind) => list.length === 0 ? '' : `
+                <div class="fanart-section">
+                    <div class="fanart-section-title">${title} <span class="fanart-count">${list.length}</span></div>
+                    <div class="fanart-grid fanart-grid-${kind}">
+                        ${list.map(i => `<div class="fanart-cell fanart-cell-${kind}${this._fanartModalSel[kind] === i.url ? ' fanart-selected' : ''}" data-url="${this.esc(i.url)}" onclick="App._fanartPick('${kind}', this)">
+                            <img loading="lazy" src="${this.esc(i.url)}" alt="">
+                            ${i.likes ? `<span class="fanart-likes">&#9829; ${i.likes}</span>` : ''}
+                            <span class="fanart-check">&#10003;</span>
+                        </div>`).join('')}
+                    </div>
+                </div>`;
+            body.innerHTML =
+                section(this.t('fanart.posters', 'Posters'), posters, 'poster') +
+                section(this.t('fanart.backdrops', 'Backdrops'), backdrops, 'backdrop');
+        } catch (e) {
+            body.innerHTML = `<div class="fanart-empty">${this.t('fanart.error', 'Could not load fanart.tv images.')}</div>`;
+        }
+    },
+
+    _fanartPick(kind, cell) {
+        if (!this._fanartModalSel) this._fanartModalSel = { poster: null, backdrop: null };
+        const url = cell.getAttribute('data-url');
+        const already = this._fanartModalSel[kind] === url;
+        // One selection per kind — clear others, then toggle this one.
+        document.querySelectorAll('.fanart-cell-' + kind).forEach(c => c.classList.remove('fanart-selected'));
+        if (already) {
+            this._fanartModalSel[kind] = null;
+        } else {
+            this._fanartModalSel[kind] = url;
+            cell.classList.add('fanart-selected');
+        }
+    },
+
+    _fanartCommit() {
+        this._fanartSel = {
+            poster: this._fanartModalSel?.poster || null,
+            backdrop: this._fanartModalSel?.backdrop || null
+        };
+        this._fanartUpdateSummary();
+        this.closeFanartModal();
+    },
+
+    _fanartUpdateSummary() {
+        const el = document.getElementById('fanartSummary');
+        if (!el) return;
+        const s = this._fanartSel || {};
+        const parts = [];
+        if (s.poster) parts.push(this.t('fanart.posterChosen', 'Poster selected'));
+        if (s.backdrop) parts.push(this.t('fanart.backdropChosen', 'Backdrop selected'));
+        el.innerHTML = parts.length ? `<span class="fanart-summary-ok">&#10003; ${parts.join(' &bull; ')}</span>` : '';
+    },
+
+    closeFanartModal() {
+        const el = document.getElementById('fanartModalOverlay');
+        if (el) el.remove();
+    },
+
+    // ─── fanart.tv artist-image picker for music (single selection → track cover) ───
+
+    async openMusicFanartModal(trackId) {
+        this._musicFanartTemp = this._musicFanartSel || null;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'musicFanartOverlay';
+        overlay.className = 'fanart-modal-overlay';
+        overlay.innerHTML = `
+            <div class="fanart-modal">
+                <div class="fanart-modal-header">
+                    <h3>${this.t('fanart.browse', 'Browse fanart.tv')}</h3>
+                    <button class="fanart-modal-close" onclick="App.closeMusicFanartModal()" aria-label="Close">&times;</button>
+                </div>
+                <div class="fanart-modal-body" id="musicFanartBody">
+                    <div class="fanart-empty">${this.t('fanart.loading', 'Loading…')}</div>
+                </div>
+                <div class="fanart-modal-footer">
+                    <button class="video-edit-btn video-edit-btn-secondary" onclick="App.closeMusicFanartModal()">${this.t('common.cancel', 'Cancel')}</button>
+                    <button class="video-edit-btn video-edit-btn-primary" onclick="App._musicFanartCommit()">${this.t('fanart.useSelection', 'Use Selection')}</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.addEventListener('mousedown', e => { overlay._mdb = (e.target === overlay); });
+        overlay.addEventListener('click', e => { if (e.target === overlay && overlay._mdb) this.closeMusicFanartModal(); });
+
+        const body = document.getElementById('musicFanartBody');
+        try {
+            const data = await this.api(`tracks/${trackId}/fanart`);
+            if (!data || !data.configured) {
+                body.innerHTML = `<div class="fanart-empty">${this.t('fanart.noKey', 'Add a fanart.tv API key in Settings to use this.')}</div>`;
+                return;
+            }
+            const imgs = data.images || [];
+            if (imgs.length === 0) {
+                body.innerHTML = `<div class="fanart-empty">${this.t('fanart.noneArtist', 'No fanart.tv images found for this artist.')}</div>`;
+                return;
+            }
+            const artistImgs = imgs.filter(i => i.type === 'artist');
+            const bgImgs = imgs.filter(i => i.type === 'background');
+            const section = (title, list, gridKind) => list.length === 0 ? '' : `
+                <div class="fanart-section">
+                    <div class="fanart-section-title">${title} <span class="fanart-count">${list.length}</span></div>
+                    <div class="fanart-grid fanart-grid-${gridKind}">
+                        ${list.map(i => `<div class="fanart-cell fanart-cell-${gridKind} fanart-cell-music${this._musicFanartTemp === i.url ? ' fanart-selected' : ''}" data-url="${this.esc(i.url)}" onclick="App._musicFanartPick(this)">
+                            <img loading="lazy" src="${this.esc(i.url)}" alt="">
+                            ${i.likes ? `<span class="fanart-likes">&#9829; ${i.likes}</span>` : ''}
+                            <span class="fanart-check">&#10003;</span>
+                        </div>`).join('')}
+                    </div>
+                </div>`;
+            body.innerHTML =
+                section(this.t('fanart.artistImages', 'Artist Images'), artistImgs, 'artist') +
+                section(this.t('fanart.backgrounds', 'Backgrounds'), bgImgs, 'backdrop');
+        } catch (e) {
+            body.innerHTML = `<div class="fanart-empty">${this.t('fanart.error', 'Could not load fanart.tv images.')}</div>`;
+        }
+    },
+
+    _musicFanartPick(cell) {
+        const url = cell.getAttribute('data-url');
+        const already = this._musicFanartTemp === url;
+        // Single selection across all images — the track has one cover.
+        document.querySelectorAll('.fanart-cell-music').forEach(c => c.classList.remove('fanart-selected'));
+        this._musicFanartTemp = already ? null : url;
+        if (!already) cell.classList.add('fanart-selected');
+    },
+
+    _musicFanartCommit() {
+        this._musicFanartSel = this._musicFanartTemp || null;
+        if (this._musicFanartSel) {
+            // fanart wins over a pending upload / library pick
+            this._trackEditCoverData = null;
+            this._trackEditPickedFile = null;
+            const prev = document.getElementById('trackEditCoverPreview');
+            if (prev) prev.innerHTML = `<img src="${this.esc(this._musicFanartSel)}" style="width:100%;height:100%;object-fit:cover" alt="">`;
+        }
+        const sum = document.getElementById('musicFanartSummary');
+        if (sum) sum.innerHTML = this._musicFanartSel
+            ? `<span class="fanart-summary-ok">&#10003; ${this.t('fanart.coverChosen', 'fanart.tv image selected')}</span>`
+            : '';
+        this.closeMusicFanartModal();
+    },
+
+    closeMusicFanartModal() {
+        document.getElementById('musicFanartOverlay')?.remove();
+    },
+
     // ─── Equalizer ────────────────────────────────────────────────────
 
     _initAudioContext() {
@@ -16284,6 +21672,10 @@ const App = {
             // 'playback' latency hint allows larger buffers → fewer buffer underruns / crackling
             this._audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' });
             this._eqSourceMap = new Map(); // element → MediaElementSourceNode (created once per element)
+            // ReplayGain gain node — sits at the front of the chain
+            this._rgGainNode = this._audioCtx.createGain();
+            this._rgGainNode.gain.value = 1.0;
+
             this._eqFilters = this._eqFreqs.map((freq, i) => {
                 const f = this._audioCtx.createBiquadFilter();
                 f.type = this._eqTypes[i];
@@ -16343,10 +21735,14 @@ const App = {
                 source = this._audioCtx.createMediaElementSource(el);
                 this._eqSourceMap.set(el, source);
             }
-            source.connect(this._eqFilters[0]);
+            source.connect(this._rgGainNode);
+            this._rgGainNode.connect(this._eqFilters[0]);
             this._eqSource = source;
             this._eqConnectedEl = el;
             if (this._audioCtx.state === 'suspended') this._audioCtx.resume().catch(() => {});
+            // A just-created context defaults to the system output — apply any chosen sink so
+            // music actually plays out of the selected device (e.g. Bluetooth headphones).
+            this._applyAudioSinkToCtx();
         } catch (e) {
             console.warn('EQ connect failed:', e);
         }
@@ -16580,6 +21976,530 @@ const App = {
         } catch (e) {}
     },
 
+    // ─── ReplayGain ───────────────────────────────────────────────────────
+
+    loadRGState() {
+        try {
+            const raw = localStorage.getItem('nexusm-rg');
+            if (!raw) return;
+            const s = JSON.parse(raw);
+            if (typeof s.enabled === 'boolean') this._rgEnabled = s.enabled;
+            if (s.mode === 'track' || s.mode === 'album' || s.mode === 'auto') this._rgMode = s.mode;
+            if (typeof s.preamp === 'number') this._rgPreamp = Math.max(-12, Math.min(12, s.preamp));
+        } catch (e) {}
+    },
+
+    saveRGState() {
+        try {
+            localStorage.setItem('nexusm-rg', JSON.stringify({
+                enabled: this._rgEnabled, mode: this._rgMode, preamp: this._rgPreamp
+            }));
+        } catch (e) {}
+    },
+
+    _applyReplayGain(track) {
+        const btn = document.getElementById('btn-rg');
+        if (!this._rgGainNode) {
+            // Audio context not yet set up; keep neutral
+            if (btn) { btn.style.opacity = '0.4'; btn.style.color = ''; btn.title = 'ReplayGain (no audio context)'; }
+            return;
+        }
+        const now = this._audioCtx?.currentTime ?? 0;
+
+        if (!this._rgEnabled) {
+            this._rgGainNode.gain.setTargetAtTime(1.0, now, 0.05);
+            if (btn) { btn.style.opacity = '0.4'; btn.style.color = ''; btn.title = 'ReplayGain: off'; }
+            return;
+        }
+
+        // Pick the right gain value based on mode
+        let gainDb = null;
+        const rgT = track.replayGainTrack ?? null;
+        const rgA = track.replayGainAlbum ?? null;
+        if (this._rgMode === 'track')        gainDb = rgT;
+        else if (this._rgMode === 'album')   gainDb = rgA;
+        else /* auto */                      gainDb = rgA ?? rgT;
+
+        if (gainDb === null) {
+            // Track has no RG data — keep neutral, show indicator dimmed
+            this._rgGainNode.gain.setTargetAtTime(1.0, now, 0.05);
+            if (btn) { btn.style.opacity = '0.35'; btn.style.color = 'var(--text-muted)'; btn.title = 'ReplayGain: enabled — no data for this track'; }
+            return;
+        }
+
+        const totalDb = gainDb + this._rgPreamp;
+        const linear = Math.pow(10, totalDb / 20);
+        // Clamp to prevent blowing out — max +12 dB, min -∞ (silent)
+        const clamped = Math.min(Math.pow(10, 12 / 20), Math.max(0, linear));
+        this._rgGainNode.gain.setTargetAtTime(clamped, now, 0.05);
+
+        const sign = totalDb >= 0 ? '+' : '';
+        if (btn) {
+            btn.style.opacity = '1';
+            btn.style.color = 'var(--accent)';
+            btn.title = `ReplayGain: ${sign}${totalDb.toFixed(1)} dB (${this._rgMode})`;
+        }
+    },
+
+    toggleReplayGain() {
+        this._rgEnabled = !this._rgEnabled;
+        this.saveRGState();
+        if (this.currentTrack) this._applyReplayGain(this.currentTrack);
+        else {
+            const btn = document.getElementById('btn-rg');
+            if (btn) { btn.style.opacity = this._rgEnabled ? '0.65' : '0.4'; btn.style.color = this._rgEnabled ? 'var(--accent)' : ''; }
+        }
+        this.showToast(this._rgEnabled ? this.t('rg.enabled', 'ReplayGain on') : this.t('rg.disabled', 'ReplayGain off'), 'info');
+    },
+
+    // ─── Streaming Quality ────────────────────────────────────────────────────
+
+    loadStreamQualityState() {
+        const q = localStorage.getItem('nexusm-stream-quality') || 'original';
+        this._streamQuality = q;
+        this._applyStreamQualityBtn();
+    },
+
+    _applyStreamQualityBtn() {
+        const q = this._QUALITY_LEVELS.find(l => l.id === this._streamQuality) || this._QUALITY_LEVELS[0];
+        const isOrig = this._streamQuality === 'original';
+        ['btn-quality', 'btn-quality-mobile', 'gbm-quality-btn'].forEach(id => {
+            const btn = document.getElementById(id);
+            if (!btn) return;
+            btn.textContent  = q.label;
+            btn.title        = q.tip;
+            btn.style.opacity = isOrig ? '0.4' : '1';
+            btn.style.color   = isOrig ? '' : 'var(--accent)';
+        });
+    },
+
+    cycleStreamQuality() {
+        const levels = this._QUALITY_LEVELS;
+        const idx = levels.findIndex(l => l.id === this._streamQuality);
+        this._streamQuality = levels[(idx + 1) % levels.length].id;
+        localStorage.setItem('nexusm-stream-quality', this._streamQuality);
+        this._applyStreamQualityBtn();
+        if (this.currentTrack) {
+            this.audioPlayer.src = this._buildStreamUrl(this.currentTrack.id);
+            this.audioPlayer.play();
+        }
+        const q = this._QUALITY_LEVELS.find(l => l.id === this._streamQuality);
+        this.showToast(q.tip, 'info');
+    },
+
+    _buildStreamUrl(trackId) {
+        switch (this._streamQuality) {
+            case 'hq':  return `/api/stream/${trackId}?format=opus&maxBitRate=256`;
+            case 'mq':  return `/api/stream/${trackId}?format=opus&maxBitRate=128`;
+            case 'lq':  return `/api/stream/${trackId}?format=opus&maxBitRate=96`;
+            default:    return `/api/stream/${trackId}`;
+        }
+    },
+
+    // ─── Google Cast (server-side) ──────────────────────────────────────────────
+    // NexusM's SERVER discovers and controls the Cast device over the CASTV2 protocol; the
+    // browser only sends API calls (/api/cast/*). The device pulls the stream from this server
+    // over plain HTTP with a short-lived token, so casting works WITHOUT a browser secure
+    // context — over plain http://<LAN-IP> too. Mirrors the Android client and DLNA casting.
+    // State: _castActive, _castMediaType ('audio'|'video'), _castDeviceId, _castDeviceName.
+
+    _castUpdateButtons() {
+        // Server-side casting works over HTTP everywhere, so the button is always shown.
+        document.querySelectorAll('.cast-btn').forEach(b => {
+            b.style.display = '';
+            b.classList.toggle('cast-connected', !!this._castActive);
+        });
+    },
+
+    _castCloseMenu() {
+        const m = document.getElementById('cast-menu');
+        if (m) m.remove();
+        if (this._castMenuOutside) {
+            document.removeEventListener('click', this._castMenuOutside, true);
+            this._castMenuOutside = null;
+        }
+    },
+
+    // Build the device-picker dropdown anchored to the clicked Cast button.
+    async _castOpenMenu(payload, anchorEl) {
+        if (!anchorEl) return;
+        this._castCloseMenu();
+        const menu = document.createElement('div');
+        menu.id = 'cast-menu';
+        menu.className = 'cast-menu';
+        menu.innerHTML = `<div class="cast-menu-head">${this.t('cast.castTo', 'Cast to a device')}</div>` +
+            `<div class="cast-menu-list"><div class="cast-menu-empty">${this.t('cast.searching', 'Searching…')}</div></div>`;
+        // Append to the fullscreen element when one is active (Night Club / Android player in
+        // fullscreen) so the picker is visible; otherwise body. position:fixed keeps coords valid.
+        (document.fullscreenElement || document.body).appendChild(menu);
+        const r = anchorEl.getBoundingClientRect();
+        menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+        menu.style.top  = (r.top - 10) + 'px';
+        menu.style.transform = 'translateY(-100%)';
+        setTimeout(() => {
+            this._castMenuOutside = (ev) => {
+                if (!menu.contains(ev.target) && ev.target !== anchorEl && !anchorEl.contains(ev.target)) this._castCloseMenu();
+            };
+            document.addEventListener('click', this._castMenuOutside, true);
+        }, 0);
+
+        let devices = [];
+        try { const res = await this.api('cast/devices'); devices = (res && res.devices) || []; } catch (e) {}
+        if (!document.getElementById('cast-menu')) return;   // closed while searching
+        this._castMenuPayload = payload;
+        this._castMenuDevices = devices;
+        let html = '';
+        if (this._castActive && this._castDeviceId) {
+            html += `<div class="cast-menu-item cast-menu-stop" onclick="App._castServerStop()">` +
+                `<svg viewBox="0 0 24 24" width="18" height="18"><use href="#icon-cast"/></svg>` +
+                `<span>${this.t('cast.stop', 'Stop casting')}${this._castDeviceName ? ' (' + this.esc(this._castDeviceName) + ')' : ''}</span></div>`;
+        }
+        if (!devices.length) {
+            html += `<div class="cast-menu-empty">${this.t('cast.none', 'No Cast devices found on the network.')}</div>`;
+        } else {
+            devices.forEach((d, i) => {
+                html += `<div class="cast-menu-item" onclick="App._castStartIdx(${i})">` +
+                    `<svg viewBox="0 0 24 24" width="18" height="18"><use href="#icon-cast"/></svg>` +
+                    `<span>${this.esc(d.name || d.id)}</span></div>`;
+            });
+        }
+        const list = menu.querySelector('.cast-menu-list');
+        if (list) list.innerHTML = html;
+    },
+
+    _castStartIdx(i) {
+        const d = (this._castMenuDevices || [])[i];
+        if (d) this._castStart(this._castMenuPayload, d);
+    },
+
+    async _castStart(payload, device) {
+        this._castCloseMenu();
+        if (!payload || !payload.id) return;
+        let ok = false;
+        try {
+            const res = await this.apiPost('cast/play', {
+                deviceId: device.id, kind: payload.kind, id: payload.id,
+                title: payload.title || '', subtitle: payload.subtitle || '', image: payload.image || null
+            });
+            ok = !!(res && res.success);
+        } catch (e) {}
+        if (!ok) { alert(this.t('cast.failed', 'Could not start casting to that device.')); return; }
+        // Stop local playback — the device is the output now (covers the classic player bar,
+        // the Night Club / Android-player <audio>, and any <video>).
+        try { this.audioPlayer.pause(); } catch (e) {}
+        document.querySelectorAll('audio,video').forEach(el => { try { el.pause(); } catch (e) {} });
+        this._castActive     = true;
+        this._castMediaType  = payload.kind === 'track' ? 'audio' : 'video';
+        this._castDeviceId   = device.id;
+        this._castDeviceName = device.name || device.id;
+        this._castPaused     = false;
+        this._castUpdateButtons();
+        // Audio casting: drive playlist auto-advance from the device's status (a casting device
+        // never fires the browser's local 'ended' event). Engine was set by the cast button.
+        if (this._castMediaType === 'audio') {
+            this._castEngine = this._castEngine || 'classic';
+            this._castWasPlaying = false;
+            this._castAdvancing  = false;
+            this._castStartAudioWatch();
+        }
+    },
+
+    async _castServerStop() {
+        this._castCloseMenu();
+        this._castStopAudioWatch();
+        const id = this._castDeviceId;
+        this._castActive = false; this._castMediaType = null;
+        this._castDeviceId = null; this._castDeviceName = null; this._castPaused = false;
+        this._castEngine = null;
+        this._castUpdateButtons();
+        if (id) { try { await this.apiPost('cast/stop', { deviceId: id }); } catch (e) {} }
+    },
+
+    // ── Audio auto-advance over Cast ──
+    // A casting device plays independently, so the browser's local <audio> 'ended' never fires.
+    // We poll the device's media status and, when the current track FINISHES, advance the right
+    // engine's playlist (classic player / Night Club → nextTrack; Android player → gbMusic next).
+    _castStartAudioWatch() {
+        this._castStopAudioWatch();
+        this._castWatchTimer = setInterval(() => { this._castAudioTick(); }, 2000);
+    },
+    _castStopAudioWatch() {
+        if (this._castWatchTimer) { clearInterval(this._castWatchTimer); this._castWatchTimer = null; }
+    },
+    async _castAudioTick() {
+        if (!this._castActive || this._castMediaType !== 'audio' || !this._castDeviceId) { this._castStopAudioWatch(); return; }
+        if (this._castPaused || this._castAdvancing) return;
+        let st;
+        try { st = await this.api('cast/status?deviceId=' + encodeURIComponent(this._castDeviceId)); }
+        catch (e) { return; }
+        if (!st || !st.state) return;
+        const state = String(st.state).toLowerCase();
+        if (state === 'playing' || state === 'buffering') this._castWasPlaying = true;
+        // Advance on a NATURAL finish only — not on CANCELLED/INTERRUPTED/ERROR (e.g. the user
+        // stopped playback on the TV). Most devices report idleReason 'FINISHED'; a few just go
+        // idle with no reason after playing, so accept that too.
+        const reason = st.idleReason || '';
+        const finished = reason === 'FINISHED' || (state === 'idle' && reason === '' && this._castWasPlaying);
+        if (finished && this._castWasPlaying) {
+            this._castAdvancing  = true;
+            this._castWasPlaying = false;
+            try { await this._castAdvanceAudio(); }
+            finally { setTimeout(() => { this._castAdvancing = false; }, 3000); }
+        }
+    },
+    async _castAdvanceAudio() {
+        if (this._castEngine === 'gbm') {
+            this._gbMusicPlayerNext();           // re-casts via _gbMusicLoadTrack
+        } else if (this.repeat === 'one' && this.currentTrack) {
+            await this._castPlayTrackObj(this.currentTrack);
+        } else {
+            this.nextTrack();                    // re-casts via playTrack
+        }
+    },
+
+    async _castServerControl(action) {
+        if (!this._castDeviceId) return false;
+        try { await this.apiPost('cast/control', { deviceId: this._castDeviceId, action }); return true; }
+        catch (e) { return false; }
+    },
+
+    // Re-cast the current classic-player track (used by next/prev while casting audio).
+    async _castPlayCurrentTrack() {
+        await this._castPlayTrackObj(this.currentTrack);
+    },
+
+    // Cast any track object to the active device. Engine-agnostic — used by the classic player,
+    // Night Club Mode, and the Android player so each can re-cast its own "current" track.
+    async _castPlayTrackObj(t) {
+        if (!this._castActive || this._castMediaType !== 'audio' || !this._castDeviceId || !t) return;
+        try {
+            await this.apiPost('cast/play', {
+                deviceId: this._castDeviceId, kind: 'track', id: t.id,
+                title: t.title || '', subtitle: t.artist || '',
+                image: t.hasAlbumArt ? `/api/cover/track/${t.id}` : null
+            });
+            this._castPaused = false;
+            this._castWasPlaying = false;   // reset finished-detection for the new track
+        } catch (e) {}
+    },
+
+    // ── Button handlers (open the device picker) ──
+    // anchorEl/engine let the Night Club ('classic') and Android-player ('gbm') overlays open the
+    // picker anchored to their own button. No args → classic player-bar button.
+    async toggleCastAudio(anchorEl, engine) {
+        const btn = anchorEl || document.getElementById('btn-cast');
+        if (!btn) return;
+        this._castEngine = engine || 'classic';
+        const t = this._castEngine === 'gbm'
+            ? (this._gbMusicTracks || [])[this._gbMusicIdx]
+            : this.currentTrack;
+        if (!t && !this._castActive) return;   // nothing playing to cast
+        this._castOpenMenu({
+            kind: 'track', id: t ? t.id : 0,
+            title: t ? (t.title || '') : '', subtitle: t ? (t.artist || '') : '',
+            image: (t && t.hasAlbumArt) ? `/api/cover/track/${t.id}` : null
+        }, btn);
+    },
+
+    async toggleCastVideo(videoId, mediaType) {
+        const btn = document.getElementById(mediaType === 'musicvideo' ? 'mv-cast-btn' : 'video-cast-btn');
+        if (!btn) return;
+        const meta = this._castVideoMeta || {};
+        this._castOpenMenu({
+            kind: mediaType === 'musicvideo' ? 'mv' : 'video', id: videoId,
+            title: meta.title || 'NexusM', subtitle: '',
+            image: meta.posterPath ? `/videometa/${meta.posterPath}` : null
+        }, btn);
+    },
+
+    // ─── Audio Output Device picker (local OS outputs: speakers, monitor, Bluetooth) ───
+    // Browser equivalent of a native app's output selector: HTMLMediaElement.setSinkId()
+    // routes the page's <audio>/<video> to a chosen OS output device. Works only in a
+    // SECURE CONTEXT (HTTPS or localhost) — over plain http://LAN-IP the menu explains why.
+    // Unlike Cast (server-side, routes to network devices), this is purely client-side and
+    // covers the local machine's outputs (incl. paired/connected Bluetooth headsets).
+
+    _audioOutSupported() {
+        return typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+    },
+
+    _audioOutInit() {
+        if (!this._audioOutSupported()) return;            // Safari etc. — leave button hidden
+        const btn = document.getElementById('btn-audio-output');
+        if (btn) btn.style.display = '';
+
+        // Restore a previously chosen device (applied lazily when media starts playing).
+        try {
+            const saved = JSON.parse(localStorage.getItem('nexusm_audio_sink') || 'null');
+            if (saved && saved.id) { this._audioSinkId = saved.id; this._audioSinkLabel = saved.label || ''; }
+        } catch (e) {}
+        this._audioOutUpdateButton();
+
+        // Re-apply the chosen sink to ANY media element the moment it starts playing — covers
+        // the shared #audio-player, the gbm/Android <audio>, and freshly-built video players.
+        document.addEventListener('play', (e) => {
+            const el = e.target;
+            if (el && (el.tagName === 'AUDIO' || el.tagName === 'VIDEO')) this._applyAudioSink(el);
+        }, true);
+
+        // If the active device is unplugged, fall back to default.
+        try {
+            navigator.mediaDevices.addEventListener('devicechange', async () => {
+                if (!this._audioSinkId) return;
+                try {
+                    const devs = await navigator.mediaDevices.enumerateDevices();
+                    if (!devs.some(d => d.kind === 'audiooutput' && d.deviceId === this._audioSinkId))
+                        this._audioOutSelect('', '');   // chosen device gone → default
+                } catch (e) {}
+            });
+        } catch (e) {}
+    },
+
+    _applyAudioSink(el) {
+        if (el && typeof el.setSinkId === 'function' && this._audioSinkId)
+            el.setSinkId(this._audioSinkId).catch(() => {});
+        // The music <audio> is routed through the Web Audio graph (EQ/ReplayGain), so its
+        // output comes from the AudioContext, NOT the element — setSinkId on the element is
+        // ignored once it's a MediaElementSource. Route the context itself to the chosen device.
+        this._applyAudioSinkToCtx();
+    },
+
+    // Route the Web Audio output (the music EQ/ReplayGain chain) to the chosen device.
+    // AudioContext.setSinkId is Chrome/Edge 110+; '' = default device. No-op where unsupported.
+    _applyAudioSinkToCtx() {
+        const ctx = this._audioCtx;
+        if (!ctx || typeof ctx.setSinkId !== 'function') return;
+        const target = this._audioSinkId || '';
+        try {
+            if ((ctx.sinkId || '') === target) return;   // already routed there
+            const p = ctx.setSinkId(target);
+            if (p && typeof p.catch === 'function') p.catch(() => {});
+        } catch (e) {}
+    },
+
+    _audioOutUpdateButton() {
+        const btn = document.getElementById('btn-audio-output');
+        if (!btn) return;
+        btn.classList.toggle('audioout-active', !!this._audioSinkId);
+    },
+
+    async toggleAudioOutput(anchorEl) {
+        const btn = anchorEl || document.getElementById('btn-audio-output');
+        if (!btn) return;
+        this._audioOutOpenMenu(btn);
+    },
+
+    _audioOutCloseMenu() {
+        const m = document.getElementById('audioout-menu');
+        if (m) m.remove();
+        if (this._audioOutMenuOutside) {
+            document.removeEventListener('click', this._audioOutMenuOutside, true);
+            this._audioOutMenuOutside = null;
+        }
+    },
+
+    async _audioOutOpenMenu(anchorEl) {
+        if (!anchorEl) return;
+        this._audioOutCloseMenu();
+        const menu = document.createElement('div');
+        menu.id = 'audioout-menu';
+        menu.className = 'cast-menu';        // reuse cast dropdown styling
+        menu.innerHTML = `<div class="cast-menu-head">${this.t('audioout.title', 'Audio output')}</div>` +
+            `<div class="cast-menu-list"><div class="cast-menu-empty">${this.t('cast.searching', 'Searching…')}</div></div>`;
+        (document.fullscreenElement || document.body).appendChild(menu);
+        const r = anchorEl.getBoundingClientRect();
+        menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+        menu.style.top  = (r.top - 10) + 'px';
+        menu.style.transform = 'translateY(-100%)';
+        setTimeout(() => {
+            this._audioOutMenuOutside = (ev) => {
+                if (!menu.contains(ev.target) && ev.target !== anchorEl && !anchorEl.contains(ev.target)) this._audioOutCloseMenu();
+            };
+            document.addEventListener('click', this._audioOutMenuOutside, true);
+        }, 0);
+
+        // Secure-context / API gate
+        if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+            const list0 = menu.querySelector('.cast-menu-list');
+            if (list0) list0.innerHTML = `<div class="cast-menu-empty">` +
+                this.t('audioout.needsHttps', 'Output-device selection needs a secure connection (HTTPS or localhost).') +
+                `</div>`;
+            return;
+        }
+
+        const outs = await this._audioOutEnumerate();
+        if (!document.getElementById('audioout-menu')) return;   // closed while searching
+
+        let html = '';
+        const activeId = this._audioSinkId || '';
+        // Default (system) device row
+        html += `<div class="cast-menu-item${activeId === '' ? ' audioout-on' : ''}" onclick="App._audioOutSelect('','')">` +
+            `<svg viewBox="0 0 24 24" width="18" height="18"><use href="#icon-volume"/></svg>` +
+            `<span>${this.t('audioout.default', 'Default (system) device')}</span></div>`;
+
+        if (!outs.length) {
+            html += `<div class="cast-menu-empty">${this.t('audioout.none', 'No output devices found.')}</div>`;
+        } else {
+            this._audioOutDevices = outs;
+            outs.forEach((d, i) => {
+                if (d.deviceId === 'default') return;   // already shown as the Default row
+                const label = d.label || `${this.t('audioout.device', 'Audio output')} ${i + 1}`;
+                html += `<div class="cast-menu-item${activeId === d.deviceId ? ' audioout-on' : ''}" onclick="App._audioOutSelectIdx(${i})">` +
+                    `<svg viewBox="0 0 24 24" width="18" height="18"><use href="#icon-audio-output"/></svg>` +
+                    `<span>${this.esc(label)}</span></div>`;
+            });
+        }
+        const list = menu.querySelector('.cast-menu-list');
+        if (list) list.innerHTML = html;
+    },
+
+    async _audioOutEnumerate() {
+        let outs = [];
+        try {
+            let devs = await navigator.mediaDevices.enumerateDevices();
+            outs = devs.filter(d => d.kind === 'audiooutput');
+            // Device labels are hidden until the page has been granted a media permission.
+            // If they're all blank, request a transient mic stream to unlock the names, then
+            // release it immediately. If the user denies, we fall back to generic labels.
+            if (outs.length && outs.every(d => !d.label)) {
+                try {
+                    const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    s.getTracks().forEach(t => t.stop());
+                    devs = await navigator.mediaDevices.enumerateDevices();
+                    outs = devs.filter(d => d.kind === 'audiooutput');
+                } catch (e) { /* permission denied — keep generic labels */ }
+            }
+        } catch (e) {}
+        return outs;
+    },
+
+    _audioOutSelectIdx(i) {
+        const d = (this._audioOutDevices || [])[i];
+        if (d) this._audioOutSelect(d.deviceId, d.label || '');
+    },
+
+    _audioOutSelect(deviceId, label) {
+        this._audioOutCloseMenu();
+        this._audioSinkId = deviceId || '';
+        this._audioSinkLabel = label || '';
+        try {
+            if (this._audioSinkId)
+                localStorage.setItem('nexusm_audio_sink', JSON.stringify({ id: this._audioSinkId, label: this._audioSinkLabel }));
+            else
+                localStorage.removeItem('nexusm_audio_sink');
+        } catch (e) {}
+        // Apply to every current media element. setSinkId('') routes back to the default device.
+        const target = this._audioSinkId || '';
+        document.querySelectorAll('audio,video').forEach(el => {
+            if (typeof el.setSinkId === 'function') el.setSinkId(target).catch(() => {});
+        });
+        // Music plays through the Web Audio graph → route the AudioContext too (element
+        // setSinkId is ignored once the element is a MediaElementSource node).
+        this._applyAudioSinkToCtx();
+        this._audioOutUpdateButton();
+        this._updatePlayerMeta();   // reflect the new device name in the now-playing line
+    },
+
     // ─── Go Big Mode — TV / Big-Screen Interface ──────────────────────────────
 
     startGoBigMode() {
@@ -16628,6 +22548,10 @@ const App = {
                         </div>
                         <button id="gbm-lyrics-btn" class="gbm-action-btn" onclick="App._gbMusicShowLyrics()" title="Lyrics">
                             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                        </button>
+                        <button id="gbm-quality-btn" class="gbm-action-btn gbm-quality-btn-el" onclick="App.cycleStreamQuality()" title="Streaming Quality: Original">ORIG</button>
+                        <button id="gbm-cast-btn" class="gbm-action-btn cast-btn" onclick="App.toggleCastAudio(this,'gbm')" title="Cast">
+                            <svg width="22" height="22" viewBox="0 0 24 24" style="stroke:currentColor;fill:none"><use href="#icon-cast"/></svg>
                         </button>
                     </div>
                     <div id="gbm-progress-wrap">
@@ -18652,16 +24576,33 @@ const App = {
         // Stop previous, start new stream
         clearInterval(this._gbMusicProgressInterval);
         audio.pause();
-        audio.src = `/api/stream/${track.id}`;
-        audio.play().catch(() => {});
+        if (this._castActive && this._castMediaType === 'audio' && this._castEngine === 'gbm') {
+            // Casting: the device is the output. Don't load the local <audio>; cast the track.
+            try { audio.removeAttribute('src'); audio.load(); } catch (e) {}
+            this._castPlayTrackObj(track);
+        } else {
+            audio.src = `/api/stream/${track.id}`;
+            audio.play().catch(() => {});
+        }
         this._gbMusicUpdatePlayBtn(true);
 
-        // Progress polling
+        // Scrobble: fire now-playing and reset threshold state
+        this._scrobbleFired = false;
+        this._scrobbleTimestamp = Math.floor(Date.now() / 1000);
+        this._scrobbleNowPlaying(track);
+
+        // Progress polling + scrobble threshold (50% or 4 min, Last.fm spec)
         this._gbMusicProgressInterval = setInterval(() => {
             if (!this._gbOverlay) { clearInterval(this._gbMusicProgressInterval); return; }
             const a = this._gbOverlay.querySelector('#gbm-audio');
-            if (a && isFinite(a.duration) && a.duration > 0)
+            if (a && isFinite(a.duration) && a.duration > 0) {
                 this._gbMusicSetProgress(a.currentTime, a.duration);
+                if (!this._scrobbleFired && a.duration > 30 &&
+                    (a.currentTime >= a.duration * 0.5 || a.currentTime >= 240)) {
+                    this._scrobbleFired = true;
+                    this._fireScrobble(track, a.duration);
+                }
+            }
         }, 500);
 
         audio.onended = () => this._gbMusicPlayerNext();
@@ -18692,6 +24633,13 @@ const App = {
     },
 
     _gbMusicPlayerToggle() {
+        // While casting, play/pause controls the device, not the local <audio>.
+        if (this._castActive && this._castMediaType === 'audio' && this._castEngine === 'gbm') {
+            this._castPaused = !this._castPaused;
+            this._castServerControl(this._castPaused ? 'pause' : 'play');
+            this._gbMusicUpdatePlayBtn(!this._castPaused);
+            return;
+        }
         const audio = this._gbOverlay?.querySelector('#gbm-audio');
         if (!audio) return;
         audio.paused ? audio.play().catch(() => {}) : audio.pause();
@@ -18707,7 +24655,15 @@ const App = {
         if (this._gbMusicRepeat === 'one') { this._gbMusicLoadTrack(); return; }
         let nextIdx;
         if (this._gbMusicShuffle) {
-            nextIdx = Math.floor(Math.random() * this._gbMusicTracks.length);
+            const curArtist = this._gbMusicTracks[this._gbMusicIdx]?.artist;
+            const len = this._gbMusicTracks.length;
+            nextIdx = Math.floor(Math.random() * len);
+            // Up to 4 retries to avoid same track or same artist back-to-back
+            for (let i = 0; i < 4; i++) {
+                if (nextIdx !== this._gbMusicIdx &&
+                    (!curArtist || this._gbMusicTracks[nextIdx]?.artist !== curArtist)) break;
+                nextIdx = Math.floor(Math.random() * len);
+            }
         } else {
             nextIdx = this._gbMusicIdx + 1;
         }
@@ -19701,7 +25657,7 @@ const App = {
                     <div class="nr-detail-poster">
                         ${item.poster
                             ? `<img src="${this.esc(item.poster)}" alt="" onerror="this.style.display='none'">`
-                            : `<span class="nr-card-ph" style="height:200px"><svg style="width:48px;height:48px;stroke:currentColor;fill:none;stroke-width:1.5"><use href="#icon-film"/></svg></span>`}
+                            : `<span class="nr-card-ph" style="height:200px">${this._FILM_SVG}</span>`}
                     </div>
                     <div class="nr-detail-info">
                         <h2 class="nr-detail-title">${this.esc(item.title)}</h2>
@@ -20048,7 +26004,9 @@ const App = {
         setTimeout(() => tip.remove(), 3500);
     },
 
-    // ─── Welcome Modal ───────────────────────────────────────────────────────
+    // ─── Welcome / Setup Wizard ──────────────────────────────────────────────
+
+    _wizardStep: 0,
 
     async checkWelcomeModal() {
         // showWelcome comes from _initCfg (config/info fetched at startup) — no extra API call needed
@@ -20062,45 +26020,305 @@ const App = {
             overlay = document.createElement('div');
             overlay.id = 'welcome-modal-overlay';
             overlay.className = 'welcome-modal-overlay';
-            const version = this._initCfg?.version || '';
-            overlay.innerHTML = `
-                <div class="welcome-modal">
-                    <div class="welcome-modal-header">
-                        <div class="welcome-modal-logo">
-                            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
-                            </svg>
-                        </div>
-                        <div class="welcome-modal-title">${this.t('welcome.title')}</div>
-                        <span class="welcome-modal-version">${this.t('welcome.version')} ${version}</span>
-                    </div>
-                    <hr class="welcome-modal-divider">
-                    <div class="welcome-modal-section-title">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 8 12 12 14 14"/></svg>
-                        ${this.t('welcome.gettingStarted.title')}
-                    </div>
-                    <div class="welcome-modal-steps">
-                        <div class="welcome-modal-step"><div class="welcome-modal-step-num">1</div><div class="welcome-modal-step-text">${this.t('welcome.gettingStarted.step1')}</div></div>
-                        <div class="welcome-modal-step"><div class="welcome-modal-step-num">2</div><div class="welcome-modal-step-text">${this.t('welcome.gettingStarted.step2')}</div></div>
-                        <div class="welcome-modal-step"><div class="welcome-modal-step-num">3</div><div class="welcome-modal-step-text">${this.t('welcome.gettingStarted.step3')}</div></div>
-                    </div>
-                    <hr class="welcome-modal-divider">
-                    <div class="welcome-modal-section-title">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                        ${this.t('welcome.feedback.title')}
-                    </div>
-                    <div class="welcome-modal-feedback">
-                        <div class="welcome-modal-feedback-desc">${this.t('welcome.feedback.desc')}</div>
-                        <a href="${this.t('welcome.feedbackUrl')}" target="_blank" rel="noopener noreferrer" class="welcome-modal-feedback-btn">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-                            ${this.t('welcome.feedback.btn')}
-                        </a>
-                    </div>
-                    <button class="welcome-modal-ack" onclick="App.dismissWelcomeModal()">${this.t('welcome.acknowledge')}</button>
-                </div>`;
             document.body.appendChild(overlay);
         }
         overlay.style.display = 'flex';
+        this._wizardGoTo(0);
+    },
+
+    _wizardGoTo(step) {
+        const overlay = document.getElementById('welcome-modal-overlay');
+        if (!overlay) return;
+        this._wizardStep = step;
+        const version = this._initCfg?.version || '';
+        const back = `← ${this.t('btn.back')}`;
+        const next = `${this.t('btn.next')} →`;
+
+        const dotBar = `<div class="wz-step-indicator">
+            ${[1,2,3].map(s => `<div class="wz-step-dot ${s < step ? 'wz-dot-done' : s === step ? 'wz-dot-active' : ''}"></div>`).join('')}
+            <span class="wz-step-label">${this.t('wizard.step')} ${step} ${this.t('wizard.of3')}</span>
+        </div>`;
+
+        const langs = [{v:'en',l:'English'},{v:'fr',l:'Français'},{v:'de',l:'Deutsch'},{v:'es',l:'Español'},{v:'it',l:'Italiano'},{v:'nl',l:'Nederlands'},{v:'pl',l:'Polski'},{v:'pt',l:'Português'},{v:'ro',l:'Română'},{v:'ru',l:'Русский'},{v:'sv',l:'Svenska'},{v:'uk',l:'Українська'},{v:'sl',l:'Slovenščina'},{v:'et',l:'Eesti'},{v:'fi',l:'Suomi'},{v:'no',l:'Norsk'},{v:'lt',l:'Lietuvių'},{v:'sr',l:'Српски'},{v:'sq',l:'Shqip'},{v:'zh',l:'中文'},{v:'ja',l:'日本語'},{v:'id',l:'Bahasa Indonesia'},{v:'ko',l:'한국어'},{v:'hi',l:'हिन्दी'},{v:'vi',l:'Tiếng Việt'},{v:'th',l:'ภาษาไทย'}];
+        const langSelect = `<div class="wz-lang-row">
+            <svg width="14" height="14" fill="none" stroke="var(--text-secondary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <span class="wz-lang-label">${this.t('wizard.chooseLanguage')}</span>
+            <select class="wz-lang-select" onchange="App._wzChangeLang(this.value)">
+                ${langs.map(l => `<option value="${l.v}" ${this._langCode === l.v ? 'selected' : ''}>${l.l}</option>`).join('')}
+            </select>
+        </div>`;
+
+        let body = '';
+
+        if (step === 0) {
+            body = `
+            <div class="welcome-modal-header">
+                <div class="welcome-modal-logo" style="display:flex;align-items:center;justify-content:center">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>
+                    </svg>
+                </div>
+                <div class="welcome-modal-title">${this.t('welcome.title')}</div>
+                <span class="welcome-modal-version">${this.t('welcome.version')} ${this.esc(version)}</span>
+            </div>
+            <hr class="welcome-modal-divider">
+            <p class="wz-intro">${this.t('wizard.intro')}</p>
+            <div class="wz-feature-list">
+                <div class="wz-feature"><svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>${this.t('wizard.featureMusic')}</div>
+                <div class="wz-feature"><svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/></svg>${this.t('wizard.featureMovies')}</div>
+                <div class="wz-feature"><svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>${this.t('wizard.featurePhotos')}</div>
+            </div>
+            <hr class="welcome-modal-divider">
+            ${langSelect}
+            <div class="wz-nav" style="margin-top:16px">
+                <button class="wz-btn-ghost" onclick="App._wizardSkip()">${this.t('wizard.skipSetup')}</button>
+                <button class="wz-btn-primary" onclick="App._wizardGoTo(1)">${this.t('wizard.getStarted')} →</button>
+            </div>`;
+        } else if (step === 1) {
+            body = `
+            ${dotBar}
+            <div class="wz-section-title">
+                <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                ${this.t('wizard.stepFolders')}
+            </div>
+            <p class="wz-desc">${this.t('wizard.foldersDesc')}</p>
+            <div class="wz-folder-list" id="wz-folder-list"><div class="wz-loading">…</div></div>
+            <div class="wz-nav">
+                <button class="wz-btn-secondary" onclick="App._wizardGoTo(0)">${back}</button>
+                <div class="wz-nav-right">
+                    <button class="wz-btn-ghost" onclick="App._wizardGoTo(2)">${this.t('wizard.skipThisStep')}</button>
+                    <button class="wz-btn-primary" onclick="App._wizardGoTo(2)">${next}</button>
+                </div>
+            </div>`;
+        } else if (step === 2) {
+            const tmdbSet = !!(this._initCfg?.tmdbApiKey);
+            body = `
+            ${dotBar}
+            <div class="wz-section-title">
+                <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                ${this.t('wizard.stepTmdb')} <span class="wz-optional">${this.t('wizard.optional')}</span>
+            </div>
+            <p class="wz-desc">${this.t('wizard.tmdbDesc')}
+                <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${this.t('wizard.tmdbGetKey')} →</a>
+            </p>
+            <div class="wz-tmdb-row">
+                <input type="password" id="wz-tmdb-input" class="wz-input" placeholder="${this.t('wizard.tmdbPlaceholder')}…" autocomplete="off">
+                ${tmdbSet ? `<p class="wz-tmdb-set">✓ ${this.t('wizard.tmdbAlreadySet')}</p>` : ''}
+                <div class="wz-tmdb-status" id="wz-tmdb-status"></div>
+            </div>
+            <div class="wz-nav">
+                <button class="wz-btn-secondary" onclick="App._wizardGoTo(1)">${back}</button>
+                <div class="wz-nav-right">
+                    <button class="wz-btn-ghost" onclick="App._wizardGoTo(3)">${this.t('wizard.skip')}</button>
+                    <button class="wz-btn-primary" onclick="App._wizardSaveTmdb()">${next}</button>
+                </div>
+            </div>`;
+        } else if (step === 3) {
+            const cts = this.t('wizard.scanClickToStart');
+            body = `
+            ${dotBar}
+            <div class="wz-section-title">
+                <svg width="15" height="15" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                ${this.t('wizard.stepScan')}
+            </div>
+            <p class="wz-desc">${this.t('wizard.scanDesc')}</p>
+            <div class="wz-scan-grid">
+                <button class="wz-scan-btn" id="wz-scan-music" onclick="App._wzTriggerScan('music')">
+                    <svg width="13" height="13" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><use href="#icon-music"/></svg>
+                    <span class="wz-scan-btn-title">${this.t('nav.music')}</span>
+                    <span class="wz-scan-btn-status" id="wz-ss-music">${cts}</span>
+                </button>
+                <button class="wz-scan-btn" id="wz-scan-video" onclick="App._wzTriggerScan('video')">
+                    <svg width="13" height="13" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><use href="#icon-film"/></svg>
+                    <span class="wz-scan-btn-title">${this.t('wizard.folderMoviesTV')}</span>
+                    <span class="wz-scan-btn-status" id="wz-ss-video">${cts}</span>
+                </button>
+                <button class="wz-scan-btn" id="wz-scan-pictures" onclick="App._wzTriggerScan('pictures')">
+                    <svg width="13" height="13" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><use href="#icon-image"/></svg>
+                    <span class="wz-scan-btn-title">${this.t('wizard.folderPictures')}</span>
+                    <span class="wz-scan-btn-status" id="wz-ss-pictures">${cts}</span>
+                </button>
+                <button class="wz-scan-btn" id="wz-scan-audiobooks" onclick="App._wzTriggerScan('audiobooks');App._wzTriggerScan('ebooks')">
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <svg width="13" height="13" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><use href="#icon-headphones"/></svg>
+                        <svg width="13" height="13" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><use href="#icon-book"/></svg>
+                    </div>
+                    <span class="wz-scan-btn-title">${this.t('wizard.audiobooksEbooks')}</span>
+                    <span class="wz-scan-btn-status" id="wz-ss-audiobooks">${cts}</span>
+                    <span class="wz-scan-btn-status" id="wz-ss-ebooks" style="display:none"></span>
+                </button>
+            </div>
+            <p class="wz-scan-hint">${this.t('wizard.scanOr')} <button class="wz-link" onclick="App._wzScanAll()">${this.t('wizard.scanAll')}</button></p>
+            <div class="wz-nav">
+                <button class="wz-btn-secondary" onclick="App._wizardGoTo(2)">${back}</button>
+                <button class="wz-btn-primary" onclick="App._wizardFinish()">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
+                    ${this.t('wizard.finishSetup')}
+                </button>
+            </div>`;
+        }
+
+        overlay.innerHTML = `<div class="welcome-modal wz-modal" onclick="event.stopPropagation()">${body}</div>`;
+        if (step === 1) this._wzLoadFolders();
+    },
+
+    _wizardSkip() {
+        const overlay = document.getElementById('welcome-modal-overlay');
+        if (overlay) overlay.style.display = 'none';
+    },
+
+    async _wzChangeLang(code) {
+        await this.loadLanguage(code);
+        try { await this.apiPost('config/save', { language: code }); } catch(e) {}
+        this._wizardGoTo(this._wizardStep);
+    },
+
+    async _wizardFinish() {
+        await this.dismissWelcomeModal();
+    },
+
+    async _wzLoadFolders() {
+        const container = document.getElementById('wz-folder-list');
+        if (!container) return;
+
+        let config;
+        try { config = await this.api('config/info'); } catch(e) {}
+
+        const types = [
+            { type: 'music',      label: this.t('nav.music'),             key: 'musicFolders',      icon: 'music' },
+            { type: 'movies',     label: this.t('wizard.folderMoviesTV'), key: 'moviesFolders',     icon: 'film' },
+            { type: 'pictures',   label: this.t('wizard.folderPictures'), key: 'picturesFolders',   icon: 'image' },
+            { type: 'audiobooks', label: this.t('nav.audioBooks'),        key: 'audioBooksFolders', icon: 'headphones' },
+            { type: 'ebooks',     label: this.t('nav.ebooks'),            key: 'ebooksFolders',     icon: 'book' },
+        ];
+
+        // Create hidden inputs for all folder types if not already in DOM (settings page may have them)
+        const keyMap = this._fbKeyMap();
+        const hiddenInputsHtml = Object.entries(keyMap)
+            .filter(([, key]) => !document.getElementById(`cfg-${key}`))
+            .map(([, key]) => `<input type="hidden" id="cfg-${key}" value="${this.esc(config?.[key] || '')}">`)
+            .join('');
+
+        const rows = types.map(({ type, label, key, icon }) => {
+            const paths = (config?.[key] || '').split(',').map(p => p.trim()).filter(Boolean);
+            return `<div class="wz-folder-row">
+                <div class="wz-folder-row-head">
+                    <span class="wz-folder-type">
+                        <svg width="13" height="13" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><use href="#icon-${icon}"/></svg>
+                        ${label}
+                    </span>
+                    <button class="wz-btn-sm" onclick="App._openFolderBrowser('${type}')">+ ${this.t('wizard.addFolder')}</button>
+                </div>
+                <div class="wz-chips" id="wz-chips-${type}">${this._wzRenderChips(type, paths)}</div>
+            </div>`;
+        }).join('');
+
+        container.innerHTML = hiddenInputsHtml + rows;
+    },
+
+    _wzRenderChips(type, paths) {
+        if (!paths.length) return `<span class="share-no-paths" style="font-size:11px">${this.t('wizard.noFolders')}</span>`;
+        return paths.map((p, i) => `<span class="path-chip">
+            <span class="path-chip-text">${this.esc(p)}</span>
+            <button class="path-chip-remove" onclick="App._wzRemovePath('${type}',${i})" title="Remove">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </span>`).join('');
+    },
+
+    async _wzRemovePath(type, idx) {
+        const key = this._fbKeyMap()[type];
+        const input = document.getElementById(`cfg-${key}`);
+        if (!input) return;
+        const paths = input.value.split(',').map(p => p.trim()).filter(Boolean);
+        paths.splice(idx, 1);
+        input.value = paths.join(',');
+        const chipsEl = document.getElementById(`wz-chips-${type}`);
+        if (chipsEl) chipsEl.innerHTML = this._wzRenderChips(type, paths);
+        await this._fbAutoSaveFolders(type);
+    },
+
+    async _wzRefreshStep1() {
+        if (this._wizardStep !== 1) return;
+        const keyMap = this._fbKeyMap();
+        let config;
+        try { config = await this.api('config/info'); } catch(e) { return; }
+        ['music','movies','pictures','audiobooks','ebooks'].forEach(type => {
+            const key = keyMap[type];
+            const paths = (config?.[key] || '').split(',').map(p => p.trim()).filter(Boolean);
+            const chipsEl = document.getElementById(`wz-chips-${type}`);
+            if (chipsEl) chipsEl.innerHTML = this._wzRenderChips(type, paths);
+            const inp = document.getElementById(`cfg-${key}`);
+            if (inp) inp.value = config?.[key] || '';
+        });
+    },
+
+    async _wizardSaveTmdb() {
+        const input = document.getElementById('wz-tmdb-input');
+        const key = input?.value?.trim();
+        const statusEl = document.getElementById('wz-tmdb-status');
+        if (key) {
+            if (statusEl) { statusEl.style.color = 'var(--text-secondary)'; statusEl.textContent = `${this.t('wizard.tmdbSaving')}…`; }
+            try {
+                await this.apiPost('config/save', { tmdbApiKey: key });
+                if (this._initCfg) this._initCfg.tmdbApiKey = key;
+                if (statusEl) { statusEl.style.color = 'var(--success,#27ae60)'; statusEl.textContent = `✓ ${this.t('wizard.tmdbSaved')}`; }
+                setTimeout(() => this._wizardGoTo(3), 600);
+            } catch(e) {
+                if (statusEl) { statusEl.style.color = 'var(--danger,#e74c3c)'; statusEl.textContent = this.t('wizard.tmdbError'); }
+            }
+        } else {
+            this._wizardGoTo(3);
+        }
+    },
+
+    async _wzTriggerScan(type) {
+        const endpoints = { music: 'scan', video: 'scan/videos', pictures: 'scan/pictures', audiobooks: 'scan/audiobooks', ebooks: 'scan/ebooks' };
+        const statusEndpoints = { music: 'scan/status', video: 'scan/videos/status', pictures: 'scan/pictures/status', audiobooks: 'scan/audiobooks/status', ebooks: 'scan/ebooks/status' };
+        const endpoint = endpoints[type];
+        const statusEndpoint = statusEndpoints[type];
+        // ebooks shares the audiobooks button cell
+        const btnEl = document.getElementById(type === 'ebooks' ? 'wz-scan-audiobooks' : `wz-scan-${type}`);
+        const statusEl = document.getElementById(`wz-ss-${type}`);
+        if (!endpoint || !statusEl) return;
+        if (type === 'ebooks') statusEl.style.display = '';
+        if (btnEl) btnEl.disabled = true;
+        statusEl.textContent = type === 'ebooks' ? `eBooks: ${this.t('wizard.scanStarting')}…` : `${this.t('wizard.scanStarting')}…`;
+        try {
+            await this.apiPost(endpoint);
+            this._wzPollScan(type, statusEndpoint, statusEl, btnEl);
+        } catch(e) {
+            if (statusEl) statusEl.textContent = type === 'ebooks' ? `eBooks: ${this.t('wizard.scanError')}` : this.t('wizard.scanError');
+            if (btnEl) btnEl.disabled = false;
+        }
+    },
+
+    _wzPollScan(type, endpoint, statusEl, btnEl) {
+        const prefix = type === 'ebooks' ? 'eBooks: ' : '';
+        const poll = async () => {
+            if (this._wizardStep !== 3) return;
+            try {
+                const s = await this.api(endpoint);
+                if (!s || !statusEl) return;
+                if (s.isScanning) {
+                    statusEl.style.color = 'var(--accent)';
+                    statusEl.textContent = `${prefix}${s.percentComplete || 0}% · ${s.processedFiles || 0} files`;
+                    setTimeout(poll, 1500);
+                } else {
+                    statusEl.style.color = 'var(--success,#27ae60)';
+                    statusEl.textContent = `${prefix}${this.t('wizard.scanDone')} ✓`;
+                    if (btnEl) btnEl.disabled = false;
+                }
+            } catch(e) {
+                if (statusEl) { statusEl.style.color = ''; statusEl.textContent = `${prefix}${this.t('wizard.scanError')}`; }
+                if (btnEl) btnEl.disabled = false;
+            }
+        };
+        poll();
+    },
+
+    _wzScanAll() {
+        ['music','video','pictures','audiobooks','ebooks'].forEach(t => this._wzTriggerScan(t));
     },
 
     async dismissWelcomeModal() {
@@ -20108,9 +26326,6 @@ const App = {
         if (overlay) overlay.style.display = 'none';
         this._welcomeDismissed = true;
         try { await this.apiPost('welcome-dismissed', {}); } catch (e) {}
-        // Sync the settings toggle if it's visible
-        const tog = document.getElementById('welcome-popup-toggle');
-        if (tog) tog.checked = false;
     },
 
     async toggleWelcomePopup(enabled) {

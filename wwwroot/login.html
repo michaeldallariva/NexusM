@@ -19,6 +19,7 @@
             --border: #333;
             --danger: #e74c3c;
             --success: #27ae60;
+            --green: #22c55e;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -97,12 +98,33 @@
         #user-selection {
             display: none;
         }
-        #user-selection h2 {
-            text-align: center;
+        .who-heading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 36px;
+        }
+        #user-selection .who-heading h2 {
             font-size: 22px;
             font-weight: 400;
             color: var(--text-secondary);
-            margin-bottom: 36px;
+            margin-bottom: 0;
+        }
+        .np-open-btn {
+            display: none;
+            background: none;
+            border: 1px solid rgba(34,197,94,0.35);
+            border-radius: 8px;
+            padding: 5px 7px;
+            cursor: pointer;
+            color: var(--green);
+            line-height: 0;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .np-open-btn:hover {
+            background: rgba(34,197,94,0.1);
+            border-color: var(--green);
         }
         .user-grid {
             display: grid;
@@ -141,6 +163,8 @@
             margin: 0 auto 12px;
             border: 3px solid transparent;
             transition: border-color 0.2s;
+            overflow: hidden;
+            position: relative;
         }
         .user-card:hover .user-avatar {
             border-color: var(--accent);
@@ -303,6 +327,179 @@
             letter-spacing: 2px;
             margin-bottom: 28px;
         }
+
+        /* ── Numeric Keypad Overlay ── */
+        #numpad-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.72);
+            z-index: 200;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+        }
+        #numpad-overlay.open {
+            display: flex;
+        }
+        #numpad-modal {
+            background: var(--bg-secondary);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 34px 29px 24px;
+            width: 360px;
+            text-align: center;
+            box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+            animation: npSlideIn 0.2s ease;
+        }
+        @keyframes npSlideIn {
+            from { opacity: 0; transform: scale(0.88) translateY(10px); }
+            to   { opacity: 1; transform: scale(1)    translateY(0); }
+        }
+
+        /* State: user selection inside numpad */
+        #np-state-users { display: none; }
+        #np-state-users h3 {
+            font-size: 22px;
+            font-weight: 400;
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+        .np-user-list {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 17px;
+            margin-bottom: 24px;
+        }
+        .np-user-item {
+            cursor: pointer;
+            text-align: center;
+            padding: 12px 14px;
+            border-radius: 10px;
+            border: 1px solid transparent;
+            transition: background 0.15s, border-color 0.15s, transform 0.1s;
+            min-width: 84px;
+        }
+        .np-user-item:hover {
+            background: var(--bg-surface);
+            border-color: var(--border);
+            transform: translateY(-2px);
+        }
+        .np-avatar {
+            width: 62px;
+            height: 62px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: 700;
+            color: #fff;
+            margin: 0 auto 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        .np-avatar.admin { background: linear-gradient(135deg, #f39c12, #e67e22); }
+        .np-avatar.child { background: linear-gradient(135deg, #22c55e, #16a34a); }
+        .np-user-name {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        /* State: PIN entry inside numpad */
+        #np-state-pin { display: none; }
+        #np-who {
+            font-size: 19px;
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: 22px;
+        }
+        #np-dots {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 6px;
+        }
+        .np-dot {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.15);
+            border: 2px solid rgba(255,255,255,0.25);
+            transition: background 0.12s, border-color 0.12s, transform 0.1s;
+        }
+        .np-dot.filled {
+            background: var(--green);
+            border-color: var(--green);
+            transform: scale(1.15);
+        }
+        #np-error {
+            min-height: 38px;
+            font-size: 14px;
+            color: #e74c3c;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Digit grid */
+        .np-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 11px;
+            margin-bottom: 16px;
+        }
+        .np-key {
+            height: 70px;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            background: var(--bg-surface);
+            color: var(--text-primary);
+            font-size: 26px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.1s, transform 0.08s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .np-key:hover { background: var(--bg-hover); }
+        .np-key:active { transform: scale(0.93); background: rgba(255,255,255,0.08); }
+        .np-key-del {
+            font-size: 22px;
+            color: var(--text-muted);
+        }
+        .np-key-ok {
+            background: var(--green);
+            border-color: var(--green);
+            color: #fff;
+            font-size: 19px;
+            font-weight: 700;
+        }
+        .np-key-ok:hover { background: #16a34a; border-color: #16a34a; }
+        .np-key-ok:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .np-back-link {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 16px;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 6px;
+            transition: color 0.15s, background 0.15s;
+        }
+        .np-back-link:hover { color: var(--text-primary); background: var(--bg-surface); }
     </style>
 </head>
 <body>
@@ -311,7 +508,7 @@
     <div class="login-wrapper">
         <div class="logo-section">
             <div class="logo-icon">
-                <img src="/favicon.svg" alt="NexusM">
+                <img src="/icon-192.png" alt="NexusM">
             </div>
             <h1>Nexus<span class="logo-green">M</span></h1>
             <p>Media Library Manager</p>
@@ -325,11 +522,26 @@
 
         <!-- User Selection -->
         <div id="user-selection">
-            <h2>Who's jumping in?</h2>
+            <div class="who-heading">
+                <h2>Who's jumping in?</h2>
+                <button id="np-open-btn" class="np-open-btn" title="Open number pad" onclick="LoginApp.npOpenSelect()">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="3" width="20" height="18" rx="3"/>
+                        <line x1="8"  y1="8"  x2="8.01"  y2="8"/>
+                        <line x1="12" y1="8"  x2="12.01" y2="8"/>
+                        <line x1="16" y1="8"  x2="16.01" y2="8"/>
+                        <line x1="8"  y1="12" x2="8.01"  y2="12"/>
+                        <line x1="12" y1="12" x2="12.01" y2="12"/>
+                        <line x1="16" y1="12" x2="16.01" y2="12"/>
+                        <line x1="8"  y1="16" x2="12"    y2="16"/>
+                        <line x1="16" y1="16" x2="16.01" y2="16"/>
+                    </svg>
+                </button>
+            </div>
             <div id="user-grid" class="user-grid"></div>
         </div>
 
-        <!-- PIN Entry -->
+        <!-- PIN Entry (keyboard users / fallback) -->
         <div id="pin-entry">
             <h2>Enter PIN</h2>
             <div id="pin-user-display"></div>
@@ -355,6 +567,49 @@
         </div>
     </div>
 
+    <!-- ── Numeric Keypad Overlay ── -->
+    <div id="numpad-overlay">
+        <div id="numpad-modal">
+
+            <!-- State A: pick a user -->
+            <div id="np-state-users">
+                <h3>Who's jumping in?</h3>
+                <div id="np-user-list" class="np-user-list"></div>
+                <button class="np-back-link" onclick="LoginApp.npClose()">✕ Cancel</button>
+            </div>
+
+            <!-- State B: enter PIN -->
+            <div id="np-state-pin">
+                <div id="np-who"></div>
+                <div id="np-dots">
+                    <span class="np-dot" id="np-d0"></span>
+                    <span class="np-dot" id="np-d1"></span>
+                    <span class="np-dot" id="np-d2"></span>
+                    <span class="np-dot" id="np-d3"></span>
+                    <span class="np-dot" id="np-d4"></span>
+                    <span class="np-dot" id="np-d5"></span>
+                </div>
+                <div id="np-error"></div>
+                <div class="np-grid">
+                    <button class="np-key" onclick="LoginApp.npPress('1')">1</button>
+                    <button class="np-key" onclick="LoginApp.npPress('2')">2</button>
+                    <button class="np-key" onclick="LoginApp.npPress('3')">3</button>
+                    <button class="np-key" onclick="LoginApp.npPress('4')">4</button>
+                    <button class="np-key" onclick="LoginApp.npPress('5')">5</button>
+                    <button class="np-key" onclick="LoginApp.npPress('6')">6</button>
+                    <button class="np-key" onclick="LoginApp.npPress('7')">7</button>
+                    <button class="np-key" onclick="LoginApp.npPress('8')">8</button>
+                    <button class="np-key" onclick="LoginApp.npPress('9')">9</button>
+                    <button class="np-key np-key-del" onclick="LoginApp.npDel()">⌫</button>
+                    <button class="np-key" onclick="LoginApp.npPress('0')">0</button>
+                    <button class="np-key np-key-ok" id="np-ok-btn" onclick="LoginApp.npOK()" disabled>OK</button>
+                </div>
+                <button class="np-back-link" id="np-back-link" onclick="LoginApp.npBack()">&#8592; Back</button>
+            </div>
+
+        </div>
+    </div>
+
     <script>
         (function() {
             const bgs = ['/images/bg-1.jpg', '/images/bg-2.jpg', '/images/bg-3.jpg', '/images/bg-4.jpg'];
@@ -368,9 +623,11 @@
             users: [],
             selectedUser: null,
             demoMode: false,
+            securityByPin: false,
             lang: {},
+            _npPin: '',
+            _npFromSelect: false,  // true if numpad was opened from the icon (not a user avatar)
 
-            // Return translated string, replacing {key} placeholders
             t(key, vars = {}) {
                 let s = this.lang[key] || key;
                 for (const [k, v] of Object.entries(vars)) s = s.replace(`{${k}}`, v);
@@ -378,7 +635,6 @@
             },
 
             async init() {
-                // Check if already authenticated
                 try {
                     const res = await fetch('/api/auth/session');
                     const session = await res.json();
@@ -386,14 +642,13 @@
                         window.location.href = '/';
                         return;
                     }
-                    // If SecurityByPin is disabled, should not be on login page
                     if (!session.securityByPin) {
                         window.location.href = '/';
                         return;
                     }
+                    this.securityByPin = true;
                     this.demoMode = session.demoModeEnabled || false;
 
-                    // Load language file for login-page strings
                     try {
                         const code = session.language || 'en';
                         const lr = await fetch(`/lang/${code}.json`);
@@ -401,10 +656,8 @@
                     } catch (e) { /* fall back to key names */ }
                 } catch (e) { /* continue to login */ }
 
-                // Load users
                 await this.loadUsers();
 
-                // Demo mode: auto-login as guest immediately — no selection or PIN screen
                 if (this.demoMode) {
                     const guest = this.users.find(u => u.role === 'guest');
                     if (guest) {
@@ -415,6 +668,11 @@
 
                 document.getElementById('loading').style.display = 'none';
                 this.bindEvents();
+
+                // Show keypad icon when PIN login is active
+                if (this.securityByPin) {
+                    document.getElementById('np-open-btn').style.display = 'inline-flex';
+                }
 
                 if (this.users.length === 0) {
                     this.selectUser('admin', 'Admin');
@@ -435,6 +693,23 @@
                 document.getElementById('pin').addEventListener('input', (e) => {
                     e.target.value = e.target.value.replace(/\D/g, '');
                 });
+
+                // Close numpad on overlay background click
+                document.getElementById('numpad-overlay').addEventListener('click', (e) => {
+                    if (e.target === document.getElementById('numpad-overlay')) this.npClose();
+                });
+
+                // Physical keyboard support while numpad is open
+                document.addEventListener('keydown', (e) => {
+                    const overlay = document.getElementById('numpad-overlay');
+                    if (!overlay.classList.contains('open')) return;
+                    const pinState = document.getElementById('np-state-pin').style.display !== 'none';
+                    if (!pinState) return;
+                    if (e.key >= '0' && e.key <= '9') { e.preventDefault(); this.npPress(e.key); }
+                    else if (e.key === 'Backspace')   { e.preventDefault(); this.npDel(); }
+                    else if (e.key === 'Enter')        { e.preventDefault(); this.npOK(); }
+                    else if (e.key === 'Escape')       { e.preventDefault(); this.npBack(); }
+                });
             },
 
             async loadUsers() {
@@ -447,7 +722,6 @@
                 }
             },
 
-            // Demo mode: silently log in as the guest user with no PIN
             async autoLoginGuest(username) {
                 try {
                     const res = await fetch('/api/auth/login', {
@@ -455,12 +729,8 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ username, pin: '' })
                     });
-                    if (res.ok) {
-                        window.location.href = '/';
-                        return;
-                    }
-                } catch (e) { /* fall through to normal login */ }
-                // Guest auto-login failed — show normal login screen as fallback
+                    if (res.ok) { window.location.href = '/'; return; }
+                } catch (e) { /* fall through */ }
                 document.getElementById('loading').style.display = 'none';
                 this.bindEvents();
                 this.showUserSelection();
@@ -469,11 +739,17 @@
             showUserSelection() {
                 const grid = document.getElementById('user-grid');
                 grid.innerHTML = this.users.map(u => {
-                    const initial = (u.displayName || u.username).charAt(0).toUpperCase();
+                    const displayName = u.displayName || u.username;
+                    const initial = displayName.charAt(0).toUpperCase();
                     const avatarClass = u.role === 'admin' ? 'admin' : u.role === 'child' ? 'child' : '';
-                    return `<div class="user-card" onclick="LoginApp.selectUser('${this.esc(u.username)}', '${this.esc(u.displayName || u.username)}')">
-                        <div class="user-avatar ${avatarClass}">${this.esc(initial)}</div>
-                        <div class="user-name">${this.esc(u.displayName || u.username)}</div>
+                    const picImg = u.hasPicture
+                        ? `<img src="/api/auth/users/${encodeURIComponent(u.username)}/profile-picture"
+                               style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover"
+                               onerror="this.remove()">`
+                        : '';
+                    return `<div class="user-card" onclick="LoginApp.selectUser('${this.esc(u.username)}', '${this.esc(displayName)}')">
+                        <div class="user-avatar ${avatarClass}">${this.esc(initial)}${picImg}</div>
+                        <div class="user-name">${this.esc(displayName)}</div>
                         <div class="user-role">${this.esc(u.role)}</div>
                     </div>`;
                 }).join('');
@@ -482,13 +758,12 @@
                 document.getElementById('pin-entry').style.display = 'none';
                 document.getElementById('viewing-hours-block').style.display = 'none';
                 this.clearError();
+                this.npClose();
             },
 
             selectUser(username, displayName) {
-                // Find the user object for viewing-hours check
                 const user = this.users.find(u => u.username === username);
 
-                // Client-side viewing hours check (enforcement is also on the server)
                 if (user && user.role === 'child' && user.viewingHoursEnabled) {
                     const now = new Date();
                     const cur = now.getHours() * 60 + now.getMinutes();
@@ -498,12 +773,18 @@
                     const end   = eh * 60 + em;
                     const inWindow = start <= end
                         ? cur >= start && cur <= end
-                        : cur >= start || cur <= end;  // overnight window
+                        : cur >= start || cur <= end;
 
                     if (!inWindow) {
                         this.showViewingHoursBlock(displayName, user.viewingHoursStart, user.viewingHoursEnd);
                         return;
                     }
+                }
+
+                // When PIN mode is active, open the numeric keypad instead of the text form
+                if (this.securityByPin) {
+                    this.npOpenForUser(username, displayName);
+                    return;
                 }
 
                 this.selectedUser = username;
@@ -515,8 +796,6 @@
                 document.getElementById('pin').value = '';
                 document.getElementById('pin').focus();
                 this.clearError();
-
-                // Hide back button if only 1 user
                 document.getElementById('btn-back').style.display = this.users.length > 1 ? 'block' : 'none';
             },
 
@@ -524,32 +803,26 @@
                 document.getElementById('user-selection').style.display = 'none';
                 document.getElementById('pin-entry').style.display = 'none';
                 document.getElementById('vh-user-display').textContent = displayName;
-                document.getElementById('vh-message').textContent =
-                    this.t('login.viewingHoursMessage');
+                document.getElementById('vh-message').textContent = this.t('login.viewingHoursMessage');
                 document.getElementById('vh-times').textContent = `${start} – ${end}`;
                 document.getElementById('viewing-hours-block').style.display = 'block';
-                // Hide vh back button if only 1 user
                 document.getElementById('vh-btn-back').style.display = this.users.length > 1 ? 'block' : 'none';
             },
 
             async submitLogin() {
                 const username = document.getElementById('username').value;
                 const pin = document.getElementById('pin').value;
-
                 if (!pin || pin.length !== 6) {
                     this.showError('PIN must be exactly 6 digits');
                     return;
                 }
-
                 try {
                     const res = await fetch('/api/auth/login', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ username, pin })
                     });
-
                     const data = await res.json();
-
                     if (res.ok) {
                         window.location.href = '/';
                     } else {
@@ -572,6 +845,147 @@
                 document.getElementById('error-msg').style.display = 'none';
             },
 
+            // ── Numeric Keypad ──
+
+            // Open keypad in user-selection state (triggered by keyboard icon)
+            npOpenSelect() {
+                this._npFromSelect = true;
+                this._npPin = '';
+
+                // Build mini user list
+                const list = document.getElementById('np-user-list');
+                list.innerHTML = this.users.map(u => {
+                    const displayName = u.displayName || u.username;
+                    const initial = displayName.charAt(0).toUpperCase();
+                    const avatarClass = u.role === 'admin' ? 'admin' : u.role === 'child' ? 'child' : '';
+                    const picImg = u.hasPicture
+                        ? `<img src="/api/auth/users/${encodeURIComponent(u.username)}/profile-picture"
+                               style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%"
+                               onerror="this.remove()">`
+                        : '';
+                    return `<div class="np-user-item" onclick="LoginApp.npSelectUser('${this.esc(u.username)}','${this.esc(displayName)}')">
+                        <div class="np-avatar ${avatarClass}">${this.esc(initial)}${picImg}</div>
+                        <div class="np-user-name">${this.esc(displayName)}</div>
+                    </div>`;
+                }).join('');
+
+                document.getElementById('np-state-users').style.display = 'block';
+                document.getElementById('np-state-pin').style.display = 'none';
+                document.getElementById('numpad-overlay').classList.add('open');
+            },
+
+            // Called when user picks avatar from within the numpad user selector
+            npSelectUser(username, displayName) {
+                const user = this.users.find(u => u.username === username);
+                if (user && user.role === 'child' && user.viewingHoursEnabled) {
+                    const now = new Date();
+                    const cur = now.getHours() * 60 + now.getMinutes();
+                    const [sh, sm] = (user.viewingHoursStart || '08:00').split(':').map(Number);
+                    const [eh, em] = (user.viewingHoursEnd   || '22:00').split(':').map(Number);
+                    const start = sh * 60 + sm;
+                    const end   = eh * 60 + em;
+                    const inWindow = start <= end
+                        ? cur >= start && cur <= end
+                        : cur >= start || cur <= end;
+                    if (!inWindow) {
+                        this.npClose();
+                        this.showViewingHoursBlock(displayName, user.viewingHoursStart, user.viewingHoursEnd);
+                        return;
+                    }
+                }
+                this.npOpenForUser(username, displayName);
+            },
+
+            // Open keypad in PIN-entry state for a specific user
+            npOpenForUser(username, displayName) {
+                this.selectedUser = username;
+                this._npPin = '';
+                document.getElementById('np-who').textContent = displayName;
+                document.getElementById('np-error').textContent = '';
+                document.getElementById('np-back-link').style.display = this.users.length > 1 ? '' : 'none';
+                this._npUpdateDots();
+
+                document.getElementById('np-state-users').style.display = 'none';
+                document.getElementById('np-state-pin').style.display = 'block';
+                document.getElementById('numpad-overlay').classList.add('open');
+            },
+
+            npBack() {
+                if (this.users.length <= 1) {
+                    this.npClose();
+                    return;
+                }
+                if (this._npFromSelect) {
+                    // Return to numpad user selector
+                    this._npPin = '';
+                    document.getElementById('np-state-users').style.display = 'block';
+                    document.getElementById('np-state-pin').style.display = 'none';
+                } else {
+                    // Return to main user selection screen
+                    this.npClose();
+                }
+            },
+
+            npClose() {
+                document.getElementById('numpad-overlay').classList.remove('open');
+                this._npPin = '';
+                this._npFromSelect = false;
+            },
+
+            npPress(digit) {
+                if (this._npPin.length >= 6) return;
+                this._npPin += digit;
+                document.getElementById('np-error').textContent = '';
+                this._npUpdateDots();
+            },
+
+            npDel() {
+                this._npPin = this._npPin.slice(0, -1);
+                document.getElementById('np-error').textContent = '';
+                this._npUpdateDots();
+            },
+
+            _npUpdateDots() {
+                for (let i = 0; i < 6; i++) {
+                    document.getElementById(`np-d${i}`).classList.toggle('filled', i < this._npPin.length);
+                }
+                document.getElementById('np-ok-btn').disabled = this._npPin.length !== 6;
+            },
+
+            async npOK() {
+                if (this._npPin.length !== 6) return;
+                const okBtn = document.getElementById('np-ok-btn');
+                okBtn.disabled = true;
+                okBtn.textContent = '…';
+
+                try {
+                    const res = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ username: this.selectedUser, pin: this._npPin })
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        window.location.href = '/';
+                    } else {
+                        document.getElementById('np-error').textContent = data.error || 'Incorrect PIN';
+                        this._npPin = '';
+                        this._npUpdateDots();
+                        okBtn.textContent = 'OK';
+                        // Shake animation
+                        const modal = document.getElementById('numpad-modal');
+                        modal.style.animation = 'none';
+                        modal.offsetWidth; // reflow
+                        modal.style.animation = 'npShake 0.35s ease';
+                    }
+                } catch (e) {
+                    document.getElementById('np-error').textContent = 'Connection error. Please try again.';
+                    this._npPin = '';
+                    this._npUpdateDots();
+                    okBtn.textContent = 'OK';
+                }
+            },
+
             esc(str) {
                 if (!str) return '';
                 const d = document.createElement('div');
@@ -582,5 +996,15 @@
 
         document.addEventListener('DOMContentLoaded', () => LoginApp.init());
     </script>
+
+    <style>
+        @keyframes npShake {
+            0%,100% { transform: translateX(0); }
+            20%      { transform: translateX(-8px); }
+            40%      { transform: translateX(8px); }
+            60%      { transform: translateX(-5px); }
+            80%      { transform: translateX(5px); }
+        }
+    </style>
 </body>
 </html>

@@ -25,11 +25,35 @@
     playlists:   'nav.playlists',
     mostplayed:  'nav.mostPlayed',
     watchlist:   'nav.watchlist',
+    bestrated:   'nav.bestRated',
     analysis:    'nav.analysis',
+    insights:    'nav.insights',
     settings:    'nav.settings',
-    rescan:      'nav.rescanFolders',
-    insights:    'nav.analysis'
+    rescan:      'nav.rescanFolders'
   };
+
+  /* Groups shown in the 9-dot more-menu panel */
+  var MORE_GROUPS = [
+    {
+      labelKey: 'nav.collections',
+      fallback: 'Collections',
+      items: [
+        { page: 'favourites', icon: 'icon-heart'      },
+        { page: 'watchlist',  icon: 'icon-bookmark'   },
+        { page: 'playlists',  icon: 'icon-list'       },
+        { page: 'mostplayed', icon: 'icon-trending'   },
+        { page: 'bestrated',  icon: 'icon-star'       }
+      ]
+    },
+    {
+      labelKey: 'nav.admin',
+      fallback: 'Admin',
+      items: [
+        { page: 'analysis', icon: 'icon-bar-chart' },
+        { page: 'insights', icon: 'icon-trending'  }
+      ]
+    }
+  ];
 
   var SECONDARY = {
     favourites:1, playlists:1, watchlist:1, mostplayed:1, bestrated:1,
@@ -115,15 +139,126 @@
     var right = document.createElement('div');
     right.id = 'peartv-right';
 
-    /* SAFE: move all existing topbar children into right slot first */
+    /* SAFE: move all existing topbar children into a hidden holder so
+       #sidebar-expand-btn and other elements app.js needs stay in the DOM */
+    var holder = document.createElement('div');
+    holder.id = 'ptv-orig-holder';
+    holder.style.cssText = 'display:none!important;position:absolute;pointer-events:none';
     while (topbar.firstChild) {
-      right.appendChild(topbar.firstChild);
+      holder.appendChild(topbar.firstChild);
+    }
+
+    /* -- 9-dot more-menu button (left of search, matching Amazing! layout) -- */
+    var moreBtn = document.createElement('button');
+    moreBtn.id = 'ptv-more-btn';
+    moreBtn.className = 'topbar-btn';
+    moreBtn.title = 'More';
+    moreBtn.innerHTML =
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="display:block">' +
+      '<rect x="3" y="3" width="4" height="4" rx="0.8"/>' +
+      '<rect x="10" y="3" width="4" height="4" rx="0.8"/>' +
+      '<rect x="17" y="3" width="4" height="4" rx="0.8"/>' +
+      '<rect x="3" y="10" width="4" height="4" rx="0.8"/>' +
+      '<rect x="10" y="10" width="4" height="4" rx="0.8"/>' +
+      '<rect x="17" y="10" width="4" height="4" rx="0.8"/>' +
+      '<rect x="3" y="17" width="4" height="4" rx="0.8"/>' +
+      '<rect x="10" y="17" width="4" height="4" rx="0.8"/>' +
+      '<rect x="17" y="17" width="4" height="4" rx="0.8"/>' +
+      '</svg>';
+
+    var morePanel = document.createElement('div');
+    morePanel.id = 'ptv-more-panel';
+    morePanel.style.display = 'none';
+    document.body.appendChild(morePanel);
+
+    moreBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var open = morePanel.style.display !== 'none';
+      if (open) {
+        morePanel.style.display = 'none';
+      } else {
+        var r = moreBtn.getBoundingClientRect();
+        morePanel.style.top   = (r.bottom + 8) + 'px';
+        morePanel.style.right = (window.innerWidth - r.right) + 'px';
+        morePanel.style.left  = 'auto';
+        morePanel.style.display = 'block';
+        buildMorePanel(morePanel);
+      }
+    });
+    document.addEventListener('click', function () {
+      if (morePanel) morePanel.style.display = 'none';
+    });
+    morePanel.addEventListener('click', function (e) { e.stopPropagation(); });
+
+    /* Order: [9-dot] [search] [actions] */
+    right.appendChild(moreBtn);
+    var sb = holder.querySelector('.search-box');
+    var ta = holder.querySelector('.topbar-actions');
+    if (sb) right.appendChild(sb);
+    if (ta) right.appendChild(ta);
+
+    /* Collapsed search — icon-only by default, expands on click */
+    if (sb) {
+      var searchIcon = sb.querySelector('.search-icon');
+      var searchInp  = sb.querySelector('input');
+      if (searchIcon) {
+        searchIcon.addEventListener('click', function (e) {
+          e.stopPropagation();
+          var isOpen = sb.classList.toggle('ptv-search-open');
+          if (isOpen && searchInp) searchInp.focus();
+        });
+      }
+      if (searchInp) {
+        searchInp.addEventListener('blur', function () {
+          if (!searchInp.value) sb.classList.remove('ptv-search-open');
+        });
+      }
+      sb.addEventListener('click', function (e) { e.stopPropagation(); });
+      document.addEventListener('click', function () {
+        if (sb && !sb.querySelector('input').value) sb.classList.remove('ptv-search-open');
+      });
     }
 
     bar.appendChild(logo);
     bar.appendChild(nav);
     bar.appendChild(right);
     topbar.appendChild(bar);
+    topbar.appendChild(holder);
+  }
+
+  function buildMorePanel(panel) {
+    var html = '';
+    MORE_GROUPS.forEach(function (group) {
+      var groupLabel = (typeof App !== 'undefined' && App.t)
+        ? App.t(group.labelKey) || group.fallback
+        : group.fallback;
+
+      /* Filter items hidden by menu-visibility settings */
+      var visibleItems = group.items.filter(function (item) {
+        var sidebarLink = document.querySelector('.sidebar-nav li a[data-page="' + item.page + '"]');
+        var li = sidebarLink ? sidebarLink.closest('li') : null;
+        return !li || li.style.display !== 'none';
+      });
+      if (visibleItems.length === 0) return;
+
+      html += '<div class="ptv-more-group-label">' + groupLabel + '</div>';
+      visibleItems.forEach(function (item) {
+        var label = tl(item.page) || item.page;
+        html += '<button class="ptv-more-item" data-page="' + item.page + '">' +
+          svgUse(item.icon) +
+          '<span>' + label + '</span>' +
+          '</button>';
+      });
+    });
+
+    panel.innerHTML = html;
+
+    panel.querySelectorAll('.ptv-more-item').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        panel.style.display = 'none';
+        doNavigate(btn.getAttribute('data-page'));
+      });
+    });
   }
 
   function doNavigate(page) {
