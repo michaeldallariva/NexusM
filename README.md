@@ -15,7 +15,7 @@ NexusM is a single-file executable (Windows and Linux) that serves a web-based U
 ## Features
 
 ### Media Libraries
-- **Music** - Browse by tracks, albums, artists, and genres. ID3/Vorbis tag extraction, album artwork, lyrics display with synced lyrics support (via LRCLIB).
+- **Music** - Browse by tracks, albums, artists, and genres. ID3/Vorbis tag extraction, album artwork, lyrics display with synced lyrics support (via LRCLIB). FTS5 full-text search, ReplayGain volume normalisation, and M3U playlist export.
 - **Movies and TV Shows** - Poster grid with metadata from TMDB/TVMaze. Cast photos, descriptions, genres, watched status, and resume playback.
 - **Anime** - Dedicated anime library powered by Jikan (MyAnimeList). Series and episode browsing with MAL ratings, synopsis, cover art, and character data.
 - **Actors** - Browse actors from your video library. Biography, filmography, and "Known For" credits from TMDB, with clickable cast on movie and TV detail pages.
@@ -23,27 +23,32 @@ NexusM is a single-file executable (Windows and Linux) that serves a web-based U
 - **Pictures** - Photo gallery with category filtering, EXIF metadata, and thumbnail generation.
 - **eBooks** - PDF and EPUB library with cover extraction and in-browser reader.
 - **Comic Books** - CBZ and CBR archives with a dedicated page-by-page reader.
-- **AudioBooks** - MP3 and M4B audiobook library with per-book progress tracking.
+- **AudioBooks** - MP3 and M4B audiobook library with per-book progress tracking, chapter navigation, variable playback speed, sleep timer, bookmarks, and a "Continue Listening" shelf.
 - **Podcasts** - RSS feed subscriptions with episode playback, OPML import, and a built-in Discover panel.
 - **Radio** - Internet radio stations with country and genre filtering, live streaming, and real-time ICY/Icecast stream title updates.
-- **Internet TV** - IPTV channel management via M3U/M3U8 playlist import.
+- **Internet TV** - IPTV channel management via M3U/M3U8 playlist import. Includes an EPG programme guide (XMLTV) with a Plex-style timeline grid, now/next data, and automatic channel matching.
 
 ### Playback
 - Built-in web audio player with shuffle, repeat, queue management, and lyrics overlay.
 - 10-band graphic equalizer with presets, applied via Web Audio API. Works for music, radio, and audiobooks.
+- Audio output device picker - route playback to a specific local output (speakers, monitor, Bluetooth headset) directly from the player bar, the browser equivalent of a native app's output selector.
 - Built-in web video player with HLS streaming and a redesigned cinema-style interface.
+- Google Cast - cast music, movies, TV, and music videos from the web interface to any Google TV or Chromecast on your network. Server-side casting (like DLNA) works over plain HTTP with no browser HTTPS requirement, with album art on screen, playlist auto-advance, and a device picker.
+- Chapters - movies, TV, anime, and documentaries with embedded chapters show a chapter list and let you jump between them during playback.
 - Server-side video transcoding with hardware acceleration: NVIDIA NVENC, Intel QSV/VAAPI, and AMD AMF.
 - HDR video support - tone mapping pipeline with dual-track HLS (HDR passthrough + SDR fallback). Supports HDR10, HDR10+, HLG, and Dolby Vision via zscale and tonemapx.
 - Automatic remuxing for format compatibility without re-encoding.
 - HLS caching to avoid re-transcoding previously watched content.
-- Subtitle support - automatic search and download via OpenSubtitles.com and SubDL.com.
+- Subtitle support - automatic online search and download via OpenSubtitles.com and SubDL.com, plus automatic sidecar .srt detection (Jellyfin-compatible naming), manual SRT/VTT upload per title, embedded subtitle tracks, and a client-side sync-offset control to fix out-of-sync subtitles.
 - Video resume - saves and restores playback position per user, per title.
 - Where to Watch - displays streaming availability for movies and TV shows via Watchmode, showing which services currently carry the title in your region.
 - Community Ratings - TMDB community scores shown on movie and TV detail pages.
 - Trakt.tv integration - native support for Trakt scrobbling, syncing watched history, and accessing your Trakt watchlist and ratings directly from NexusM.
+- Last.fm scrobbling - scrobble your music listening history to Last.fm.
 
 ### Discovery
 - **What's New Online** - a discovery page showing recent and upcoming releases from TMDB across movies, TV shows, anime, documentaries, and cartoons. Filter by country, genre, and mode (recent or upcoming). Streaming provider badges are shown for each title where available.
+- **fanart.tv Artwork** - pick alternative posters, backdrops, and artist images from fanart.tv in the metadata editor for movies, TV shows, and music artists.
 - **Mood Explorer** - 8 mood-based music recommendation filters: Chill, Energy, Focus, Party, Love, Study, Discovery, and Nostalgia.
 - **Go Big Mode** - a fullscreen TV and cinema presentation mode with large poster cards, full keyboard navigation (arrow keys, Enter, Escape, F for fullscreen, Space to pause), and a paired mobile remote. A phone or tablet on the same network can browse the library and send content to the main display while Go Big is running.
 
@@ -69,16 +74,18 @@ NexusM is a single-file executable (Windows and Linux) that serves a web-based U
 - Per-user favourites, playlists, watched history, play counts, and preferences.
 - Configurable session timeout.
 - HTTPS support with auto-generated self-signed certificate including all LAN IPs and mDNS hostname.
+- Access logging - separate rotating logs for LAN (LocalAccess.log) and remote (RemoteAccess.log) media access, recording user, IP, timestamp, media, and status.
 
 ### Customisation
 - 6 built-in visual themes: Dark, Blue, Purple, Emerald, Sky Grey, and Sky Blue.
-- **Custom Template System** - load external CSS and JavaScript template files at runtime to completely restyle the interface without touching the core application. Templates are hot-loaded from the templates folder and selectable from Settings. Ships with the "Horizon" template: a two-row amber-accented navigation bar with a cinema-style player bar and no sidebar.
+- **Custom Template System** - load external CSS and JavaScript template files at runtime to completely restyle the interface without touching the core application. Templates are hot-loaded from the templates folder and selectable from Settings. Ships with 6 templates: Horizon (amber home-theatre layout), Amazing! (Amazon Prime style), Jellyfish (Jellyfin inspired), YablakoTV (Apple TV style), Plux! (Plex inspired), and Netflux (Netflix style, with hero video previews).
 - Configurable sidebar with individual show/hide toggles for every section.
 - UI preferences including default view modes, Go Big autostart, and per-section sort order.
-- 19 interface languages: English, French, German, Spanish, Portuguese, Italian, Dutch, Polish, Romanian, Russian, Swedish, Ukrainian, Norwegian, Finnish, Estonian, Lithuanian, Slovenian, Albanian, and Serbian.
+- 26 interface languages: English, French, German, Spanish, Portuguese, Italian, Dutch, Polish, Romanian, Russian, Swedish, Ukrainian, Norwegian, Finnish, Estonian, Lithuanian, Slovenian, Albanian, Serbian, Chinese, Japanese, Korean, Hindi, Indonesian, Vietnamese, and Thai.
 
 ### Other
 - Global search across all media types with instant results.
+- Auto-update - optional, opt-in in-app updater that checks nexusm.org, downloads new versions, verifies checksums, backs up the current install, and applies with one click, with rollback support.
 - System tray integration and optional Windows startup registration.
 - Portable - no installation required, runs from a single folder on Windows or Linux.
 
@@ -94,9 +101,11 @@ NexusM is a single-file executable (Windows and Linux) that serves a web-based U
 | Video Streaming | HLS via hls.js, FFmpeg for transcoding and remuxing |
 | HDR Tone Mapping | FFmpeg tonemapx, zscale (libzimg), VAAPI, D3D11VA, NVDEC |
 | eBook and Comic Rendering | epub.js, PDF.js, SharpCompress (CBZ/CBR) |
-| Metadata | TMDB API, TVMaze API, LRCLIB API, Jikan API (MyAnimeList) |
+| Metadata | TMDB API, TVMaze API, LRCLIB API, Jikan API (MyAnimeList), fanart.tv API |
 | Streaming Providers | Watchmode API |
-| Trakt Integration | Trakt.tv API |
+| Scrobbling | Trakt.tv API, Last.fm API |
+| EPG | XMLTV parsing |
+| Google Cast | Sharpcaster (CASTV2 protocol) |
 | DLNA/UPnP | Custom SSDP implementation (System.Net.Sockets, no external package) |
 | Audio Tags | TagLibSharp |
 | Image Processing | SixLabors.ImageSharp |
