@@ -120,7 +120,7 @@ NexusM is a single-file executable (Windows and Linux) that serves a web-based U
 ### Requirements
 - Windows 10/11 (64-bit) or Linux (x64)
 - A modern web browser (Chrome, Firefox, Edge, Safari)
-- FFmpeg (optional, for audio/video transcoding - can be auto-downloaded from within the app)
+- FFmpeg (Custom version, built-in)
 - TMDB API key (optional, free - for movie/TV metadata, actor data, and What's New Online)
 - Watchmode API key (optional, free tier available - for streaming provider availability)
 
