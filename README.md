@@ -178,5 +178,5 @@ NexusM uses open-source libraries under their respective licenses (MIT, Apache-2
 Android client / Google TV
 
 <img width="1280" height="800" alt="Image" src="https://github.com/user-attachments/assets/3776b2b9-0044-4e39-8f4d-2414af6625b9" />
-<img width="1280" height="800" alt="Image" src="https://github.com/user-attachments/assets/3825b52b-ed55-4b20-a21d-cafce9dc14ba" />
+<img width="1280" height="800" alt="Image" src="https://github.com/user-attachments/assets/6945ca1f-7731-4f5d-8373-bbae4ed9fb06" />
 
