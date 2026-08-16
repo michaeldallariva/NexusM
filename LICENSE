@@ -1,6 +1,6 @@
 NexusM — Media Library Manager
 Copyright (c) 2025–2026 NexusM.org
-Updated : 23-July-2026
+Updated : 16-August-2026
 
 ================================================================================
 NEXUSM LICENSE
@@ -29,6 +29,7 @@ NexusM bundles or depends on the following open-source libraries:
   System.Management 8.x                          MIT           .NET Foundation and Contributors
   System.Diagnostics.PerformanceCounter 8.x      MIT           .NET Foundation and Contributors
   System.Security.Cryptography.ProtectedData 8.x MIT           .NET Foundation and Contributors
+  Microsoft.ML.OnnxRuntime 1.20.1                MIT           Microsoft / .NET Foundation and Contributors
   PdfSharpCore 1.3.x                             MIT           empira Software GmbH; PdfSharpCore Contributors
   SharpCompress 0.46.x                           MIT           Adam Chester and contributors
   VersOne.Epub 3.3.x                             MIT           vers one
@@ -51,6 +52,7 @@ NexusM bundles or depends on the following open-source libraries:
   Serilog.Sinks.Console 6.x                      Apache-2.0    Serilog Contributors
   Serilog.Sinks.Debug (transitive)               Apache-2.0    Serilog Contributors
   HLS.js  [frontend]                             Apache-2.0    Dailymotion / video-dev contributors
+  all-MiniLM-L6-v2 model  [downloaded]           Apache-2.0    sentence-transformers / UKPLab (Hugging Face)
   ─────────────────────────────────────────────  ────────────  ─────────────────────────────────────────
   TagLib# (TagLibSharp) 2.3.x                    LGPL-2.1      Novell, Inc.; Scott Peterson; Brian Nickel
                                                                Gabriel Burt; Lluis Sanchez Gual et al.
@@ -69,6 +71,11 @@ NexusM bundles or depends on the following open-source libraries:
 * SixLabors.ImageSharp and SixLabors.Fonts use the Six Labors Split License.
   For non-commercial / open-source use the Apache 2.0 terms apply.
   Commercial use requires a separate license: https://sixlabors.com/pricing
+
+[downloaded] The all-MiniLM-L6-v2 embedding model powers the optional Smart Search feature
+  (natural-language search), which is OFF by default. The model is not shipped with NexusM; it is
+  fetched from Hugging Face only when a user enables the feature. Model card:
+  https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2
 
 ================================================================================
 EXTERNAL DATA & CONTENT SOURCES
