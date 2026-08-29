@@ -162,6 +162,20 @@ See [LICENSE](LICENSE) for full terms.
 NexusM uses open-source libraries under their respective licenses (MIT, Apache-2.0, LGPL-2.1, BSD-2-Clause, Unlicense). See [LICENSE](LICENSE) for the complete list.
 
 ---
+<img width="1374" height="1339" alt="Image" src="https://github.com/user-attachments/assets/5b7ea842-0913-4f2b-bf8c-10450f69c2c0" />
+
+<img width="1882" height="968" alt="Image" src="https://github.com/user-attachments/assets/f99138f3-dda2-4e84-ba03-62c8addcc945" />
+
+<img width="2544" height="1334" alt="Image" src="https://github.com/user-attachments/assets/17953707-40d7-4541-96d8-b7461b3739b7" />
+
+<img width="2392" height="1282" alt="Image" src="https://github.com/user-attachments/assets/97681e66-7421-4490-8e9d-510e6027014b" />
+
+<img width="2545" height="1352" alt="Image" src="https://github.com/user-attachments/assets/b58525f5-04b2-4551-bed5-221ebc48faca" />
+
+<img width="1907" height="1346" alt="Image" src="https://github.com/user-attachments/assets/7d369840-022f-4a0a-ae17-27800836af8a" />
+
+<img width="2535" height="1339" alt="Image" src="https://github.com/user-attachments/assets/5a845c93-f221-4853-9c1f-96788755144b" />
+
 <img width="1877" height="1031" alt="Image" src="https://github.com/user-attachments/assets/d9a22d4d-7681-4d85-86ee-b55744bc6c2b" />
 
 <img width="1877" height="1024" alt="Image" src="https://github.com/user-attachments/assets/304a6148-7648-4115-aa30-9ba5727365c1" />
