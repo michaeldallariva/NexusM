@@ -1,6 +1,6 @@
 /* ------------------------------------------------------------------
    NexusM Custom Template 3 - "Jellyfish"
-   Jellyfin-inspired dark theme — sidebar layout, minimal JS.
+   Jellyfin-inspired dark theme - sidebar layout, minimal JS.
    No DOM restructuring: the default sidebar nav is kept intact.
    This script only syncs the active-nav highlight on navigation.
    ------------------------------------------------------------------ */

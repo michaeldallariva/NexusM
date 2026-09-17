@@ -14,7 +14,7 @@
     <link rel="manifest" href="/manifest.json">
     <link rel="apple-touch-icon" href="/icon-512.png">
     <script>try{var t=localStorage.getItem('nexusm-theme');if(t==='blue')document.documentElement.classList.add('theme-blue');else if(t==='purple')document.documentElement.classList.add('theme-purple');else if(t==='emerald')document.documentElement.classList.add('theme-emerald');else if(t==='sky-grey')document.documentElement.classList.add('theme-sky-grey');else if(t==='sky-blue')document.documentElement.classList.add('theme-sky-blue');}catch(e){}</script>
-    <link rel="stylesheet" href="/css/app.css?v=279">
+    <link rel="stylesheet" href="/css/app.css?v=414">
     <link rel="stylesheet" id="tpl-css" href="">
     <script>try{var _tpl=localStorage.getItem('nexusm-template');if(_tpl){var _l=document.getElementById('tpl-css');document.documentElement.style.visibility='hidden';var _tplDone=function(){document.documentElement.style.visibility='';};_l.onload=_tplDone;_l.onerror=_tplDone;_l.href='/templates/'+_tpl+'/style.css';setTimeout(_tplDone,2000);}}catch(e){document.documentElement.style.visibility='';}</script>
     <style>
@@ -30,17 +30,46 @@
         .nav-icon svg {
             width: 18px;
             height: 18px;
-            stroke: rgba(255, 255, 255, 0.45);
+            stroke: var(--nav-ico, rgba(255, 255, 255, 0.5));
             fill: none;
             stroke-width: 1.8;
             stroke-linecap: round;
             stroke-linejoin: round;
-            transition: stroke 0.2s ease;
+            transition: stroke 0.2s ease, filter 0.2s ease;
         }
         .sidebar-nav a:hover .nav-icon svg,
         .sidebar-nav a.active .nav-icon svg {
-            stroke: rgba(255, 255, 255, 0.9);
+            stroke: var(--nav-ico, rgba(255, 255, 255, 0.95));
+            filter: drop-shadow(0 0 5px var(--nav-ico-glow, transparent));
         }
+        /* Media-type icon colours - shape unchanged, colour only, so each library "pops".
+           Video = green, Audio/Music = amber, Pictures = orange, Books = blue, Actors = violet. */
+        .sidebar-nav a[data-page="movies"],
+        .sidebar-nav a[data-page="tvshows"],
+        .sidebar-nav a[data-page="musicvideos"],
+        .sidebar-nav a[data-page="anime"],
+        .sidebar-nav a[data-page="internettv"] { --nav-ico: #3ddc84; --nav-ico-glow: rgba(61,220,132,.55); }
+        .sidebar-nav a[data-page="music"],
+        .sidebar-nav a[data-page="podcasts"],
+        .sidebar-nav a[data-page="audiobooks"],
+        .sidebar-nav a[data-page="radio"] { --nav-ico: #fbbf24; --nav-ico-glow: rgba(251,191,36,.55); }
+        .sidebar-nav a[data-page="pictures"] { --nav-ico: #ff6a1a; --nav-ico-glow: rgba(255,106,26,.6); }
+        .sidebar-nav a[data-page="ebooks"] { --nav-ico: #60a5fa; --nav-ico-glow: rgba(96,165,250,.55); }
+        .sidebar-nav a[data-page="actors"] { --nav-ico: #c084fc; --nav-ico-glow: rgba(192,132,252,.55); }
+        /* Collections icon colours - each its own hue so the list reads at a glance, and none
+           reuse the media-type palette above (green / amber / orange / blue / violet).
+           Favorites = red (love), Playlists = teal, Watchlist = indigo, Most Played = pink,
+           Best Rated = gold (star). */
+        .sidebar-nav a[data-page="favourites"] { --nav-ico: #ef4444; --nav-ico-glow: rgba(239,68,68,.55); }
+        .sidebar-nav a[data-page="playlists"]  { --nav-ico: #2dd4bf; --nav-ico-glow: rgba(45,212,191,.55); }
+        .sidebar-nav a[data-page="watchlist"]  { --nav-ico: #6366f1; --nav-ico-glow: rgba(99,102,241,.55); }
+        .sidebar-nav a[data-page="mostplayed"] { --nav-ico: #ec4899; --nav-ico-glow: rgba(236,72,153,.55); }
+        .sidebar-nav a[data-page="bestrated"]  { --nav-ico: #eab308; --nav-ico-glow: rgba(234,179,8,.55); }
+        /* Admin icon colours - a cooler utility set, again distinct from every colour above. */
+        .sidebar-nav a[data-page="analysis"]   { --nav-ico: #22d3ee; --nav-ico-glow: rgba(34,211,238,.5); }
+        .sidebar-nav a[data-page="insights"]   { --nav-ico: #a3e635; --nav-ico-glow: rgba(163,230,53,.5); }
+        .sidebar-nav a[data-page="settings"]   { --nav-ico: #94a3b8; --nav-ico-glow: rgba(148,163,184,.45); }
+        .sidebar-nav a[data-page="rescan"]     { --nav-ico: #c2853f; --nav-ico-glow: rgba(194,133,63,.5); }
 
         /* Logo favicon icon */
         .logo-favicon {
@@ -100,6 +129,11 @@
                             <span class="nav-icon"><svg><use href="#icon-home"/></svg></span>
                             <span class="nav-label">Home</span>
                             <span class="nav-badge live-badge nav-label">Now</span>
+                        </a></li>
+                        <li><a href="#" data-page="inprogress">
+                            <span class="nav-icon"><svg><use href="#icon-clock"/></svg></span>
+                            <span class="nav-label">In Progress</span>
+                            <span class="nav-badge nav-label" id="badge-inprogress"></span>
                         </a></li>
                     </ul>
                 </div>
@@ -266,7 +300,9 @@
 
             </div>
             <div class="demo-mode-badge" id="demo-mode-badge">DEMO MODE</div>
-            <div class="sidebar-version">2026.21 (New World Order Edition)</div>
+            <!-- Text is replaced at boot from /api/config/info (see applyServerVersion).
+                 The literal is only a pre-load placeholder, not the source of truth. -->
+            <div class="sidebar-version" id="sidebar-version">2026.29.4 (New World Order Edition)</div>
         </nav>
 
         <!-- Top Bar -->
@@ -282,6 +318,7 @@
                     <svg style="width:16px;height:16px;stroke:rgba(255,255,255,0.4);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round"><use href="#icon-search"/></svg>
                 </span>
                 <input type="text" id="global-search" placeholder="Search..." autocomplete="off">
+                <div id="search-history" class="search-history"></div>
             </div>
             <div class="topbar-actions">
                 <button class="topbar-btn" id="btn-scan" title="Scan Library">
@@ -290,7 +327,7 @@
                 <button class="topbar-btn" id="btn-refresh" title="Refresh">
                     <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round"><use href="#icon-refresh"/></svg>
                 </button>
-                <button class="topbar-btn topbar-btn-gobig" id="btn-gobig" title="Go Big — TV Mode" onclick="App.startGoBigMode()">
+                <button class="topbar-btn topbar-btn-gobig" id="btn-gobig" title="Go Big - TV Mode" onclick="App.startGoBigMode()">
                     <svg style="width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round" viewBox="0 0 24 24">
                         <rect x="2" y="3" width="20" height="14" rx="2"/>
                         <polyline points="8 21 12 17 16 21"/>
@@ -819,7 +856,7 @@
     <audio id="audio-player" preload="auto" crossorigin="anonymous"></audio>
     <script src="/js/jszip.min.js"></script>
     <script src="/js/epub.min.js"></script>
-    <script src="/js/app.js?v=558"></script>
+    <script src="/js/app.js?v=823"></script>
     <script id="tpl-js"></script>
     <script>if('serviceWorker'in navigator){window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{});});}</script>
 </body>

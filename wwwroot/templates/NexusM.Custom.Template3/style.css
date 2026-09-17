@@ -1,6 +1,6 @@
 /* -------------------------------------------------------------------
    NexusM Custom Template 3 - "Jellyfish"
-   Jellyfin-inspired dark theme — sidebar layout, teal-blue accent
+   Jellyfin-inspired dark theme - sidebar layout, teal-blue accent
    ------------------------------------------------------------------- */
 
 /* ── 1. CSS variable overrides ─────────────────────────────────── */
@@ -29,7 +29,7 @@ body, #app, .app-container, #main-content {
   background-color: #101010 !important;
 }
 
-/* ── 3. Topbar — Jellyfin dark header ───────────────────────────── */
+/* ── 3. Topbar - Jellyfin dark header ───────────────────────────── */
 header.topbar {
   background: #202020 !important;
   backdrop-filter: none !important;
@@ -51,7 +51,7 @@ header.topbar #page-title {
   font-weight: 600 !important;
 }
 
-/* ── 4. Sidebar — Jellyfin left nav ─────────────────────────────── */
+/* ── 4. Sidebar - Jellyfin left nav ─────────────────────────────── */
 #sidebar {
   background: #202020 !important;
   border-right: 1px solid rgba(255,255,255,0.08) !important;

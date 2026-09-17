@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------
-   NexusM Custom Template 6 — "Netflux"
+   NexusM Custom Template 6 - "Netflux"
    Netflix-inspired dark layout
    ------------------------------------------------------------------ */
 
@@ -542,6 +542,16 @@ header.topbar.nf-scrolled {
 /* ── 12. Shelves ───────────────────────────────────────────────── */
 .nf-shelves { padding: 0 0 80px; }
 
+/* All | Genres view switcher - align its left edge with the shelf titles/cards
+   (same 60px desktop / 24px ≤1000px inset as .nf-shelf-header/.nf-shelf-scroll). */
+.nf-view-toggle {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 0 60px;
+  margin: 0 0 18px;
+}
+
 .nf-shelf {
   margin-bottom: 3vw;
   position: relative;
@@ -576,6 +586,22 @@ header.topbar.nf-scrolled {
   scroll-behavior: smooth;
 }
 .nf-shelf-scroll::-webkit-scrollbar { display: none; }
+
+/* Flat "All" grid - wraps cards onto multiple rows (max 30 per line) instead of a single
+   horizontal-scroll shelf. Same 60px / 24px inset as the shelves; cards keep poster size. */
+.nf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 22px 10px;
+  padding: 6px 60px 24px;
+}
+.nf-grid .nf-card { width: auto; min-width: 0; max-width: none; }
+.nf-shelf-count {
+  font-size: 12px;
+  color: rgba(255,255,255,.45);
+  font-weight: 600;
+  margin-left: 10px;
+}
 
 .nf-shelf-track { position: relative; }
 .nf-arrow {
@@ -867,6 +893,8 @@ header.topbar.nf-scrolled {
   #nf-bar { padding: 0 24px; }
   .nf-hero-content { left: 24px; max-width: 60%; }
   .nf-shelf-header, .nf-shelf-scroll { padding-left: 24px; padding-right: 24px; }
+  .nf-view-toggle { padding-left: 24px; padding-right: 24px; }
+  .nf-grid { padding-left: 24px; padding-right: 24px; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
   .nf-hero-dots { right: 24px; }
   .nf-card { width: 24%; }
 }

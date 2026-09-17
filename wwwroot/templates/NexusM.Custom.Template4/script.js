@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------
    NexusM Custom Template 4 - "YablakoTV"
-   Inspired by Jellyfin's AppleTV theme — topbar navigation.
-   Single-row topbar: Logo — Nav links — [search + topbar-actions]
+   Inspired by Jellyfin's AppleTV theme - topbar navigation.
+   Single-row topbar: Logo - Nav links - [search + topbar-actions]
    ------------------------------------------------------------------ */
 (function () {
   'use strict';
@@ -51,6 +51,15 @@
       items: [
         { page: 'analysis', icon: 'icon-bar-chart' },
         { page: 'insights', icon: 'icon-trending'  }
+      ]
+    },
+    {
+      /* Settings pinned in the 9-dot menu so it is always reachable even when
+         the top nav overflows on a small screen and hides the header link. */
+      labelKey: 'nav.account',
+      fallback: 'Account',
+      items: [
+        { page: 'settings', icon: 'icon-settings' }
       ]
     }
   ];
@@ -197,7 +206,7 @@
     if (sb) right.appendChild(sb);
     if (ta) right.appendChild(ta);
 
-    /* Collapsed search — icon-only by default, expands on click */
+    /* Collapsed search - icon-only by default, expands on click */
     if (sb) {
       var searchIcon = sb.querySelector('.search-icon');
       var searchInp  = sb.querySelector('input');
@@ -318,7 +327,7 @@
   var iv = setInterval(function () {
     if (typeof App !== 'undefined' && App.t && App.navigate) {
       buildPearNav();
-      syncVisibility(); /* sidebar visibility already set by init — mirror it now */
+      syncVisibility(); /* sidebar visibility already set by init - mirror it now */
       patchNav();
       clearInterval(iv);
     }

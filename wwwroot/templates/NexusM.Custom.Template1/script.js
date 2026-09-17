@@ -71,6 +71,12 @@
       if (!page) return;
       var labelEl = link.querySelector('.nav-label');
       if (!labelEl || !labelEl.textContent.trim()) return;
+      /* Respect App.applyRoleVisibility(), which hides admin-only entries by
+         setting display:none on the <li>. Without this, a guest sees Analysis and
+         Rescan Folders in the nav - they are blocked by App.navigate() and just
+         bounce to home, so they would be dead links. */
+      var li = link.closest('li');
+      if (li && li.style.display === 'none') return;
       /* Prefer translated label via App.t; fall back to sidebar DOM text */
       var label = t(page) || labelEl.textContent.trim();
       var iconUse = link.querySelector('.nav-icon svg use');

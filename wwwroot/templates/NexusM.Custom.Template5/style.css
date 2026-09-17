@@ -1,6 +1,6 @@
 /* -------------------------------------------------------------------
    NexusM Custom Template 5 - "Plux!"
-   Plex-inspired dark theme — warm charcoal, orange accent, sidebar.
+   Plex-inspired dark theme - warm charcoal, orange accent, sidebar.
    Colours extracted from Plex 4.159.0 production CSS.
    ------------------------------------------------------------------- */
 
@@ -34,7 +34,7 @@ body, #app, .app-container, #main-content {
                Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif !important;
 }
 
-/* ── 3. Topbar — Plex dark header ───────────────────────────────── */
+/* ── 3. Topbar - Plex dark header ───────────────────────────────── */
 header.topbar {
   background: #191a1c !important;
   backdrop-filter: none !important;
@@ -57,7 +57,7 @@ header.topbar #page-title {
   font-weight: 600 !important;
 }
 
-/* ── 4. Sidebar — Plex left nav ─────────────────────────────────── */
+/* ── 4. Sidebar - Plex left nav ─────────────────────────────────── */
 #sidebar {
   background: #191a1c !important;
   border-right: 1px solid #323232 !important;
@@ -83,7 +83,7 @@ header.topbar #page-title {
   font-weight: 400 !important;
 }
 
-/* ── 5. Player bar — Plex footer bar ───────────────────────────── */
+/* ── 5. Player bar - Plex footer bar ───────────────────────────── */
 #player-bar {
   background: #191a1c !important;
   backdrop-filter: none !important;

@@ -1,6 +1,6 @@
 /* -------------------------------------------------------------------
    NexusM Custom Template 4 - "PearTV"
-   Inspired by Jellyfin's AppleTV theme — soft light layout,
+   Inspired by Jellyfin's AppleTV theme - soft light layout,
    pastel blue-grey tones, gradient topbar, topbar navigation.
    ------------------------------------------------------------------- */
 
@@ -23,7 +23,7 @@ body.theme-sky-grey, body.theme-sky-blue {
   --radius:            8px;
   --radius-sm:         6px;
   --radius-lg:         14px;
-  /* Hide sidebar — PearTV uses topbar navigation */
+  /* Hide sidebar - PearTV uses topbar navigation */
   --sidebar-width:     0px;
   --sidebar-collapsed: 0px;
   /* Single-row topbar */
@@ -48,7 +48,7 @@ body, #app, .app-container {
   background: #d5e9f2 !important;
 }
 
-/* ── 4. Topbar — AppleTV gradient header ──────────────────────── */
+/* ── 4. Topbar - AppleTV gradient header ──────────────────────── */
 header.topbar {
   background: linear-gradient(90deg,
     #bcbcbc 0%, #a7b4b7 25%, #beb5a5 50%, #adbec2 75%, #b9c7cb 100%
@@ -249,7 +249,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 /* ── 14. Dialogs / modals ──────────────────────────────────────── */
-/* Use specific selectors only — [class*="modal"] would match nexus-modal-* children */
+/* Use specific selectors only - [class*="modal"] would match nexus-modal-* children */
 .modal-box, .dialog-box {
   background: rgba(255,255,255,0.97) !important;
   border: 1px solid rgba(0,0,0,0.10) !important;
@@ -310,7 +310,7 @@ input:focus, select:focus, textarea:focus {
   color: rgba(0,0,0,0.80) !important;
 }
 
-/* ── 19. Home page action buttons — override transparent dark-bg defaults ── */
+/* ── 19. Home page action buttons - override transparent dark-bg defaults ── */
 /* "What's New Online?" */
 .nr-home-btn {
   background: rgba(5,150,105,0.15) !important;
@@ -493,8 +493,8 @@ input:focus, select:focus, textarea:focus {
   #peartv-logo { margin-right: 6px; font-size: 14px; }
 }
 
-/* ── 22. 3-dot card menu button — keep dark bg so white dots stay visible ── */
-/* Default hover in app.css uses rgba(255,255,255,.2) — transparent on light cards */
+/* ── 22. 3-dot card menu button - keep dark bg so white dots stay visible ── */
+/* Default hover in app.css uses rgba(255,255,255,.2) - transparent on light cards */
 .mv-card-menu-btn {
   background: rgba(0,0,0,0.72) !important;
   color: #fff !important;
@@ -506,7 +506,7 @@ input:focus, select:focus, textarea:focus {
   color: #fff !important;
 }
 
-/* ── 23. Context menu popup — light theme override ─────────────── */
+/* ── 23. Context menu popup - light theme override ─────────────── */
 /* Default app.css uses dark #1e1e1e bg with white text rules */
 .video-context-menu {
   background: #ffffff !important;
@@ -526,8 +526,8 @@ input:focus, select:focus, textarea:focus {
   color: #00a4dc !important;
 }
 
-/* ── 24. Android player button — keep green in light player bar ─── */
-/* #player-bar * { color: !important } ties on specificity — use double-ID to win */
+/* ── 24. Android player button - keep green in light player bar ─── */
+/* #player-bar * { color: !important } ties on specificity - use double-ID to win */
 #player-bar #btn-android-player,
 #player-bar #btn-android-player svg {
   color: #22c55e !important;

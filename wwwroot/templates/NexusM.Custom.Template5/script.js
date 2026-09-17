@@ -1,6 +1,6 @@
 /* ------------------------------------------------------------------
    NexusM Custom Template 5 - "Plux!"
-   Plex-inspired dark theme — sidebar layout, minimal JS.
+   Plex-inspired dark theme - sidebar layout, minimal JS.
    Keeps the default sidebar nav intact. Patches App.navigate to
    keep the active-link highlight in sync with the Plex orange style.
    ------------------------------------------------------------------ */

@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------
-   NexusM Custom Template 6 — "Netflux"
+   NexusM Custom Template 6 - "Netflux"
    Netflix-inspired layout: hero banner + horizontal shelf rows
    with animated hover card pop-ups.
    ------------------------------------------------------------------ */
@@ -90,7 +90,7 @@
     logo.addEventListener('click', function (e) { e.preventDefault(); nfNav('home'); });
     bar.appendChild(logo);
 
-    /* Tab strip — populated in phase 2 */
+    /* Tab strip - populated in phase 2 */
     var tabs = document.createElement('nav');
     tabs.id = 'nf-tabs';
     bar.appendChild(tabs);
@@ -106,7 +106,7 @@
     holder.style.cssText = 'display:none!important;position:absolute;pointer-events:none';
     while (topbar.firstChild) { holder.appendChild(topbar.firstChild); }
 
-    /* Search — standalone (avoids app.css conflicts with moved .search-box) */
+    /* Search - standalone (avoids app.css conflicts with moved .search-box) */
     var srchWrap = document.createElement('div');
     srchWrap.id = 'nf-search-wrap';
     srchWrap.innerHTML =
@@ -147,7 +147,7 @@
       if (!_sInp.value) srchWrap.classList.remove('nf-search-open');
     });
 
-    /* Account wrap — filled in phase 2 */
+    /* Account wrap - filled in phase 2 */
     var acWrap = document.createElement('div');
     acWrap.id = 'nf-account-wrap';
     right.appendChild(acWrap);
@@ -166,7 +166,7 @@
   }
 
   /* ════════════════════════════════════════════════
-     2. TABS (phase 2 — needs _initCfg)
+     2. TABS (phase 2 - needs _initCfg)
   ════════════════════════════════════════════════ */
   function buildTabs() {
     var el = document.getElementById('nf-tabs');
@@ -199,7 +199,7 @@
       el.appendChild(a);
     });
 
-    /* Browse by Genre tab — menu is a body-level fixed element to escape overflow:auto clipping */
+    /* Browse by Genre tab - menu is a body-level fixed element to escape overflow:auto clipping */
     var navItems =
       '<a class="nf-genre-nav-item" href="#" onclick="event.preventDefault();window._nfGenreClose();window._nfNav(\'movies\')">Movies</a>' +
       '<a class="nf-genre-nav-item" href="#" onclick="event.preventDefault();window._nfGenreClose();window._nfNav(\'tvshows\')">TV Shows</a>' +
@@ -218,7 +218,7 @@
       '<svg class="nf-genre-caret" width="10" height="6" viewBox="0 0 10 6" fill="currentColor"><polygon points="0,0 10,0 5,6"/></svg>';
     el.appendChild(gTabWrap);
 
-    /* Menu appended to body — avoids overflow:auto clipping inside #nf-tabs */
+    /* Menu appended to body - avoids overflow:auto clipping inside #nf-tabs */
     var gMenu = document.createElement('div');
     gMenu.id = 'nf-genre-menu';
     gMenu.className = 'nf-genre-menu';
@@ -312,7 +312,7 @@
       '<circle cx="12" cy="7" r="4"/></svg>';
     av.appendChild(iconDiv);
 
-    /* Profile picture — removes itself on 404 revealing the icon */
+    /* Profile picture - removes itself on 404 revealing the icon */
     var picImg = document.createElement('img');
     picImg.src = picUrl;
     picImg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover';
@@ -336,14 +336,15 @@
 
     function refreshMenu() {
       var uname = typeof App !== 'undefined' ? (App.userDisplayName || App.userName || 'Account') : 'Account';
-      var admin = typeof App !== 'undefined' && App.userRole === 'admin';
-      var settingsRow = admin
-        ? '<button class="nf-menu-item" id="nf-mi-settings">' +
+      /* Settings is shown to EVERY role. Non-admins land on the restricted
+         "My Account" page (App.renderSettings branches on role), and this template
+         hides the sidebar - without this row a guest who picked Netflux would have
+         no way to reach their own avatar/theme/template settings again. */
+      var settingsRow = '<button class="nf-menu-item" id="nf-mi-settings">' +
           '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
           '<circle cx="12" cy="12" r="3"/>' +
           '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' +
-          'Settings</button>'
-        : '';
+          'Settings</button>';
 
       menu.innerHTML =
         '<div class="nf-menu-user">' +
@@ -436,6 +437,7 @@
         App.api('videos?mediaType=tv&sort=recent&limit=150&grouped=true'),
         App.api('videos/continue-watching').catch(function () { return []; }),
         App.api('videos?mediaType=documentary&sort=recent&limit=100'),
+        App.api('videos/next-up').catch(function () { return []; }),
       ];
       var animeIdx = reqs.length;
       if (showAnime) reqs.push(App.api('videos?mediaType=anime&sort=recent&limit=80&grouped=true'));
@@ -449,20 +451,25 @@
       var tvShows   = extractVids(res[1]);
       var cw        = Array.isArray(res[2]) ? res[2] : [];
       var docs      = extractVids(res[3]);
+      var nextUp    = Array.isArray(res[4]) ? res[4] : [];
       var anime     = showAnime ? extractVids(res[animeIdx]) : [];
       var mvsData   = showMV   ? (res[mvsIdx] || {}) : null;
 
       cw = cw.filter(function (v) {
         return ['movie','tv','anime','documentary'].indexOf(v.mediaType || '') !== -1;
       });
+      nextUp = nextUp.filter(function (v) {
+        return ['movie','tv','anime','documentary'].indexOf(v.mediaType || '') !== -1;
+      });
 
-      /* Hero pool: balanced mix of movies, TV shows, and documentaries — up to 30 */
+      /* Hero pool: balanced mix of movies, TV shows, and documentaries - up to 30 */
       var heroPool = _buildHeroPool(movies, tvShows, docs);
       var heroItem = heroPool[0] || null;
 
       var html = heroItem ? buildHero(heroItem) : '';
       html += '<div class="nf-shelves">';
       if (cw.length        > 0) html += buildShelf('Continue Watching',       cw.slice(0, 20),         'mixed');
+      if (nextUp.length    > 0) html += buildShelf((App.t ? App.t('section.nextUp', 'Next Up') : 'Next Up'), nextUp.slice(0, 20), 'mixed');
       if (movies.length    > 0) html += buildShelf('Recently Added Movies',   movies.slice(0, 24),     'movie');
       if (tvShows.length   > 0) html += buildShelf('Recently Added TV Shows', tvShows.slice(0, 24),    'tv');
       if (anime.length     > 0) html += buildShelf('Anime',                   anime.slice(0, 24),      'anime');
@@ -495,7 +502,7 @@
     el.innerHTML = '<div class="nf-loading">Loading…</div>';
     try {
       var [recentData, genreData] = await Promise.all([
-        App.api('videos?mediaType=' + encodeURIComponent(mediaType) + '&sort=recent&limit=300&grouped=true'),
+        App.api('videos?mediaType=' + encodeURIComponent(mediaType) + '&sort=recent&limit=600&grouped=true'),
         App.api('videos/genres?mediaType=' + encodeURIComponent(mediaType))
       ]);
       if (_renderGen !== gen) return;
@@ -508,23 +515,41 @@
 
       var html = heroItem ? buildHero(heroItem) : '';
       html += '<div class="nf-shelves">';
-      if (mediaType === 'documentary') {
-        // All items here are already documentaries — one flat shelf is cleaner than
-        // fragmenting by sub-genre (many docs have no genre tag at all).
-        html += buildShelf('All Documentaries', all.slice(0, 100), mediaType);
-      } else if (genres.length > 0) {
+      // Per-media-type All / Genres switcher (remembered per type). Movies/TV default to
+      // Genres (rich TMDB genres); Documentaries/Anime default to All (sparse genre data).
+      // Genre view adds an "Other" catch-all so no title is ever lost.
+      var defView = (mediaType === 'movie' || mediaType === 'tv') ? 'genre' : 'all';
+      var view = defView;
+      try { var st = localStorage.getItem('nexusm-nf-view-' + mediaType); if (st === 'all' || st === 'genre') view = st; } catch (e) {}
+      App._nfSetView = function (mt, mode) {
+        try { localStorage.setItem('nexusm-nf-view-' + mt, mode); } catch (e) {}
+        renderMedia(mt, document.getElementById('main-content'));
+      };
+      html += buildViewToggle(mediaType, view);
+
+      var flatLabel = mediaType === 'anime' ? 'All Anime'
+                    : mediaType === 'documentary' ? 'All Documentaries'
+                    : mediaType === 'tv' ? 'All TV Shows'
+                    : 'All Movies';
+
+      var rowCount = 0;
+      if (view === 'genre' && genres.length > 0) {
         var byGenre = groupByGenre(all);
-        var rowCount = 0;
+        var shown = {};
         genres.forEach(function (g) {
-          var vids = byGenre[g] || [];
+          var vids = (byGenre[g] || []).slice(0, 24);
           if (vids.length < 1) return;
-          html += buildShelf(g, vids.slice(0, 24), mediaType);
+          vids.forEach(function (v) { shown[v.id] = true; });
+          html += buildShelf(g, vids, mediaType);
           rowCount++;
         });
-        if (rowCount === 0) html += buildShelf('All', all.slice(0, 48), mediaType);
-      } else {
-        html += buildShelf('All', all.slice(0, 48), mediaType);
+        var leftover = all.filter(function (v) { return !shown[v.id]; });
+        if (leftover.length > 0) { html += buildShelf('Other', leftover.slice(0, 300), mediaType); rowCount++; }
+      } else if (all.length > 0) {
+        html += buildGrid(flatLabel, all.slice(0, 600), mediaType);
+        rowCount++;
       }
+      if (rowCount === 0 && all.length > 0) html += buildGrid('All', all.slice(0, 600), mediaType);
       html += '</div>';
       el.innerHTML = html;
       setupHeroCycle(heroPool);
@@ -535,7 +560,7 @@
     }
   }
 
-  /* ── Genre view — all media matching one genre ───────────────── */
+  /* ── Genre view - all media matching one genre ───────────────── */
   async function renderGenreView(genre, el) {
     if (!el) el = document.getElementById('main-content');
     if (!el) return;
@@ -629,7 +654,7 @@
 
       var total   = movies.length + tvShows.length + docs.length + anime.length + mvs.length;
 
-      /* Hero: balanced mix of movies, TV, and docs — no music videos, up to 30 */
+      /* Hero: balanced mix of movies, TV, and docs - no music videos, up to 30 */
       var heroPool = _shuffleArr(
         _shuffleArr(movies.filter(function (v) { return v.backdropPath; })).slice(0, 10)
           .concat(_shuffleArr(tvShows.filter(function (v) { return v.backdropPath; })).slice(0, 10))
@@ -703,7 +728,7 @@
   }
 
   function _heroVidFallback() {
-    /* Revert to backdrop — called on error or explicit stop */
+    /* Revert to backdrop - called on error or explicit stop */
     var vid = document.getElementById('nf-hero-vid');
     if (vid) {
       vid.style.opacity = '0';
@@ -733,7 +758,7 @@
     var type = v._nfMediaType === 'mv' ? 'musicvideo' : 'video';
     var id   = v.id;
 
-    /* Attach error handler before setting src — covers 404 and mid-play failures */
+    /* Attach error handler before setting src - covers 404 and mid-play failures */
     vid.onerror = _heroVidFallback;
 
     vid.loop  = true;
@@ -753,7 +778,7 @@
           muteBtn.style.display = '';
         }
       }).catch(function () {
-        /* play() rejected: autoplay policy, 404, or cancelled — show backdrop */
+        /* play() rejected: autoplay policy, 404, or cancelled - show backdrop */
         _heroVidFallback();
       });
     }
@@ -783,7 +808,7 @@
 
     return (
       '<div class="nf-hero" id="nf-hero"' + (bg ? ' style="background-image:url(' + bg + ')"' : '') + '>' +
-        /* Video preview overlay — opacity:0 until a preview plays; pointer-events:none
+        /* Video preview overlay - opacity:0 until a preview plays; pointer-events:none
            ensures the transparent element never blocks clicks on the backdrop/content */
         '<video id="nf-hero-vid" muted playsinline preload="none" ' +
           'style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;' +
@@ -847,6 +872,21 @@
     );
   }
 
+  /* Flat grid (used by the "All" view) - wraps cards onto multiple lines instead of a
+     single horizontal-scroll shelf, so a full library is browsable by scrolling down. */
+  function buildGrid(title, videos, mediaType) {
+    if (!videos || videos.length === 0) return '';
+    var cards = '';
+    for (var i = 0; i < videos.length; i++) { cards += buildCard(videos[i], mediaType); }
+    return (
+      '<div class="nf-shelf">' +
+        '<div class="nf-shelf-header"><span class="nf-shelf-title">' + esc(title) + '</span>' +
+          '<span class="nf-shelf-count">' + videos.length + '</span></div>' +
+        '<div class="nf-grid">' + cards + '</div>' +
+      '</div>'
+    );
+  }
+
   window._nfScrollShelf = function (btn, dir) {
     var track = btn.parentElement;
     var scr   = track && track.querySelector('.nf-shelf-scroll');
@@ -895,12 +935,17 @@
           : '';
     }
     v._nfMediaType = mediaType;
-    _cardData[id]  = v;
+    /* Music videos and regular videos have SEPARATE id spaces (musicvideos.db
+       vs videos.db), so a bare-id key collides - e.g. movie #5 and music-video
+       #5 overwrite each other, and the shelf built last wins. Key by type. */
+    var isMv       = (mediaType === 'mv');
+    var _key       = (isMv ? 'mv' : 'v') + id;
+    _cardData[_key] = v;
 
     var badge = isRecentlyAdded(v) ? '<div class="nf-badge-new">Recently Added</div>' : '';
 
     return (
-      '<div class="nf-card" data-nf-id="' + id + '">' +
+      '<div class="nf-card" data-nf-id="' + id + '" data-nf-mv="' + (isMv ? '1' : '0') + '">' +
         '<div class="nf-card-img">' +
           (img
             ? '<img src="' + esc(img) + '" loading="lazy" alt="" onerror="this.style.display=\'none\'">'
@@ -1084,13 +1129,14 @@
     var popup = document.getElementById('nf-popup');
     if (!popup) return;
     var id = parseInt(card.getAttribute('data-nf-id'), 10);
-    var v  = _cardData[id];
+    var _key = (card.getAttribute('data-nf-mv') === '1' ? 'mv' : 'v') + id;
+    var v  = _cardData[_key];
     if (!v) return;
 
     fillPopup(popup, v);
     popup.style.display = 'block';
 
-    /* Position after paint — Netflix style: popup image centred on the card */
+    /* Position after paint - Netflix style: popup image centred on the card */
     requestAnimationFrame(function () {
       var rect = card.getBoundingClientRect();
       var pw   = 400;
@@ -1169,7 +1215,7 @@
           '<button class="nf-popup-btn" onclick="' + dFn + '" title="Rate">' +
             '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>' +
           '</button>' +
-          /* Episodes & info — clean bold chevron, no inner circle */
+          /* Episodes & info - clean bold chevron, no inner circle */
           '<button class="nf-popup-btn nf-popup-btn-detail" onclick="' + dFn + '" title="Episodes &amp; info">' +
             '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:block"><polyline points="6 9 12 15 18 9"/></svg>' +
           '</button>' +
@@ -1193,7 +1239,7 @@
     clearTimeout(_popupTimer);
   }
 
-  /* Watchlist toggle — called from popup button inline onclick */
+  /* Watchlist toggle - called from popup button inline onclick */
   window._nfToggleWl = function (btn, videoId) {
     if (!App) return;
     btn.disabled = true;
@@ -1245,6 +1291,20 @@
       result[g].push(v);
     });
     return result;
+  }
+
+  /* All | Genres switcher for a media-type page (movies / TV / docs / anime). */
+  function buildViewToggle(mediaType, active) {
+    function btn(mode, label, ic) {
+      var on = active === mode;
+      return '<button onclick="App._nfSetView(\'' + mediaType + '\',\'' + mode + '\')" style="display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;' +
+        (on
+          ? 'background:var(--accent);color:#fff;border:1px solid var(--accent)'
+          : 'background:transparent;color:rgba(255,255,255,.72);border:1px solid rgba(255,255,255,.16)') +
+        '"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><use href="#icon-' + ic + '"/></svg>' + label + '</button>';
+    }
+    return '<div class="nf-view-toggle">' +
+      btn('all', 'All', 'grid') + btn('genre', 'Genres', 'layers') + '</div>';
   }
 
   /* ════════════════════════════════════════════════
@@ -1356,7 +1416,7 @@
   }
 
   /* ════════════════════════════════════════════════
-     11. BOOT — polling until App is ready
+     11. BOOT - polling until App is ready
   ════════════════════════════════════════════════ */
   buildNav();
   ensurePopup();

@@ -10,7 +10,7 @@
   var _heroCycleItems = [];
   var _heroCycleIdx   = 0;
 
-  /* Render-generation counter — incremented each time a new amazingRender* call
+  /* Render-generation counter - incremented each time a new amazingRender* call
      starts.  After the async fetch, each render checks if its generation is still
      current; if not (a newer render superseded it) it aborts without touching the
      DOM or calling setupHeroCycle.  This prevents the double-render that happens
@@ -49,7 +49,7 @@
     /* Right section
        SAFE: move existing children into a hidden holder so #sidebar-expand-btn
        and other elements app.js needs (bindSidebar, bindSearch, etc.) stay in
-       the DOM. Never use innerHTML='' — that destroys them before app.js binds. */
+       the DOM. Never use innerHTML='' - that destroys them before app.js binds. */
     var right = document.createElement('div');
     right.id = 'am-right';
 
@@ -71,7 +71,7 @@
       '<rect x="17" y="17" width="4" height="4" rx="0.8"/>' +
       '</svg>';
 
-    /* Panel appended to body with fixed positioning — avoids stacking/overflow clipping */
+    /* Panel appended to body with fixed positioning - avoids stacking/overflow clipping */
     var catsPanel = document.createElement('div');
     catsPanel.id = 'am-cats-panel';
     catsPanel.style.display = 'none';
@@ -167,7 +167,7 @@
   }
 
   /* ════════════════════════════════════════════════
-     2. CATEGORIES PANEL — Amazon Prime style
+     2. CATEGORIES PANEL - Amazon Prime style
         Left:  GENRES (top 10, 2-col, no Documentaries)
         Right: NAVIGATE (Settings + pages)
   ════════════════════════════════════════════════ */
@@ -191,7 +191,7 @@
     if (showAnime) navLinks.push({ label: 'Animes',       onclick: function () { amNav('anime');       } });
     navLinks.push({ label: 'Settings', onclick: function () { amNav('settings'); }, isSettings: true });
 
-    /* Shell — two-column layout */
+    /* Shell - two-column layout */
     panel.innerHTML =
       '<div class="am-cats-columns">' +
         '<div class="am-cats-col" id="am-cats-col-genres">' +
@@ -276,7 +276,7 @@
 
     listEl.innerHTML = html;
 
-    /* Bind clicks — use 'movie' as primary mediaType for genre navigation */
+    /* Bind clicks - use 'movie' as primary mediaType for genre navigation */
     listEl.querySelectorAll('.am-cats-genre-link').forEach(function (btn) {
       btn.onclick = function () {
         var genre = btn.getAttribute('data-genre');
@@ -327,17 +327,17 @@
   }
 
   function refreshDropdown(d) {
-    var isAdmin  = typeof App !== 'undefined' && App.userRole === 'admin';
     var username = typeof App !== 'undefined' ? (App.userDisplayName || App.userName || 'Account') : 'Account';
     var settingsIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
     var signoutIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>';
     d.innerHTML =
       '<div class="am-dropdown-user">' + esc(username) + '</div>' +
       '<div class="am-dropdown-divider"></div>' +
-      (isAdmin
-        ? '<div class="am-dropdown-item" id="am-dd-settings">' + settingsIcon + 'Settings</div>' +
-          '<div class="am-dropdown-divider"></div>'
-        : '') +
+      /* Shown to every role: non-admins get the restricted "My Account" page
+         (App.renderSettings branches on role). This template hides the sidebar, so
+         without this row a guest would have no route back to their own settings. */
+      '<div class="am-dropdown-item" id="am-dd-settings">' + settingsIcon + 'Settings</div>' +
+      '<div class="am-dropdown-divider"></div>' +
       '<div class="am-dropdown-item am-dd-danger" id="am-dd-signout">' + signoutIcon + 'Sign out</div>';
 
     var settingsBtn = document.getElementById('am-dd-settings');
@@ -397,15 +397,15 @@
     el.innerHTML = '<div class="am-loading">Loading…</div>';
     try {
       var [recentData, genreData] = await Promise.all([
-        App.api('videos?mediaType=' + encodeURIComponent(mediaType) + '&sort=recent&limit=300&grouped=true'),
+        App.api('videos?mediaType=' + encodeURIComponent(mediaType) + '&sort=recent&limit=600&grouped=true'),
         App.api('videos/genres?mediaType=' + encodeURIComponent(mediaType))
       ]);
-      if (_amRenderGen !== gen) return; /* superseded by a newer render — abort */
+      if (_amRenderGen !== gen) return; /* superseded by a newer render - abort */
 
       var allVideos = extractVideos(recentData);
       var genres    = extractGenres(genreData);
 
-      /* Hero — for docs/videos without TMDB metadata, fall back to FFmpeg thumbnails */
+      /* Hero - for docs/videos without TMDB metadata, fall back to FFmpeg thumbnails */
       var heroPool = allVideos.filter(function (v) { return v.backdropPath && v.posterPath; });
       if (!heroPool.length) heroPool = allVideos.filter(function (v) { return v.backdropPath; });
       if (!heroPool.length) heroPool = allVideos.filter(function (v) { return v.thumbnailPath; });
@@ -432,26 +432,44 @@
         }
       } else {
         var renderedRows = 0;
-        if (mediaType === 'documentary') {
-          /* Documentaries: skip genre sub-shelving (the genres API buckets them all
-             under "Documentary" but videos carry their own genre tags — only a few
-             match, leaving the rest invisible). Show one flat shelf instead. */
-          if (allVideos.length > 0) {
-            html += buildGenreRow('All Documentaries', allVideos.slice(0, 100), mediaType);
-            renderedRows++;
-          }
-        } else if (genres.length > 0) {
+        /* Per-media-type All / Genres switcher (remembered per type). Movies/TV default to
+           Genres (rich TMDB genres); Documentaries/Anime default to All (sparse genre data,
+           genre-only shelving would hide most of the library). Genre view adds an "Other"
+           catch-all so no title is ever lost. */
+        var defView = (mediaType === 'movie' || mediaType === 'tv') ? 'genre' : 'all';
+        var view = defView;
+        try { var st = localStorage.getItem('nexusm-am-view-' + mediaType); if (st === 'all' || st === 'genre') view = st; } catch (e) {}
+        App._amSetView = function (mt, mode) {
+          try { localStorage.setItem('nexusm-am-view-' + mt, mode); } catch (e) {}
+          amazingRender(mt, document.getElementById('main-content'));
+        };
+        html += buildViewToggle(mediaType, view);
+
+        var flatLabel = mediaType === 'anime' ? 'All Anime'
+                      : mediaType === 'documentary' ? 'All Documentaries'
+                      : mediaType === 'tv' ? 'All TV Shows'
+                      : 'All Movies';
+
+        if (view === 'genre' && genres.length > 0) {
           var byGenre = groupByGenre(allVideos);
+          var shown = {};
           genres.forEach(function (g) {
-            var vids = byGenre[g] || [];
+            var vids = (byGenre[g] || []).slice(0, 24);
             if (vids.length < 1) return;
-            html += buildGenreRow(g, vids.slice(0, 24), mediaType);
+            vids.forEach(function (v) { shown[v.id] = true; });
+            html += buildGenreRow(g, vids, mediaType);
             renderedRows++;
           });
+          var leftover = allVideos.filter(function (v) { return !shown[v.id]; });
+          if (leftover.length > 0) { html += buildGenreRow('Other', leftover.slice(0, 300), mediaType); renderedRows++; }
+        } else if (allVideos.length > 0) {
+          html += buildGrid(flatLabel, allVideos.slice(0, 600), mediaType);
+          renderedRows++;
         }
+
         if (renderedRows === 0) {
           if (allVideos.length > 0) {
-            html += buildGenreRow('All', allVideos.slice(0, 48), mediaType);
+            html += buildGrid('All', allVideos.slice(0, 600), mediaType);
           } else {
             html += '<div class="am-empty">No content found in your library.</div>';
           }
@@ -496,18 +514,21 @@
       var requests = [
         App.api('videos?mediaType=movie&sort=recent&limit=200&grouped=true'),
         App.api('videos?mediaType=tv&sort=recent&limit=150&grouped=true'),
-        App.api('videos/continue-watching').catch(function () { return []; })
+        App.api('videos/continue-watching').catch(function () { return []; }),
+        App.api('videos/next-up').catch(function () { return []; })
       ];
+      var animeIdx = requests.length;
       if (showAnime) {
         requests.push(App.api('videos?mediaType=anime&sort=recent&limit=80&grouped=true'));
       }
 
       var results = await Promise.all(requests);
-      if (_amRenderGen !== gen) return; /* superseded by a newer render — abort */
+      if (_amRenderGen !== gen) return; /* superseded by a newer render - abort */
       var movies  = extractVideos(results[0]);
       var tvShows = extractVideos(results[1]);
       var cw      = Array.isArray(results[2]) ? results[2] : [];
-      var anime   = showAnime ? extractVideos(results[3]) : [];
+      var nextUp  = Array.isArray(results[3]) ? results[3] : [];
+      var anime   = showAnime ? extractVideos(results[animeIdx]) : [];
 
       /* Filter CW to only video types we show */
       cw = cw.filter(function (v) {
@@ -525,6 +546,7 @@
       html += '<div class="am-genre-rows">';
 
       if (cw.length  > 0) html += buildGenreRow('Continue Watching', cw.slice(0, 20),  'mixed');
+      if (nextUp.length > 0) html += buildGenreRow((App.t ? App.t('section.nextUp', 'Next Up') : 'Next Up'), nextUp.slice(0, 20), 'mixed');
       if (movies.length  > 0) html += buildGenreRow('Recently Added Movies',   movies.slice(0, 24),  'movie');
       if (tvShows.length > 0) html += buildGenreRow('Recently Added TV Shows', tvShows.slice(0, 24), 'tv');
       if (anime.length   > 0) html += buildGenreRow('Recently Added Anime',    anime.slice(0, 24),   'anime');
@@ -603,6 +625,21 @@
     '</div>';
   }
 
+  /* Flat grid (used by the "All" view) - wraps cards onto multiple lines instead of
+     a single horizontal-scroll row, so a full library is browsable by scrolling down. */
+  function buildGrid(title, videos, mediaType) {
+    if (!videos || videos.length === 0) return '';
+    var cards = '';
+    for (var i = 0; i < videos.length; i++) { cards += buildCard(videos[i]); }
+    return '<div class="am-row">' +
+      '<div class="am-row-header">' +
+        '<span class="am-row-title">' + esc(title) + '</span>' +
+        '<span class="am-row-count">' + videos.length + '</span>' +
+      '</div>' +
+      '<div class="am-grid">' + cards + '</div>' +
+    '</div>';
+  }
+
   function buildCard(v) {
     /* Poster art (portrait) → backdrop → FFmpeg thumbnail */
     var img = v.posterPath    ? '/videometa/'  + v.posterPath
@@ -640,7 +677,7 @@
     /* Fade */
     hero.style.opacity = '.5';
     setTimeout(function () { if (document.getElementById('am-hero')) hero.style.opacity = '1'; }, 220);
-    /* Background — fall back to FFmpeg thumbnail for docs without TMDB art */
+    /* Background - fall back to FFmpeg thumbnail for docs without TMDB art */
     var bgSrc = v.backdropPath  ? '/videometa/'  + v.backdropPath
               : v.thumbnailPath ? '/videothumb/' + v.thumbnailPath : '';
     if (bgSrc) hero.style.backgroundImage = 'url(' + bgSrc + ')';
@@ -744,7 +781,7 @@
   window._amWatchlist = function (btn, videoId) {
     if (!App || typeof App.toggleVideoWatchlist !== 'function') return;
     btn.disabled = true;
-    /* Optimistic state toggle — reflect immediately, then confirm from server */
+    /* Optimistic state toggle - reflect immediately, then confirm from server */
     var wasIn = App._watchlistIds && App._watchlistIds.has(videoId);
 
     /* Direct API call so we can control feedback ourselves */
@@ -800,7 +837,7 @@
 
   function extractGenres(data) {
     if (!data) return [];
-    /* API returns [{name, count}] — extract the name strings */
+    /* API returns [{name, count}] - extract the name strings */
     var arr = data.genres || (Array.isArray(data) ? data : []);
     return arr.map(function (g) { return typeof g === 'string' ? g : g.name || ''; })
               .filter(function (g) { return !!g; });
@@ -817,6 +854,20 @@
       result[g].push(v);
     });
     return result;
+  }
+
+  /* All | Genres switcher for a media-type page (movies / TV / docs / anime). */
+  function buildViewToggle(mediaType, active) {
+    function btn(mode, label, ic) {
+      var on = active === mode;
+      return '<button onclick="App._amSetView(\'' + mediaType + '\',\'' + mode + '\')" style="display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;' +
+        (on
+          ? 'background:var(--accent);color:#fff;border:1px solid var(--accent)'
+          : 'background:transparent;color:rgba(255,255,255,.75);border:1px solid rgba(255,255,255,.18)') +
+        '">' + icon(ic, 15) + label + '</button>';
+    }
+    return '<div style="display:flex;gap:8px;align-items:center;margin:2px 0 20px">' +
+      btn('all', 'All', 'grid') + btn('genre', 'Genres', 'layers') + '</div>';
   }
 
   function esc(str) {
@@ -859,9 +910,9 @@
   }
 
   /* ════════════════════════════════════════════════
-     10. BOOT — two-phase patch
+     10. BOOT - two-phase patch
          Phase 1: patch render methods the moment App
-                  object exists — before the app calls
+                  object exists - before the app calls
                   navigate('home') for the first time.
          Phase 2: build tabs / account / patch navigate
                   once _initCfg is available.
@@ -873,7 +924,7 @@
   var _phase2Done  = false;
 
   /* Guard #main-content against innerHTML overwrites by the original renderHome.
-     The original renderHome() was already called before our script loaded — it is
+     The original renderHome() was already called before our script loaded - it is
      in-flight and will eventually do el.innerHTML = originalHtml, overwriting our
      Amazing layout.  We intercept innerHTML on the element instance and reject any
      content that doesn't belong to our Amazing layout while we own the page. */
@@ -889,7 +940,7 @@
       if (desc && desc.set) break;
       proto = Object.getPrototypeOf(proto);
     }
-    if (!desc || !desc.set) return; /* can't intercept — skip guard */
+    if (!desc || !desc.set) return; /* can't intercept - skip guard */
 
     var nativeGet = desc.get;
     var nativeSet = desc.set;
@@ -1029,7 +1080,7 @@
       App.mvTotal = data.total;
       var totalPages = Math.ceil(data.total / App.mvPerPage);
 
-      /* Sort chips — no stats bar, no artist chips */
+      /* Sort chips - no stats bar, no artist chips */
       var sortMap = [
         ['recent',   App.t('sort.recent')],
         ['title',    App.t('sort.title')],
@@ -1110,10 +1161,10 @@
   }
 
   var _iv = setInterval(function () {
-    /* Phase 1 — as early as possible */
+    /* Phase 1 - as early as possible */
     if (!_phase1Done) phase1Patch();
 
-    /* Phase 2 — needs _initCfg for tabs, account, navigate patch */
+    /* Phase 2 - needs _initCfg for tabs, account, navigate patch */
     if (!_phase2Done
         && typeof App !== 'undefined'
         && typeof App.navigate === 'function'
