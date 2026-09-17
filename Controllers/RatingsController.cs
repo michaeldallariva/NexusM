@@ -8,7 +8,7 @@ using NexusM.Models;
 namespace NexusM.Controllers;
 
 /// <summary>
-/// Community rating system — one vote per user per media item, shared across all users.
+/// Community rating system - one vote per user per media item, shared across all users.
 /// </summary>
 [ApiController]
 [Route("api/ratings")]
