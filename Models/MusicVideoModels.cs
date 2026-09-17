@@ -60,12 +60,27 @@ public class MusicVideo
     /// <summary>Number of audio channels (2=stereo, 6=5.1, etc.)</summary>
     public int AudioChannels { get; set; } = 2;
 
+    /// <summary>Audio codec, e.g. aac, eac3, ac3</summary>
+    public string AudioCodec { get; set; } = "";
+
     public bool IsFavourite { get; set; }
 
     public DateTime DateAdded { get; set; } = DateTime.UtcNow;
     public DateTime LastModified { get; set; }
     public DateTime? LastPlayed { get; set; }
     public int PlayCount { get; set; }
+}
+
+/// <summary>
+/// Stores Deezer-fetched portrait image paths for MV artists that are not in the music library.
+/// ArtistName is the primary key; FetchAttempted prevents repeated API calls for artists not found.
+/// </summary>
+public class MvArtistImage
+{
+    [Key]
+    public string ArtistName { get; set; } = "";
+    public string? ImagePath { get; set; }
+    public bool FetchAttempted { get; set; }
 }
 
 /// <summary>

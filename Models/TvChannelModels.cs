@@ -30,6 +30,9 @@ public class TvChannel
     /// <summary>Resolution info extracted from channel name, e.g. "1080p", "720p"</summary>
     public string Resolution { get; set; } = "";
 
+    /// <summary>Language from M3U group-title (when importing index.language.m3u)</summary>
+    public string Language { get; set; } = "";
+
     /// <summary>Source playlist filename this channel was imported from</summary>
     public string SourcePlaylist { get; set; } = "";
 

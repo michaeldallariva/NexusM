@@ -49,7 +49,7 @@ public class PodcastEpisode
     public int DurationSeconds { get; set; } = 0;
     public DateTime? PublishDate { get; set; }
 
-    /// <summary>RSS item GUID — used for deduplication.</summary>
+    /// <summary>RSS item GUID - used for deduplication.</summary>
     public string Guid { get; set; } = "";
 
     public bool IsPlayed { get; set; } = false;

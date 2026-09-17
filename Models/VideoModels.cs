@@ -19,6 +19,13 @@ public class Video
     public string Title { get; set; } = "";
     public int? Year { get; set; }
 
+    /// <summary>
+    /// Edition / cut label distinguishing multiple owned copies of the same movie
+    /// (e.g. "Extended Edition", "Theatrical Cut", "Director's Cut"). Auto-detected from
+    /// the filename during scan and freely editable. Null/empty = unspecified.
+    /// </summary>
+    public string? Edition { get; set; }
+
     /// <summary>Duration in seconds</summary>
     public double Duration { get; set; }
 
@@ -35,6 +42,9 @@ public class Video
 
     /// <summary>Video codec, e.g. h264, hevc</summary>
     public string Codec { get; set; } = "";
+
+    /// <summary>HDR format detected by ffprobe: "HDR10", "HDR10+", "Dolby Vision", "HLG", or empty (SDR)</summary>
+    public string HdrFormat { get; set; } = "";
 
     /// <summary>Video bitrate in kbps</summary>
     public int VideoBitrate { get; set; }
@@ -66,8 +76,34 @@ public class Video
     /// <summary>Content/age rating, e.g. PG-13, R, TV-MA</summary>
     public string ContentRating { get; set; } = "";
 
+    public string? ImdbRating { get; set; }
+    public string? RottenTomatoesRating { get; set; }
+    public string? MetacriticRating { get; set; }
+
     /// <summary>"movie" or "tv"</summary>
     public string MediaType { get; set; } = "movie";
+
+    /// <summary>
+    /// Discriminator for special video items. "" = an ordinary single-file video;
+    /// "dvd" = a preserved DVD-Video disc (an .iso image or a VIDEO_TS folder) kept intact
+    /// so its original interactive menus play through libdvdnav in an external player (MPV).
+    /// A DVD item keeps MediaType = "movie" so it lives under Movies, filterable via a
+    /// "DVDs" tile. See <see cref="DvdDevicePath"/>.
+    /// </summary>
+    public string VideoKind { get; set; } = "";
+
+    /// <summary>
+    /// For a DVD item (<see cref="VideoKind"/> == "dvd"), the on-disk disc source MPV opens
+    /// with `dvd:// --dvd-device=&lt;path&gt;`: either the .iso image or the folder that
+    /// contains VIDEO_TS. Menu navigation needs this real path (libdvdnav cannot navigate an
+    /// HTTP byte stream), so the MPV client must reach it locally or via a mounted share.
+    /// Null/empty for ordinary videos. Distinct from <see cref="FilePath"/>, which for a DVD
+    /// points at the representative VIDEO_TS entry used for identity/dedupe.
+    /// </summary>
+    public string? DvdDevicePath { get; set; }
+
+    /// <summary>First-level subfolder name under the configured video root (e.g. "Kids Movies", "Kids Shows")</summary>
+    public string CustomCategory { get; set; } = "";
 
     /// <summary>Series/show name for TV episodes</summary>
     public string SeriesName { get; set; } = "";
@@ -86,6 +122,39 @@ public class Video
     public string? TvMazeId { get; set; }
     public string? ImdbId { get; set; }
 
+    /// <summary>TheTVDB id - used for fanart.tv TV lookups; resolved on demand from TMDB/TVMaze and cached here.</summary>
+    public string? TvdbId { get; set; }
+
+    /// <summary>MyAnimeList ID (anime only, populated by AnimeMetadataService via Jikan)</summary>
+    public string? MalId { get; set; }
+
+    /// <summary>
+    /// Per-video TMDB scrape-language override (e.g. "fr-FR"), set from the language
+    /// selector on the detail page. Null = follow the server-wide
+    /// [Metadata] ScrapeLanguage setting.
+    /// </summary>
+    public string? MetadataLanguage { get; set; }
+
+    /// <summary>
+    /// Language this video's text was LAST actually scraped in. Distinct from
+    /// MetadataLanguage (the request): it records the outcome, so a re-fetch can tell
+    /// whether the language really changed and text should be overwritten.
+    /// </summary>
+    public string? MetadataLanguageApplied { get; set; }
+
+    // ── TMDB Collection (belongs_to_collection) ──
+    /// <summary>TMDB collection ID, e.g. 86311 for "The Avengers Collection"</summary>
+    public int? CollectionId { get; set; }
+
+    /// <summary>TMDB collection name, e.g. "The Avengers Collection"</summary>
+    public string? CollectionName { get; set; }
+
+    /// <summary>Collection poster filename in assets/videometa/</summary>
+    public string? CollectionPosterPath { get; set; }
+
+    /// <summary>Total number of movies in the TMDB collection (used to determine if collection is complete locally)</summary>
+    public int? CollectionTotalCount { get; set; }
+
     /// <summary>Poster image filename in assets/videometa/</summary>
     public string? PosterPath { get; set; }
 
@@ -94,6 +163,15 @@ public class Video
 
     /// <summary>JSON array of cast: [{name, character, photo}, ...]</summary>
     public string? CastJson { get; set; }
+
+    /// <summary>JSON array of directors: [{name, photo}, ...]</summary>
+    public string? DirectorJson { get; set; }
+
+    /// <summary>JSON array of writers: [{name, photo}, ...]</summary>
+    public string? WriterJson { get; set; }
+
+    /// <summary>JSON array of production studios: [{name, logo}, ...]</summary>
+    public string? StudiosJson { get; set; }
 
     /// <summary>Whether external metadata has been fetched for this video</summary>
     public bool MetadataFetched { get; set; }
@@ -109,10 +187,51 @@ public class Video
 
     public bool IsFavourite { get; set; }
 
+    /// <summary>Explicitly marked safe for child users regardless of ContentRating.</summary>
+    public bool SafeForChildren { get; set; } = false;
+
+    /// <summary>Intro start time in seconds, detected via chapter tags (null = no intro detected).</summary>
+    public double? IntroStart { get; set; }
+
+    /// <summary>Intro end time in seconds, detected via chapter tags (null = no intro detected).</summary>
+    public double? IntroEnd { get; set; }
+
+    /// <summary>JSON array of embedded chapters [{title,start,end}] from ffprobe -show_chapters.
+    /// null = not yet probed; "[]" = probed, no chapters found.</summary>
+    public string? ChaptersJson { get; set; }
+
     public DateTime DateAdded { get; set; } = DateTime.UtcNow;
     public DateTime LastModified { get; set; }
     public DateTime? LastPlayed { get; set; }
     public int PlayCount { get; set; }
+
+    // ── Deep Analysis (populated by MediaAnalysisService via ffprobe) ──
+
+    /// <summary>Whether background deep ffprobe analysis has been completed for this file.</summary>
+    public bool DeepAnalysisDone { get; set; }
+
+    /// <summary>JSON array of all audio tracks: [{codec,language,channels,bitrateKbps}]</summary>
+    public string? AudioTracks { get; set; }
+
+    /// <summary>JSON array of all subtitle tracks: [{codec,language,forced}]</summary>
+    public string? SubtitleTracks { get; set; }
+
+    /// <summary>Video codec profile, e.g. "High", "Main 10", "Baseline"</summary>
+    public string? VideoProfile { get; set; }
+
+    /// <summary>Color primaries / space, e.g. "bt709", "bt2020nc"</summary>
+    public string? ColorSpace { get; set; }
+
+    /// <summary>Total container bitrate in kbps (from ffprobe format.bit_rate)</summary>
+    public int? TotalBitrateKbps { get; set; }
+}
+
+/// <summary>A single embedded video chapter (start/end in seconds).</summary>
+public class VideoChapter
+{
+    public string Title { get; set; } = "";
+    public double Start { get; set; }
+    public double End { get; set; }
 }
 
 /// <summary>

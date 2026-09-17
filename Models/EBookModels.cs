@@ -43,6 +43,12 @@ public class EBook
     public string? Description { get; set; }
     public string? Subject { get; set; }
 
+    /// <summary>Collection / series name (e.g. from EPUB "calibre:series" or manual edit).</summary>
+    public string? Series { get; set; }
+
+    /// <summary>Position within the collection (e.g. "calibre:series_index"); null if unknown.</summary>
+    public double? SeriesIndex { get; set; }
+
     /// <summary>Cover image filename stored in assets/ebookcovers/ (e.g., epub_cover_5.jpg)</summary>
     public string? CoverImage { get; set; }
 }
