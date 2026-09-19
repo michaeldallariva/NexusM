@@ -17,6 +17,7 @@ public class PinSecurityService
     private const int HashSizeBytes = 32;
     private const int MaxFailedAttempts = 5;
     private const int LockoutMinutes = 15;
+    private const int MaxLockoutMinutes = 24 * 60;
     public const int LockoutMinutesPublic = LockoutMinutes;
 
     private readonly IServiceProvider _serviceProvider;
@@ -170,9 +171,12 @@ public class PinSecurityService
 
         if (attempt.FailedAttempts >= MaxFailedAttempts)
         {
-            attempt.LockoutUntil = DateTime.UtcNow.AddMinutes(LockoutMinutes);
+            var lockoutMinutes = Math.Min(LockoutMinutes * Math.Pow(2, attempt.LockoutCount), MaxLockoutMinutes);
+            attempt.LockoutUntil = DateTime.UtcNow.AddMinutes(lockoutMinutes);
+            attempt.LockoutCount++;
+            attempt.FailedAttempts = 0;
             _logger.LogWarning("Account locked: {Username} from {IP} ({Attempts} failed attempts, locked for {Minutes} minutes)",
-                username, clientIP, attempt.FailedAttempts, LockoutMinutes);
+                username, clientIP, MaxFailedAttempts, lockoutMinutes);
             return true;
         }
 
@@ -192,5 +196,6 @@ public class PinSecurityService
     {
         public int FailedAttempts { get; set; }
         public DateTime? LockoutUntil { get; set; }
+        public int LockoutCount { get; set; }
     }
 }
